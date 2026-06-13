@@ -1,0 +1,2 @@
+module Ligare.Error where
+
