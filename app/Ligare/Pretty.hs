@@ -33,3 +33,8 @@ pretty (Let name val body mconstr) =
    in "let " ++ name ++ constrStr ++ " = " ++ pretty val ++ " in " ++ pretty body
 pretty (IfThenElse cond tbranch fbranch) =
   "if " ++ pretty cond ++ " then " ++ pretty tbranch ++ " else " ++ pretty fbranch
+pretty (Refine name parent p) =
+  "constraint " ++ name ++ " = " ++ pretty parent ++ " (x => " ++ pretty p ++ ")"
+pretty (Annot t c) = "(" ++ pretty t ++ " : " ++ pretty c ++ ")"
+pretty (ByProof t proof) = "(" ++ pretty t ++ " by " ++ pretty proof ++ ")"
+pretty AutoProof = "auto"

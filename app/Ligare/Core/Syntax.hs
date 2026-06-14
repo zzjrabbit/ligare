@@ -22,6 +22,10 @@ data Term
   | Arrow Term Term
   | Let Name Term Term (Maybe Term)
   | IfThenElse Term Term Term
+  | Refine Name Term Term
+  | Annot Term Term
+  | ByProof Term Term
+  | AutoProof
   deriving (Eq, Show)
 
 data PrimOp

@@ -26,6 +26,10 @@ eval (IfThenElse cond tbranch fbranch) =
     LitBool True -> eval tbranch
     LitBool False -> eval fbranch
     cond' -> IfThenElse cond' tbranch fbranch
+eval (Annot t _c) = eval t
+eval (ByProof t _proof) = eval t
+eval (Refine name parent p) = Refine name (eval parent) (eval p)
+eval AutoProof = AutoProof
 eval other = other
 
 beta :: Term -> Term -> Term
@@ -33,7 +37,7 @@ beta (Lam body) arg = shift (-1) 0 (subst (shift 1 0 arg) 0 body)
 beta _ _ = error "beta: first argument must be Lam"
 
 subst :: Term -> Int -> Term -> Term
-subst s i t = go 0 t
+subst s i t0 = go 0 t0
   where
     go c (Var j)
       | j == i + c = shift c 0 s
@@ -51,6 +55,11 @@ subst s i t = go 0 t
       Let name (go c val) (go (c + 1) body) (fmap (go c) mconstr)
     go c (IfThenElse cond tbranch fbranch) =
       IfThenElse (go c cond) (go c tbranch) (go c fbranch)
+    go c (Refine name parent p) =
+      Refine name (go c parent) (go c p)
+    go c (Annot term constr) = Annot (go c term) (go c constr)
+    go c (ByProof term proof) = ByProof (go c term) (go c proof)
+    go _c AutoProof = AutoProof
 
 shift :: Int -> Int -> Term -> Term
 shift d c (Var i)
@@ -69,6 +78,11 @@ shift d c (Let name val body mconstr) =
   Let name (shift d c val) (shift d (c + 1) body) (fmap (shift d c) mconstr)
 shift d c (IfThenElse cond tbranch fbranch) =
   IfThenElse (shift d c cond) (shift d c tbranch) (shift d c fbranch)
+shift d c (Refine name parent p) =
+  Refine name (shift d c parent) (shift d c p)
+shift d c (Annot term constr) = Annot (shift d c term) (shift d c constr)
+shift d c (ByProof term proof) = ByProof (shift d c term) (shift d c proof)
+shift _d _c AutoProof = AutoProof
 
 arith :: PrimOp -> Integer -> Integer -> Term
 arith Add = \a b -> LitInt (a + b)

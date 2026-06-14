@@ -26,7 +26,7 @@ integer :: Parser Integer
 integer = lexeme L.decimal
 
 keywords :: [String]
-keywords = ["let", "in", "if", "then", "else", "true", "false"]
+keywords = ["let", "in", "if", "then", "else", "true", "false", "by"]
 
 ident :: Parser String
 ident = lexeme $ do
@@ -78,8 +78,8 @@ parseLetExpr env = do
   body <- parseExpr (name : env)
   pure (Let name val body mconstr)
 
-parseTerm :: Env -> Parser Term
-parseTerm env =
+parseAtom :: Env -> Parser Term
+parseAtom env =
   choice
     [ try (LitInt <$> integer),
       try (LitBool <$> parseBool),
@@ -87,6 +87,27 @@ parseTerm env =
       parseLam env,
       parens (parseExpr env)
     ]
+
+parseTermWithSuffix :: Env -> Parser Term
+parseTermWithSuffix env = do
+  t <- parseAtom env
+  suffix t
+  where
+    suffix t =
+      (parseBySuffix t >>= suffix)
+        <|> (parseAnnotSuffix t >>= suffix)
+        <|> pure t
+    parseBySuffix t = do
+      _ <- try (keyword "by")
+      proof <- parseTerm env
+      pure (ByProof t proof)
+    parseAnnotSuffix t = do
+      _ <- optional sc >> symbol ":"
+      c <- parseConstraint
+      pure (Annot t c)
+
+parseTerm :: Env -> Parser Term
+parseTerm env = parseTermWithSuffix env
 
 parseVar :: Env -> Parser Int
 parseVar env = do
@@ -125,12 +146,12 @@ operators =
     [ InfixL (binary Add <$ symbol "+"),
       InfixL (binary Sub <$ symbol "-")
     ],
-    [ InfixN (binary Eq <$ symbol "=="),
+    [ InfixN (try (binary Eq <$ symbol "==")),
+      InfixN (try (binary Le <$ symbol "<=")),
+      InfixN (try (binary Ge <$ symbol ">=")),
+      InfixN (try (binary Neq <$ symbol "/=")),
       InfixN (binary Lt <$ symbol "<"),
-      InfixN (binary Gt <$ symbol ">"),
-      InfixN (binary Le <$ symbol "<="),
-      InfixN (binary Ge <$ symbol ">="),
-      InfixN (binary Neq <$ symbol "/=")
+      InfixN (binary Gt <$ symbol ">")
     ]
   ]
 
@@ -163,5 +184,25 @@ parseConstraintAtom =
     [ try (Builtin <$> string "int") <* notFollowedBy alphaNumChar,
       try (Builtin <$> string "bool") <* notFollowedBy alphaNumChar,
       Universe UData <$ string "data",
-      parens parseConstraint
+      parens parseConstraint,
+      Builtin <$> ident
     ]
+
+-- 精化约束解析: nat = data (x => x >= 0)
+parseRefineTop :: String -> Either String (Name, Term, Term)
+parseRefineTop input = case runParser (sc >> parseRefineDef) "" input of
+  Left e -> Left (errorBundlePretty e)
+  Right t -> Right t
+
+parseRefineDef :: Parser (Name, Term, Term)
+parseRefineDef = do
+  name <- ident
+  _ <- symbol "="
+  parent <- parseConstraintAtom
+  _ <- sc
+  _ <- symbol "("
+  _ <- ident
+  _ <- keyword "=>"
+  predicate <- parseExpr ["x"]
+  _ <- symbol ")"
+  pure (name, parent, predicate)

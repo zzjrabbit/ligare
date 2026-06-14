@@ -1,0 +1,44 @@
+=== 1. 基础回归 ===
+> 1 + 2
+> if true then 10 else 20
+> if false then 1 else 0
+> let x = 5 in x + 3
+> \x. x + 1
+> :check \x. (if x then 0 else 1) : bool -> int
+
+=== 2. 精化约束定义 ===
+> :refine nat = int (x => x >= 0)
+> :refine pos = int (x => x > 0)
+
+=== 3. 常量自动证明（应通过） ===
+> :check 5 : nat
+> :check 3 : pos
+> :check 0 : nat
+
+=== 4. 常量自动证明（应失败） ===
+> :check (-1) : nat
+> :check 0 : pos
+
+=== 5. Annot 语法 ===
+> (5 : nat)
+> (3 : pos)
+
+=== 6. by 语法 ===
+> (5 : nat by true)
+> (3 : pos by true)
+
+=== 7. 未定义的约束（应失败） ===
+> :check 5 : foo
+
+=== 8. if + 精化 ===
+> :refine nat = int (x => x >= 0)
+> :check (if true then 5 else 0) : nat
+> (if true then (5 : nat) else 0)
+
+=== 9. let + 精化 ===
+> let y : nat = 3 in y
+> let y : nat = 3 in y
+> :check (let y : nat = 3 in y) : nat
+
+=== 10. 函数 + 精化 ===
+> :check \x. x : int -> int
