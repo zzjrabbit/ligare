@@ -2,14 +2,17 @@ module Ligare.Checker.Context where
 
 import Ligare.Core.Syntax
 
-type Context = [(String, Term)]
+type Context = [Term]
 
 emptyCtx :: Context
 emptyCtx = []
 
-extend :: String -> Term -> Context -> Context
-extend x t ctx = (x, t) : ctx
+extendCtx :: Term -> Context -> Context
+extendCtx = (:)
 
-lookupVar :: String -> Context -> Maybe Term
-lookupVar = lookup
+lookupCtx :: Int -> Context -> Maybe Term
+lookupCtx i ctx
+  | i < 0 = Nothing
+  | i < length ctx = Just (ctx !! i)
+  | otherwise = Nothing
 

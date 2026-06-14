@@ -14,6 +14,7 @@
           cabal-install
           haskell-language-server
           megaparsec
+          parser-combinators
         ]);
       in
       {
