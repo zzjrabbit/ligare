@@ -1,7 +1,7 @@
 module Ligare.Checker.Checker where
 
 import Ligare.Checker.Context
-import Ligare.Core.Eval (eval, subst)
+import Ligare.Core.Eval (eval)
 import Ligare.Core.Syntax
 
 check :: ConstraintTable -> Context -> Term -> Term -> Either String ()
@@ -10,13 +10,15 @@ check table ctx term constraint = case term of
     expected <- case lookupCtx i ctx of
       Just t -> pure t
       Nothing -> Left ("Unbound variable index: " ++ show i)
-    if expected == eval constraint
+    expected' <- eval expected
+    constraint' <- eval constraint
+    if expected' == constraint' || isRefinementOf table expected' constraint'
       then pure ()
-      else Left ("Constraint mismatch for variable: expected " ++ show expected ++ ", but got " ++ show (eval constraint))
+      else Left ("Constraint mismatch for variable: expected " ++ show expected' ++ ", but got " ++ show constraint')
   Annot t c -> do
     check table ctx t c
     check table ctx t constraint
-  ByProof t _proof -> do
+  ByProof t _proof ->
     check table ctx t constraint
   Refine name parent p -> do
     let table' = addRefine name parent p table
@@ -35,7 +37,7 @@ check table ctx term constraint = case term of
       Nothing -> pure ()
     check table (extendCtx name constraint ctx) body constraint
   _ -> do
-    let normConstraint = eval constraint
+    normConstraint <- eval constraint
     case normConstraint of
       Builtin "int" -> checkInt term
       Builtin "bool" -> checkBool term
@@ -47,22 +49,38 @@ check table ctx term constraint = case term of
           proveAuto ctx term pred'
         Nothing -> Left $ "Cannot use " ++ show normConstraint ++ " as a constraint"
   where
-    checkInt t = case eval t of
-      LitInt _ -> pure ()
-      _ -> Left "Expected an integer"
-    checkBool t = case eval t of
-      LitBool _ -> pure ()
-      _ -> Left "Expected a boolean"
-    checkArrow table' ctx' t a b = case eval t of
-      Lam body -> do
-        let ctx'' = extendCtxTerm a ctx'
-        check table' ctx'' body b
-      _ -> Left "Expected a lambda"
+    checkInt t = do
+      t' <- eval t
+      case t' of
+        LitInt _ -> pure ()
+        _ -> Left "Expected an integer"
+    checkBool t = do
+      t' <- eval t
+      case t' of
+        LitBool _ -> pure ()
+        _ -> Left "Expected a boolean"
+    checkArrow table' ctx' t a b = do
+      t' <- eval t
+      case t' of
+        Lam body -> do
+          let ctx'' = extendCtxTerm a ctx'
+          check table' ctx'' body b
+        _ -> Left "Expected a lambda"
 
 constraintName :: Term -> Name
 constraintName (Builtin n) = n
 constraintName (Refine n _ _) = n
 constraintName _ = "?"
+
+isRefinementOf :: ConstraintTable -> Term -> Term -> Bool
+isRefinementOf _ t1 t2 | t1 == t2 = True
+isRefinementOf table (Builtin n) target =
+  case lookupRefine n table of
+    Just (parent, _) -> isRefinementOf table parent target
+    Nothing -> False
+isRefinementOf table (Refine n _ _) target =
+  isRefinementOf table (Builtin n) target
+isRefinementOf _ _ _ = False
 
 notTerm :: Term -> Term
 notTerm t = App (Lam (IfThenElse (Var 0) (LitBool False) (LitBool True))) t
@@ -70,43 +88,54 @@ notTerm t = App (Lam (IfThenElse (Var 0) (LitBool False) (LitBool True))) t
 -- ── 半自动证明 ──
 
 proveAuto :: Context -> Term -> Term -> Either String ()
-proveAuto ctx subject pred' =
-  let instantiated = subst subject 0 pred'
-   in case eval instantiated of
-        LitBool True -> pure ()
-        LitBool False -> Left ("Predicate does not hold for " ++ show subject)
-        _ -> case searchCtx ctx pred' of
-          Just _ -> pure ()
-          Nothing -> trySimpleDerive pred' ctx
+proveAuto ctx subject pred' = do
+  let instantiated = substRefParam subject pred'
+  instantiated' <- eval instantiated
+  case instantiated' of
+    LitBool True -> pure ()
+    LitBool False -> Left ("Predicate does not hold for " ++ show subject)
+    _ -> case searchCtx ctx pred' of
+      Just _ -> pure ()
+      Nothing -> trySimpleDerive pred' ctx
   where
+    substRefParam :: Term -> Term -> Term
+    substRefParam _ RefParam = subject
+    substRefParam subj (App f a) = App (substRefParam subj f) (substRefParam subj a)
+    substRefParam subj (Lam body) = Lam (substRefParam subj body)
+    substRefParam subj (Let n v b mc) = Let n (substRefParam subj v) (substRefParam subj b) (fmap (substRefParam subj) mc)
+    substRefParam subj (IfThenElse c t f) = IfThenElse (substRefParam subj c) (substRefParam subj t) (substRefParam subj f)
+    substRefParam subj (Annot t c) = Annot (substRefParam subj t) (substRefParam subj c)
+    substRefParam subj (ByProof t p) = ByProof (substRefParam subj t) (substRefParam subj p)
+    substRefParam subj (Refine n par p) = Refine n (substRefParam subj par) (substRefParam subj p)
+    substRefParam _ other = other
+
     searchCtx :: Context -> Term -> Maybe Term
     searchCtx [] _ = Nothing
     searchCtx (CtxEntry _ _ thms : rest) target =
-      case filter (\t -> eval (subst subject 0 t) == eval (subst subject 0 target)) thms of
+      case filter (\t -> evalEq t target) thms of
         (t : _) -> Just t
         [] -> searchCtx rest target
 
-trySimpleDerive :: Term -> Context -> Either String ()
-trySimpleDerive (App (App (PrimOp Neq) a) b) ctx = do
-  let gt = App (App (PrimOp Gt) a) b
-  case searchCtx' ctx gt of
-    Just _ -> pure ()
-    Nothing -> Left ("Cannot prove " ++ show (App (App (PrimOp Neq) a) b))
-  where
-    searchCtx' c t = case c of
-      [] -> Nothing
-      (CtxEntry _ _ thms : rest) ->
-        case filter (\th -> eval th == eval t) thms of
-          (th : _) -> Just th
-          [] -> searchCtx' rest t
-trySimpleDerive _pred' _ctx =
-  Left "Automatic proof failed: provide a manual proof with `by`"
+    evalEq t1 t2 =
+      case (eval (substRefParam subject t1), eval (substRefParam subject t2)) of
+        (Right v1, Right v2) -> v1 == v2
+        _ -> False
 
-proveWith :: ConstraintTable -> Context -> Term -> Term -> Term -> Either String ()
-proveWith _table _ctx _subject _goal (LitBool True) = pure ()
-proveWith table ctx subject goal (ByProof _ inner) =
-  proveWith table ctx subject goal inner
-proveWith _table ctx _subject goal AutoProof =
-  proveAuto ctx _subject goal
-proveWith _table _ctx _subject _goal _proof =
-  Left "Cannot use this term as a proof"
+trySimpleDerive :: Term -> Context -> Either String ()
+trySimpleDerive (App (App (PrimOp Neq) a) b) ctx =
+  let gt = App (App (PrimOp Gt) a) b
+   in case searchCtx' ctx gt of
+        Just _ -> pure ()
+        Nothing -> Left ("Cannot prove " ++ show (App (App (PrimOp Neq) a) b))
+  where
+    searchCtx' [] _ = Nothing
+    searchCtx' (CtxEntry _ _ thms : rest) t =
+      case filter (\th -> evalEq' th t) thms of
+        (th : _) -> Just th
+        [] -> searchCtx' rest t
+    evalEq' t1 t2 =
+      case (eval t1, eval t2) of
+        (Right v1, Right v2) -> v1 == v2
+        _ -> False
+trySimpleDerive _ _ =
+  Left "Automatic proof failed: provide a manual proof with `by`"

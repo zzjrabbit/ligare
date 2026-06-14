@@ -13,12 +13,11 @@ data Term
   = Var Int
   | App Term Term
   | Lam Term
-  | Constraint Term Term
   | LitInt Integer
   | LitBool Bool
   | PrimOp PrimOp
   | Universe Universe
-  | Builtin String
+  | Builtin Name
   | Arrow Term Term
   | Let Name Term Term (Maybe Term)
   | IfThenElse Term Term Term
@@ -26,6 +25,7 @@ data Term
   | Annot Term Term
   | ByProof Term Term
   | AutoProof
+  | RefParam
   deriving (Eq, Show)
 
 data PrimOp

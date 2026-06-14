@@ -19,9 +19,6 @@ lexeme = L.lexeme sc
 symbol :: String -> Parser String
 symbol = L.symbol sc
 
-keyword :: String -> Parser String
-keyword s = sc >> string s <* sc
-
 integer :: Parser Integer
 integer = lexeme L.decimal
 
@@ -50,11 +47,11 @@ parseNonIfExpr env = makeExprParser (parseApp env) operators
 
 parseIfExpr :: Env -> Parser Term
 parseIfExpr env = do
-  _ <- try (keyword "if")
+  _ <- try (sc >> symbol "if")
   cond <- parseExpr env
-  _ <- try (keyword "then")
+  _ <- try (sc >> symbol "then")
   tbranch <- parseExpr env
-  _ <- try (keyword "else")
+  _ <- try (sc >> symbol "else")
   fbranch <- parseExpr env
   pure (IfThenElse cond tbranch fbranch)
 
@@ -67,14 +64,12 @@ parseApp env =
 
 parseLetExpr :: Env -> Parser Term
 parseLetExpr env = do
-  _ <- try (keyword "let")
+  _ <- try (sc >> symbol "let")
   name <- ident
-  mconstr <- optional $ do
-    _ <- symbol ":"
-    parseConstraint
+  mconstr <- optional $ try (sc >> symbol ":" >> parseConstraint)
   _ <- symbol "="
   val <- parseExpr env
-  _ <- keyword "in"
+  _ <- sc >> symbol "in"
   body <- parseExpr (name : env)
   pure (Let name val body mconstr)
 
@@ -85,8 +80,15 @@ parseAtom env =
       try (LitBool <$> parseBool),
       try (Var <$> parseVar env),
       parseLam env,
+      parseNeg env,
       parens (parseExpr env)
     ]
+
+parseNeg :: Env -> Parser Term
+parseNeg env = do
+  _ <- symbol "-"
+  t <- parseAtom env
+  pure (App (App (PrimOp Sub) (LitInt 0)) t)
 
 parseTermWithSuffix :: Env -> Parser Term
 parseTermWithSuffix env = do
@@ -98,11 +100,11 @@ parseTermWithSuffix env = do
         <|> (parseAnnotSuffix t >>= suffix)
         <|> pure t
     parseBySuffix t = do
-      _ <- try (keyword "by")
+      _ <- try (sc >> symbol "by")
       proof <- parseTerm env
       pure (ByProof t proof)
     parseAnnotSuffix t = do
-      _ <- optional sc >> symbol ":"
+      _ <- try (sc >> symbol ":")
       c <- parseConstraint
       pure (Annot t c)
 
@@ -139,19 +141,19 @@ binary op left right = App (App (PrimOp op) left) right
 
 operators :: [[Operator Parser Term]]
 operators =
-  [ [ InfixL (binary Mul <$ symbol "*"),
-      InfixL (binary Div <$ symbol "/"),
-      InfixL (binary Mod <$ symbol "%")
+  [ [ InfixL (try (binary Mul <$ symbol "*")),
+      InfixL (try (binary Div <$ symbol "/")),
+      InfixL (try (binary Mod <$ symbol "%"))
     ],
-    [ InfixL (binary Add <$ symbol "+"),
-      InfixL (binary Sub <$ symbol "-")
+    [ InfixL (try (binary Add <$ symbol "+")),
+      InfixL (try (binary Sub <$ symbol "-"))
     ],
     [ InfixN (try (binary Eq <$ symbol "==")),
       InfixN (try (binary Le <$ symbol "<=")),
       InfixN (try (binary Ge <$ symbol ">=")),
       InfixN (try (binary Neq <$ symbol "/=")),
-      InfixN (binary Lt <$ symbol "<"),
-      InfixN (binary Gt <$ symbol ">")
+      InfixN (try (binary Lt <$ symbol "<")),
+      InfixN (try (binary Gt <$ symbol ">"))
     ]
   ]
 
@@ -188,7 +190,6 @@ parseConstraintAtom =
       Builtin <$> ident
     ]
 
--- 精化约束解析: nat = data (x => x >= 0)
 parseRefineTop :: String -> Either String (Name, Term, Term)
 parseRefineTop input = case runParser (sc >> parseRefineDef) "" input of
   Left e -> Left (errorBundlePretty e)
@@ -201,8 +202,17 @@ parseRefineDef = do
   parent <- parseConstraintAtom
   _ <- sc
   _ <- symbol "("
-  _ <- ident
-  _ <- keyword "=>"
-  predicate <- parseExpr ["x"]
+  paramName <- ident
+  _ <- sc >> symbol "=>"
+  predicate <- parseExpr [paramName]
   _ <- symbol ")"
-  pure (name, parent, predicate)
+  pure (name, parent, replaceVarZero predicate)
+  where
+    replaceVarZero (Var 0) = RefParam
+    replaceVarZero (App f a) = App (replaceVarZero f) (replaceVarZero a)
+    replaceVarZero (Lam body) = Lam (replaceVarZero body)
+    replaceVarZero (Let n v b mc) = Let n (replaceVarZero v) (replaceVarZero b) (fmap replaceVarZero mc)
+    replaceVarZero (IfThenElse c t f) = IfThenElse (replaceVarZero c) (replaceVarZero t) (replaceVarZero f)
+    replaceVarZero (Annot t c) = Annot (replaceVarZero t) (replaceVarZero c)
+    replaceVarZero (ByProof t p) = ByProof (replaceVarZero t) (replaceVarZero p)
+    replaceVarZero other = other

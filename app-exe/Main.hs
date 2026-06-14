@@ -74,5 +74,7 @@ inner tableRef input = do
             _ -> putStrLn "Usage: :check <term> : <constraint>"
         else case parseExprTop input of
           Left err -> putStrLn ("Parse error: " ++ err)
-          Right term -> putStrLn (pretty (eval term))
+          Right term -> case eval term of
+            Left err -> putStrLn ("Eval error: " ++ err)
+            Right val -> putStrLn (pretty val)
   loop tableRef

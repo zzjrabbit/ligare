@@ -23,7 +23,7 @@ extendCtxTerm constraint ctx =
   CtxEntry "_" constraint [] : ctx
 
 addTheorem :: Name -> Term -> Context -> Context
-addTheorem name thm [] = []
+addTheorem _ _ [] = []
 addTheorem name thm (CtxEntry n c thms : rest)
   | n == name = CtxEntry n c (thm : thms) : rest
   | otherwise = CtxEntry n c thms : addTheorem name thm rest
