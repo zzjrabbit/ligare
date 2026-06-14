@@ -17,6 +17,7 @@ library
     exposed-modules:
         Ligare.Core.Syntax
         Ligare.Core.Eval
+        Ligare.Core.Debruijn
         Ligare.Core.Desugar
         Ligare.Core.Classify
         Ligare.Checker.Context
