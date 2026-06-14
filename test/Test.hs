@@ -5,9 +5,11 @@ import Ligare.Checker.Context
 import Ligare.Core.Eval
 import Ligare.Core.Syntax
 import Ligare.Front.Parser
+import Ligare.Core.Desugar (desugar)
 import Ligare.Pretty
 import Test.Tasty
 import Test.Tasty.HUnit
+import Data.Either (isRight)
 
 main :: IO ()
 main = defaultMain tests
@@ -17,6 +19,7 @@ tests =
   testGroup
     "Ligare"
     [ parserTests,
+      desugarTests,
       evalTests,
       checkerTests,
       refinementTests,
@@ -57,19 +60,70 @@ parserTests =
       testCase "annot expression" $
         parseExprTop "(5 : int)"
           @?= Right (Annot (LitInt 5) (Builtin "int")),
-      testCase "by expression" $
-        parseExprTop "(5 : int by true)"
-          @?= Right (ByProof (Annot (LitInt 5) (Builtin "int")) (LitBool True)),
+
       testCase "arrow constraint" $
         parseConstraintFromString "int -> bool"
-          @?= Right (Arrow (Builtin "int") (Builtin "bool")),
+          @?= Right (Pi "" (Builtin "int") (Builtin "bool")),
+      testCase "dependent arrow" $
+        parseConstraintFromString "(x: int) -> x"
+          @?= Right (Pi "x" (Builtin "int") (Var 0)),
+      testCase "dependent arrow as constraint rejected" $
+        case check' (parse' "\\x. x") (parseC "(x: int) -> x") of
+          Left _ -> True @?= True
+          Right _ -> assertFailure "expected failure",
+
       testCase "refine definition" $
         parseRefineTop "nat = int (x => x >= 0)"
-          @?= Right ("nat", Builtin "int", bin Ge RefParam (LitInt 0))
+          @?= Right ("nat", Builtin "int", bin Ge RefParam (LitInt 0)),
+      testCase "func one param" $
+        isRight (parseExprTop "func f (x: int) : int = x + 1") @?= True,
+      testCase "func two params" $
+        isRight (parseExprTop "func add (a: int) (b: int) : int = a + b") @?= True,
+      testCase "func basic" $
+        isRight (parseExprTop "func id (x: int) = x") @?= True,
+      testCase "func three params" $
+        isRight (parseExprTop "func f (a: int) (b: int) (c: int) : int = a") @?= True,
+      testCase "let with by" $
+        parseExprTop "let x : int = 5 by true in x" @?=
+          Right (Let "x" (ByProof (LitInt 5) (LitBool True)) (Var 0) (Just (Builtin "int"))),
+      testCase "and prop parses" $
+        parseExprTop "∧ true false" @?=
+          Right (App (App (Builtin "and") (LitBool True)) (LitBool False)),
+      testCase "or prop parses" $
+        parseExprTop "∨ true false" @?=
+          Right (App (App (Builtin "or") (LitBool True)) (LitBool False)),
+      testCase "not prop parses" $
+        parseExprTop "¬ true" @?=
+          Right (App (Builtin "not") (LitBool True)),
+      testCase "and in constraint" $
+        parseConstraintFromString "∧ int bool" @?=
+          Right (App (App (Builtin "and") (Builtin "int")) (Builtin "bool"))
     ]
 
 bin :: PrimOp -> Term -> Term -> Term
 bin op l r = App (App (PrimOp op) l) r
+
+-- ── Desugar ──
+
+desugarTests :: TestTree
+desugarTests =
+  testGroup
+    "Desugar"
+    [ testCase "func one param no ret" $
+        desugar (Func "id" [("x", Just (Builtin "int"))] Nothing [] [] (Var 0))
+          @?= Annot (Lam (Var 0)) (Pi "x" (Builtin "int") (Builtin "data")),
+      testCase "func one param with ret" $
+        desugar (Func "f" [("x", Just (Builtin "int"))] (Just (Builtin "int")) [] [] (bin Add (Var 0) (LitInt 1)))
+          @?= Annot (Lam (bin Add (Var 0) (LitInt 1))) (Pi "x" (Builtin "int") (Builtin "int")),
+      testCase "func two params" $
+        desugar (Func "add" [("a", Just (Builtin "int")), ("b", Just (Builtin "int"))]
+                         (Just (Builtin "int")) [] [] (bin Add (Var 1) (Var 0)))
+          @?= Annot (Lam (Lam (bin Add (Var 1) (Var 0))))
+                    (Pi "b" (Builtin "int") (Pi "a" (Builtin "int") (Builtin "int"))),
+      testCase "func no constraint" $
+        desugar (Func "id" [("x", Nothing)] Nothing [] [] (Var 0))
+          @?= Annot (Lam (Var 0)) (Pi "x" (Builtin "data") (Builtin "data"))
+    ]
 
 -- ── Eval ──
 

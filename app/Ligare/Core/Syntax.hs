@@ -18,7 +18,7 @@ data Term
   | PrimOp PrimOp
   | Universe Universe
   | Builtin Name
-  | Arrow Term Term
+  | Pi Name Term Term
   | Let Name Term Term (Maybe Term)
   | IfThenElse Term Term Term
   | Refine Name Term Term
@@ -26,6 +26,7 @@ data Term
   | ByProof Term Term
   | AutoProof
   | RefParam
+  | Func Name [(Name, Maybe Term)] (Maybe Term) [Term] [Term] Term
   deriving (Eq, Show)
 
 data PrimOp

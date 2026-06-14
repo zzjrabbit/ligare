@@ -6,6 +6,7 @@ import Data.Void (Void)
 import Ligare.Core.Syntax
 import Text.Megaparsec
 import Text.Megaparsec.Char
+
 import Text.Megaparsec.Char.Lexer qualified as L
 
 type Parser = Parsec Void String
@@ -57,7 +58,7 @@ parseIfExpr env = do
 
 parseApp :: Env -> Parser Term
 parseApp env =
-  parseLetExpr env <|> do
+  parseLetExpr env <|> parseFuncExpr env <|> do
     t1 <- parseTerm env
     ts <- many (parseTerm env)
     return (foldl App t1 ts)
@@ -67,11 +68,35 @@ parseLetExpr env = do
   _ <- try (sc >> symbol "let")
   name <- ident
   mconstr <- optional $ try (sc >> symbol ":" >> parseConstraint)
-  _ <- symbol "="
+  _ <- sc >> symbol "="
   val <- parseExpr env
+  mproof <- optional $ try (sc >> symbol "by" >> parseTerm env)
   _ <- sc >> symbol "in"
+  let val' = case mproof of
+        Just p  -> ByProof val p
+        Nothing -> val
   body <- parseExpr (name : env)
-  pure (Let name val body mconstr)
+  pure (Let name val' body mconstr)
+
+parseFuncExpr :: Env -> Parser Term
+parseFuncExpr env = do
+  _ <- try (sc >> symbol "func")
+  fname <- ident
+  params <- many parseCurriedParam
+  mRetConstr <- optional $ try (sc >> symbol ":" >> parseConstraint)
+  _ <- sc >> symbol "="
+  let paramNames = map fst params
+  let extendedEnv = reverse paramNames ++ env
+  body <- parseExpr extendedEnv
+  pure (Func fname params mRetConstr [] [] body)
+
+parseCurriedParam :: Parser (String, Maybe Term)
+parseCurriedParam = do
+  _ <- sc >> symbol "("
+  pname <- ident
+  mconstr <- optional $ try (sc >> symbol ":" >> parseConstraint)
+  _ <- symbol ")"
+  pure (pname, mconstr)
 
 parseAtom :: Env -> Parser Term
 parseAtom env =
@@ -79,9 +104,19 @@ parseAtom env =
     [ try (LitInt <$> integer),
       try (LitBool <$> parseBool),
       try (Var <$> parseVar env),
+      parseBuiltinProp,
       parseLam env,
       parseNeg env,
       parens (parseExpr env)
+    ]
+
+parseBuiltinProp :: Parser Term
+parseBuiltinProp =
+  choice
+    [ Builtin "and" <$ symbol "∧"
+    , Builtin "or"  <$ symbol "∨"
+    , Builtin "not" <$ symbol "¬"
+    , Builtin "implies" <$ symbol "→"
     ]
 
 parseNeg :: Env -> Parser Term
@@ -96,13 +131,8 @@ parseTermWithSuffix env = do
   suffix t
   where
     suffix t =
-      (parseBySuffix t >>= suffix)
-        <|> (parseAnnotSuffix t >>= suffix)
+      (parseAnnotSuffix t >>= suffix)
         <|> pure t
-    parseBySuffix t = do
-      _ <- try (sc >> symbol "by")
-      proof <- parseTerm env
-      pure (ByProof t proof)
     parseAnnotSuffix t = do
       _ <- try (sc >> symbol ":")
       c <- parseConstraint
@@ -132,8 +162,8 @@ parens = between (symbol "(") (symbol ")")
 parseBool :: Parser Bool
 parseBool =
   choice
-    [ True <$ string "true",
-      False <$ string "false"
+    [ try (True <$ (optional sc >> string "true")),
+      try (False <$ (optional sc >> string "false"))
     ]
 
 binary :: PrimOp -> Term -> Term -> Term
@@ -164,7 +194,13 @@ parseConstraintFromString input =
     Right t -> Right t
 
 parseConstraint :: Parser Term
-parseConstraint = sc >> parseArrow
+parseConstraint = sc >> parseAppConstraint
+
+parseAppConstraint :: Parser Term
+parseAppConstraint = do
+  t1 <- parseArrow
+  ts <- many parseArrow
+  return (foldl App t1 ts)
 
 parseArrow :: Parser Term
 parseArrow = do
@@ -178,7 +214,7 @@ parseArrow = do
         Nothing -> return left
         Just _ -> do
           right <- parseArrow
-          return (Arrow left right)
+          return (Pi "" left right)
 
 parseConstraintAtom :: Parser Term
 parseConstraintAtom =
@@ -186,9 +222,23 @@ parseConstraintAtom =
     [ try (Builtin <$> string "int") <* notFollowedBy alphaNumChar,
       try (Builtin <$> string "bool") <* notFollowedBy alphaNumChar,
       Universe UData <$ string "data",
+      Universe UTheorem <$ string "theorem",
+      parseBuiltinProp,
+      parseDepArrow,
       parens parseConstraint,
       Builtin <$> ident
     ]
+
+parseDepArrow :: Parser Term
+parseDepArrow = do
+  _ <- symbol "("
+  x <- ident
+  _ <- sc >> symbol ":"
+  a <- parseConstraint
+  _ <- symbol ")"
+  _ <- sc >> symbol "->"
+  b <- parseExpr [x]
+  pure (Pi x a b)
 
 parseRefineTop :: String -> Either String (Name, Term, Term)
 parseRefineTop input = case runParser (sc >> parseRefineDef) "" input of

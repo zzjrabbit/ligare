@@ -2,13 +2,14 @@ module Ligare.Checker.Checker where
 
 import Ligare.Checker.Context
 import Ligare.Core.Eval (eval)
+import Ligare.Core.Desugar (desugar)
 import Ligare.Core.Syntax
 
 check :: ConstraintTable -> Context -> Term -> Term -> Either String ()
-check table ctx term constraint = case term of
+check table ctx term constraint = case desugar term of
   Var i -> do
     expected <- case lookupCtx i ctx of
-      Just t -> pure t
+      Just t  -> pure t
       Nothing -> Left ("Unbound variable index: " ++ show i)
     expected' <- eval expected
     constraint' <- eval constraint
@@ -41,8 +42,37 @@ check table ctx term constraint = case term of
     case normConstraint of
       Builtin "int" -> checkInt term
       Builtin "bool" -> checkBool term
-      Arrow a b -> checkArrow table ctx term a b
+      Pi "" a b -> checkArrow table ctx term a b
+      Pi name a b -> checkPi table ctx term name a b
       Universe UData -> pure ()
+      Var j ->
+        Left ("Variable " ++ show j ++ " is a data term, cannot be used as a constraint")
+      App (App (Builtin "and") a) b -> do
+        -- term must satisfy both a and b
+        check table ctx term a
+        check table ctx term b
+      App (App (Builtin "or") a) b -> do
+        -- term must satisfy either a or b (non-deterministic)
+        case check table ctx term a of
+          Right () -> pure ()
+          Left _   -> check table ctx term b
+      App (Builtin "not") _a ->
+        -- negation: term must NOT satisfy a? No, negation is logical
+        -- For now, just accept (proof obligation)
+        pure ()
+      App f a -> do
+        case expandConstraint table normConstraint of
+          Just expanded -> check table ctx term expanded
+          Nothing ->
+            case lookupRefine (constraintName f) table of
+              Just (Universe UData, _body) -> do
+                -- constraint constructor: Vec n
+                let expanded = App _body a
+                check table ctx term expanded
+              _ -> do
+                f' <- eval f
+                a' <- eval a
+                Left $ "Cannot apply " ++ show f' ++ " to " ++ show a' ++ " as a constraint"
       _ -> case lookupRefine (constraintName normConstraint) table of
         Just (parent, pred') -> do
           check table ctx term parent
@@ -64,6 +94,13 @@ check table ctx term constraint = case term of
       case t' of
         Lam body -> do
           let ctx'' = extendCtxTerm a ctx'
+          check table' ctx'' body b
+        _ -> Left "Expected a lambda"
+    checkPi table' ctx' t name a b = do
+      t' <- eval t
+      case t' of
+        Lam body -> do
+          let ctx'' = extendCtx name a ctx'
           check table' ctx'' body b
         _ -> Left "Expected a lambda"
 
