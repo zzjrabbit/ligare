@@ -1,15 +1,16 @@
 module Main where
 
+import Data.Either (isRight)
 import Ligare.Checker.Checker
-import Ligare.Checker.Context
+import Ligare.Checker.Context (addRefine, emptyCtx, emptyTable)
+import Ligare.Core.Classify (classify)
+import Ligare.Core.Desugar (desugar)
 import Ligare.Core.Eval
 import Ligare.Core.Syntax
-import Ligare.Front.Parser
-import Ligare.Core.Desugar (desugar)
+import Ligare.Front.Parser hiding (bin)
 import Ligare.Pretty
 import Test.Tasty
 import Test.Tasty.HUnit
-import Data.Either (isRight)
 
 main :: IO ()
 main = defaultMain tests
@@ -23,7 +24,8 @@ tests =
       evalTests,
       checkerTests,
       refinementTests,
-      prettyTests
+      prettyTests,
+      classifyTests
     ]
 
 -- ── Parser ──
@@ -60,7 +62,6 @@ parserTests =
       testCase "annot expression" $
         parseExprTop "(5 : int)"
           @?= Right (Annot (LitInt 5) (Builtin "int")),
-
       testCase "arrow constraint" $
         parseConstraintFromString "int -> bool"
           @?= Right (Pi "" (Builtin "int") (Builtin "bool")),
@@ -71,7 +72,6 @@ parserTests =
         case check' (parse' "\\x. x") (parseC "(x: int) -> x") of
           Left _ -> True @?= True
           Right _ -> assertFailure "expected failure",
-
       testCase "refine definition" $
         parseRefineTop "nat = int (x => x >= 0)"
           @?= Right ("nat", Builtin "int", bin Ge RefParam (LitInt 0)),
@@ -83,21 +83,21 @@ parserTests =
         isRight (parseExprTop "func id (x: int) = x") @?= True,
       testCase "func three params" $
         isRight (parseExprTop "func f (a: int) (b: int) (c: int) : int = a") @?= True,
-      testCase "let with by" $
-        parseExprTop "let x : int = 5 by true in x" @?=
-          Right (Let "x" (ByProof (LitInt 5) (LitBool True)) (Var 0) (Just (Builtin "int"))),
       testCase "and prop parses" $
-        parseExprTop "∧ true false" @?=
-          Right (App (App (Builtin "and") (LitBool True)) (LitBool False)),
+        parseExprTop "∧ true false"
+          @?= Right (App (App (Builtin "and") (LitBool True)) (LitBool False)),
       testCase "or prop parses" $
-        parseExprTop "∨ true false" @?=
-          Right (App (App (Builtin "or") (LitBool True)) (LitBool False)),
+        parseExprTop "∨ true false"
+          @?= Right (App (App (Builtin "or") (LitBool True)) (LitBool False)),
       testCase "not prop parses" $
-        parseExprTop "¬ true" @?=
-          Right (App (Builtin "not") (LitBool True)),
+        parseExprTop "¬ true"
+          @?= Right (App (Builtin "not") (LitBool True)),
       testCase "and in constraint" $
-        parseConstraintFromString "∧ int bool" @?=
-          Right (App (App (Builtin "and") (Builtin "int")) (Builtin "bool"))
+        parseConstraintFromString "∧ int bool"
+          @?= Right (App (App (Builtin "and") (Builtin "int")) (Builtin "bool")),
+      testCase "let with by" $
+        parseExprTop "let x : int by true = 5 in x"
+          @?= Right (Let "x" (ByProof (LitInt 5) (LitBool True)) (Var 0) (Just (Builtin "int")))
     ]
 
 bin :: PrimOp -> Term -> Term -> Term
@@ -116,10 +116,18 @@ desugarTests =
         desugar (Func "f" [("x", Just (Builtin "int"))] (Just (Builtin "int")) [] [] (bin Add (Var 0) (LitInt 1)))
           @?= Annot (Lam (bin Add (Var 0) (LitInt 1))) (Pi "x" (Builtin "int") (Builtin "int")),
       testCase "func two params" $
-        desugar (Func "add" [("a", Just (Builtin "int")), ("b", Just (Builtin "int"))]
-                         (Just (Builtin "int")) [] [] (bin Add (Var 1) (Var 0)))
-          @?= Annot (Lam (Lam (bin Add (Var 1) (Var 0))))
-                    (Pi "b" (Builtin "int") (Pi "a" (Builtin "int") (Builtin "int"))),
+        desugar
+          ( Func
+              "add"
+              [("a", Just (Builtin "int")), ("b", Just (Builtin "int"))]
+              (Just (Builtin "int"))
+              []
+              []
+              (bin Add (Var 1) (Var 0))
+          )
+          @?= Annot
+            (Lam (Lam (bin Add (Var 1) (Var 0))))
+            (Pi "b" (Builtin "int") (Pi "a" (Builtin "int") (Builtin "int"))),
       testCase "func no constraint" $
         desugar (Func "id" [("x", Nothing)] Nothing [] [] (Var 0))
           @?= Annot (Lam (Var 0)) (Pi "x" (Builtin "data") (Builtin "data"))
@@ -185,7 +193,12 @@ checkerTests =
       testCase "unknown constraint fails" $
         case check' (LitInt 5) (Builtin "foo") of
           Left _ -> True @?= True
-          Right _ -> assertFailure "expected failure"
+          Right _ -> assertFailure "expected failure",
+      testCase "let with by check" $
+        check'
+          (parse' "let x : int by true = 5 in x")
+          (Builtin "int")
+          @?= Right ()
     ]
 
 check' :: Term -> Term -> Either String ()
@@ -251,4 +264,36 @@ prettyTests =
           @?= "let x = 5 in $0",
       testCase "annot" $
         pretty (Annot (LitInt 5) (Builtin "int")) @?= "(5 : int)"
+    ]
+
+-- ── Classify ──
+
+classifyTests :: TestTree
+classifyTests =
+  testGroup
+    "Classify"
+    [ testCase "LitInt is data" $
+        classify emptyCtx (LitInt 42) @?= Just UData,
+      testCase "LitBool is data" $
+        classify emptyCtx (LitBool True) @?= Just UData,
+      testCase "Lam is data" $
+        classify emptyCtx (Lam (Var 0)) @?= Just UData,
+      testCase "Pi is prop" $
+        classify emptyCtx (Pi "" (Builtin "int") (Builtin "bool")) @?= Just UProp,
+      testCase "AutoProof is proof" $
+        classify emptyCtx AutoProof @?= Just UProof,
+      testCase "Universe UProp is prop" $
+        classify emptyCtx (Universe UProp) @?= Just UProp,
+      testCase "int constraint is prop" $
+        classify emptyCtx (Builtin "int") @?= Just UProp,
+      testCase "and is prop" $
+        classify emptyCtx (Builtin "and") @?= Just UProp,
+      testCase "Annot keeps inner universe" $
+        classify emptyCtx (Annot (LitInt 5) (Builtin "int")) @?= Just UData,
+      testCase "ByProof keeps inner universe" $
+        classify emptyCtx (ByProof (LitInt 5) AutoProof) @?= Just UData,
+      testCase "IfThenElse is data" $
+        classify emptyCtx (IfThenElse (LitBool True) (LitInt 1) (LitInt 0)) @?= Just UData,
+      testCase "Func is data" $
+        classify emptyCtx (Func "f" [("x", Just (Builtin "int"))] Nothing [] [] (Var 0)) @?= Just UData
     ]

@@ -39,16 +39,23 @@ pretty (Annot t c) = "(" ++ pretty t ++ " : " ++ pretty c ++ ")"
 pretty (ByProof t proof) = "(" ++ pretty t ++ " by " ++ pretty proof ++ ")"
 pretty AutoProof = "auto"
 pretty RefParam = "x"
+pretty (ProofBlock t) = "proof { " ++ pretty t ++ " }"
 pretty (Func name params mRet preconds postconds body) =
-  "func " ++ name ++ "(" ++ prettyParams params ++ ")"
+  "func "
+    ++ name
+    ++ "("
+    ++ prettyParams params
+    ++ ")"
     ++ maybe "" (\r -> " : " ++ pretty r) mRet
     ++ concat [" pre: " ++ pretty p | p <- preconds]
     ++ concat [" post: " ++ pretty p | p <- postconds]
-    ++ " = " ++ pretty body
+    ++ " = "
+    ++ pretty body
   where
     prettyParams [] = ""
     prettyParams [(n, Nothing)] = n
     prettyParams [(n, Just c)] = n ++ " : " ++ pretty c
     prettyParams ((n, mc) : rest) =
       (case mc of Nothing -> n; Just c -> n ++ " : " ++ pretty c)
-        ++ ", " ++ prettyParams rest
+        ++ ", "
+        ++ prettyParams rest

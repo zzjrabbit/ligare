@@ -18,6 +18,7 @@ library
         Ligare.Core.Syntax
         Ligare.Core.Eval
         Ligare.Core.Desugar
+        Ligare.Core.Classify
         Ligare.Checker.Context
         Ligare.Checker.Checker
         Ligare.Front.Parser

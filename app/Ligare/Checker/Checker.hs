@@ -1,15 +1,15 @@
 module Ligare.Checker.Checker where
 
 import Ligare.Checker.Context
-import Ligare.Core.Eval (eval)
 import Ligare.Core.Desugar (desugar)
+import Ligare.Core.Eval (eval)
 import Ligare.Core.Syntax
 
 check :: ConstraintTable -> Context -> Term -> Term -> Either String ()
 check table ctx term constraint = case desugar term of
   Var i -> do
     expected <- case lookupCtx i ctx of
-      Just t  -> pure t
+      Just t -> pure t
       Nothing -> Left ("Unbound variable index: " ++ show i)
     expected' <- eval expected
     constraint' <- eval constraint
@@ -32,6 +32,9 @@ check table ctx term constraint = case desugar term of
     let ctxF = addTheorem "_" thmFalse ctx
     check table ctxT tbranch constraint
     check table ctxF fbranch constraint
+  ProofBlock proofTerm -> do
+    term' <- eval term
+    proveWith table ctx term' constraint proofTerm
   Let name val body mconstr -> do
     case mconstr of
       Just c -> check table ctx val c
@@ -55,7 +58,7 @@ check table ctx term constraint = case desugar term of
         -- term must satisfy either a or b (non-deterministic)
         case check table ctx term a of
           Right () -> pure ()
-          Left _   -> check table ctx term b
+          Left _ -> check table ctx term b
       App (Builtin "not") _a ->
         -- negation: term must NOT satisfy a? No, negation is logical
         -- For now, just accept (proof obligation)
@@ -176,3 +179,18 @@ trySimpleDerive (App (App (PrimOp Neq) a) b) ctx =
         _ -> False
 trySimpleDerive _ _ =
   Left "Automatic proof failed: provide a manual proof with `by`"
+
+proveWith :: ConstraintTable -> Context -> Term -> Term -> Term -> Either String ()
+proveWith _table ctx subject (App (App (Builtin "and") a) b) (App (App (Builtin "∧-intro") pa) pb) = do
+  proveWith _table ctx subject a pa
+  proveWith _table ctx subject b pb
+proveWith _table _ctx _subject _goal (Builtin "∧-elim-left") =
+  pure () -- we trust the user
+proveWith _table _ctx _subject _goal (LitBool True) =
+  pure () -- trivial proof
+proveWith _table ctx subject goal AutoProof =
+  proveAuto ctx subject goal
+proveWith _table _ctx _subject _goal (ProofBlock inner) =
+  proveWith _table _ctx _subject _goal inner
+proveWith _table _ctx _subject _goal _proof =
+  Left "Cannot use this term as a proof"

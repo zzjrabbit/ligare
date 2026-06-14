@@ -1,7 +1,7 @@
 module Ligare.Core.Eval where
 
-import Ligare.Core.Syntax
 import Ligare.Core.Desugar (desugar)
+import Ligare.Core.Syntax
 
 eval :: Term -> Either String Term
 eval (App (Lam body) arg) = eval (beta (Lam body) arg)
@@ -33,6 +33,7 @@ eval (Refine name parent p) = do
 eval AutoProof = return AutoProof
 eval RefParam = return RefParam
 eval t@(Func {}) = eval (desugar t)
+eval (ProofBlock t) = eval t
 eval other = return other
 
 beta :: Term -> Term -> Term
@@ -55,9 +56,15 @@ subst s i t0 = go 0 t0
     go c (Refine name parent p) = Refine name (go c parent) (go c p)
     go c (Annot term constr) = Annot (go c term) (go c constr)
     go c (ByProof term proof) = ByProof (go c term) (go c proof)
-    go c (Func n ps mc pr po b) = Func n [(nm, fmap (go c) mc') | (nm, mc') <- ps]
-                                       (fmap (go c) mc)
-                                       (map (go c) pr) (map (go c) po) (go (c + length ps) b)
+    go c (ProofBlock t) = ProofBlock (go c t)
+    go c (Func n ps mc pr po b) =
+      Func
+        n
+        [(nm, fmap (go c) mc') | (nm, mc') <- ps]
+        (fmap (go c) mc)
+        (map (go c) pr)
+        (map (go c) po)
+        (go (c + length ps) b)
     go _c other = other
 
 shift :: Int -> Int -> Term -> Term
@@ -74,9 +81,15 @@ shift d c (IfThenElse cond tb fb) =
 shift d c (Refine name parent p) = Refine name (shift d c parent) (shift d c p)
 shift d c (Annot term constr) = Annot (shift d c term) (shift d c constr)
 shift d c (ByProof term proof) = ByProof (shift d c term) (shift d c proof)
-shift d c (Func n ps mc pr po b) = Func n [(nm, fmap (shift d c) mc') | (nm, mc') <- ps]
-                                          (fmap (shift d c) mc)
-                                          (map (shift d c) pr) (map (shift d c) po) (shift d (c + length ps) b)
+shift d c (Func n ps mc pr po b) =
+  Func
+    n
+    [(nm, fmap (shift d c) mc') | (nm, mc') <- ps]
+    (fmap (shift d c) mc)
+    (map (shift d c) pr)
+    (map (shift d c) po)
+    (shift d (c + length ps) b)
+shift d c (ProofBlock t) = ProofBlock (shift d c t)
 shift _d _c other = other
 
 arith :: PrimOp -> Integer -> Integer -> Term

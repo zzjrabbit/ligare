@@ -27,6 +27,7 @@ data Term
   | AutoProof
   | RefParam
   | Func Name [(Name, Maybe Term)] (Maybe Term) [Term] [Term] Term
+  | ProofBlock Term
   deriving (Eq, Show)
 
 data PrimOp
