@@ -50,11 +50,11 @@ parseNonIfExpr env = makeExprParser (parseApp env) operators
 
 parseIfExpr :: Env -> Parser Term
 parseIfExpr env = do
-  try (keyword "if")
+  _ <- try (keyword "if")
   cond <- parseExpr env
-  try (keyword "then")
+  _ <- try (keyword "then")
   tbranch <- parseExpr env
-  try (keyword "else")
+  _ <- try (keyword "else")
   fbranch <- parseExpr env
   pure (IfThenElse cond tbranch fbranch)
 
@@ -67,7 +67,7 @@ parseApp env =
 
 parseLetExpr :: Env -> Parser Term
 parseLetExpr env = do
-  try (keyword "let")
+  _ <- try (keyword "let")
   name <- ident
   mconstr <- optional $ do
     _ <- symbol ":"
