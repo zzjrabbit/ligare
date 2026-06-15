@@ -28,7 +28,7 @@ tests =
       classifyTests
     ]
 
--- ── Parser ──
+-- -- Parser
 
 parserTests :: TestTree
 parserTests =
@@ -72,9 +72,12 @@ parserTests =
         case check' (parse' "\\x. x") (parseC "(x: int) -> x") of
           Left _ -> True @?= True
           Right _ -> assertFailure "expected failure",
-      testCase "refine definition" $
-        parseRefineTop "nat = int (x => x >= 0)"
-          @?= Right ("nat", Builtin "int", bin Ge RefParam (LitInt 0)),
+      testCase "refine expression" $
+        parseExprTop "int where (x => x >= 0)"
+          @?= Right (Refine "" (Builtin "int") (bin Ge RefParam (LitInt 0))),
+      testCase "def refinement" $
+        parseDefTop "def nat = int where (x => x >= 0)"
+          @?= Right ("nat", Refine "" (Builtin "int") (bin Ge RefParam (LitInt 0))),
       testCase "func one param" $
         isRight (parseExprTop "func f (x: int) : int = x + 1") @?= True,
       testCase "func two params" $
@@ -84,26 +87,35 @@ parserTests =
       testCase "func three params" $
         isRight (parseExprTop "func f (a: int) (b: int) (c: int) : int = a") @?= True,
       testCase "and prop parses" $
-        parseExprTop "∧ true false"
+        parseExprTop "\8743 true false"
           @?= Right (App (App (Builtin "and") (LitBool True)) (LitBool False)),
       testCase "or prop parses" $
-        parseExprTop "∨ true false"
+        parseExprTop "\8744 true false"
           @?= Right (App (App (Builtin "or") (LitBool True)) (LitBool False)),
       testCase "not prop parses" $
-        parseExprTop "¬ true"
+        parseExprTop "\172 true"
           @?= Right (App (Builtin "not") (LitBool True)),
       testCase "and in constraint" $
-        parseConstraintFromString "∧ int bool"
+        parseConstraintFromString "\8743 int bool"
           @?= Right (App (App (Builtin "and") (Builtin "int")) (Builtin "bool")),
       testCase "let with by" $
         parseExprTop "let x : int by true = 5 in x"
-          @?= Right (Let "x" (ByProof (LitInt 5) (LitBool True)) (Var 0) (Just (Builtin "int")))
+          @?= Right (Let "x" (ByProof (LitInt 5) (LitBool True)) (Var 0) (Just (Builtin "int"))),
+      testCase "def simple" $
+        parseDefTop "def x : int = 5"
+          @?= Right ("x", Annot (LitInt 5) (Builtin "int")),
+      testCase "def with params" $
+        parseDefTop "def add (a : int) (b : int) : int = a + b"
+          @?= Right ("add", Annot (Lam (Lam (bin Add (Var 1) (Var 0)))) (Builtin "int")),
+      testCase "def no ret" $
+        parseDefTop "def x = 5"
+          @?= Right ("x", LitInt 5)
     ]
 
 bin :: PrimOp -> Term -> Term -> Term
 bin op l r = App (App (PrimOp op) l) r
 
--- ── Desugar ──
+-- -- Desugar
 
 desugarTests :: TestTree
 desugarTests =
@@ -116,24 +128,14 @@ desugarTests =
         desugar (Func "f" [("x", Just (Builtin "int"))] (Just (Builtin "int")) [] [] (bin Add (Var 0) (LitInt 1)))
           @?= Annot (Lam (bin Add (Var 0) (LitInt 1))) (Pi "x" (Builtin "int") (Builtin "int")),
       testCase "func two params" $
-        desugar
-          ( Func
-              "add"
-              [("a", Just (Builtin "int")), ("b", Just (Builtin "int"))]
-              (Just (Builtin "int"))
-              []
-              []
-              (bin Add (Var 1) (Var 0))
-          )
-          @?= Annot
-            (Lam (Lam (bin Add (Var 1) (Var 0))))
-            (Pi "b" (Builtin "int") (Pi "a" (Builtin "int") (Builtin "int"))),
+        desugar (Func "add" [("a", Just (Builtin "int")), ("b", Just (Builtin "int"))] (Just (Builtin "int")) [] [] (bin Add (Var 1) (Var 0)))
+          @?= Annot (Lam (Lam (bin Add (Var 1) (Var 0)))) (Pi "b" (Builtin "int") (Pi "a" (Builtin "int") (Builtin "int"))),
       testCase "func no constraint" $
         desugar (Func "id" [("x", Nothing)] Nothing [] [] (Var 0))
           @?= Annot (Lam (Var 0)) (Pi "x" (Builtin "data") (Builtin "data"))
     ]
 
--- ── Eval ──
+-- -- Eval
 
 evalTests :: TestTree
 evalTests =
@@ -168,7 +170,7 @@ parse' s = case parseExprTop s of
   Right t -> t
   Left e -> error ("parse error in test: " ++ e)
 
--- ── Checker ──
+-- -- Checker
 
 checkerTests :: TestTree
 checkerTests =
@@ -195,10 +197,7 @@ checkerTests =
           Left _ -> True @?= True
           Right _ -> assertFailure "expected failure",
       testCase "let with by check" $
-        check'
-          (parse' "let x : int by true = 5 in x")
-          (Builtin "int")
-          @?= Right ()
+        check' (parse' "let x : int by true = 5 in x") (Builtin "int") @?= Right ()
     ]
 
 check' :: Term -> Term -> Either String ()
@@ -209,7 +208,7 @@ parseC s = case parseConstraintFromString s of
   Right c -> c
   Left e -> error ("parse constraint error: " ++ e)
 
--- ── Refinement ──
+-- -- Refinement
 
 refinementTests :: TestTree
 refinementTests =
@@ -246,7 +245,7 @@ natDef = ("nat", Builtin "int", bin Ge RefParam (LitInt 0))
 posDef :: (Name, Term, Term)
 posDef = ("pos", Builtin "int", bin Gt RefParam (LitInt 0))
 
--- ── Pretty ──
+-- -- Pretty
 
 prettyTests :: TestTree
 prettyTests =
@@ -257,8 +256,7 @@ prettyTests =
       testCase "lambda" $
         pretty (Lam (Var 0)) @?= "λ. $0",
       testCase "if" $
-        pretty (IfThenElse (LitBool True) (LitInt 1) (LitInt 0))
-          @?= "if True then 1 else 0",
+        pretty (IfThenElse (LitBool True) (LitInt 1) (LitInt 0)) @?= "if True then 1 else 0",
       testCase "let" $
         pretty (Let "x" (LitInt 5) (Var 0) Nothing)
           @?= "let x = 5 in $0",
@@ -266,7 +264,7 @@ prettyTests =
         pretty (Annot (LitInt 5) (Builtin "int")) @?= "(5 : int)"
     ]
 
--- ── Classify ──
+-- -- Classify
 
 classifyTests :: TestTree
 classifyTests =

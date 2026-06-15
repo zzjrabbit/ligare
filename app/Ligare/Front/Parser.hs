@@ -11,7 +11,7 @@ import Text.Megaparsec.Char.Lexer qualified as L
 type Parser = Parsec Void String
 
 sc :: Parser ()
-sc = L.space space1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
+sc = L.space space1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-")
 
 lexeme :: Parser a -> Parser a
 lexeme = L.lexeme sc
@@ -20,7 +20,7 @@ symbol :: String -> Parser String
 symbol = L.symbol sc
 
 keywords :: [String]
-keywords = ["let", "in", "if", "then", "else", "true", "false", "by", "func"]
+keywords = ["let", "in", "if", "then", "else", "true", "false", "by", "func", "where"]
 
 kw :: String -> Parser String
 kw s = sc >> symbol s
@@ -39,6 +39,12 @@ type Env = [String]
 parseExprTop :: String -> Either String Term
 parseExprTop input =
   case runParser (sc >> parseExpr []) "" input of
+    Left e -> Left (errorBundlePretty e)
+    Right t -> Right t
+
+parseDefTop :: String -> Either String (Name, Term)
+parseDefTop input =
+  case runParser (sc >> parseDef) "" input of
     Left e -> Left (errorBundlePretty e)
     Right t -> Right t
 
@@ -68,10 +74,13 @@ parseOperators env = makeExprParser (parseApp env) opTable
 
 parseApp :: Env -> Parser Term
 parseApp env =
-  parseLetExpr env <|> parseFuncExpr env <|> do
-    t1 <- parseTerm env
-    ts <- many (parseTerm env)
-    pure (foldl App t1 ts)
+  parseLetExpr env
+    <|> parseFuncExpr env
+    <|> try parseRefineTerm
+    <|> do
+      t1 <- parseTerm env
+      ts <- many (parseTerm env)
+      pure (foldl App t1 ts)
 
 --------------- let
 
@@ -90,6 +99,24 @@ parseLetExpr env = do
   body <- parseExpr (name : env)
   pure (Let name val' body mconstr)
 
+--------------- def
+
+parseDef :: Parser (Name, Term)
+parseDef = do
+  _ <- kw "def"
+  name <- ident
+  params <- many parseCurriedParam
+  mRetConstr <- optional $ try (sc >> symbol ":" >> parseConstraint)
+  _ <- kw "="
+  let paramNames = map fst params
+  let env = reverse paramNames
+  body <- parseExpr env
+  let funcBody = foldr (\(_, _) b -> Lam b) body params
+  let result = case mRetConstr of
+        Just c -> Annot funcBody c
+        Nothing -> funcBody
+  pure (name, result)
+
 --------------- func
 
 parseFuncExpr :: Env -> Parser Term
@@ -103,6 +130,28 @@ parseFuncExpr env = do
   let extendedEnv = reverse paramNames ++ env
   body <- parseExpr extendedEnv
   pure (Func _fname params mRetConstr [] [] body)
+
+--------------- refine term
+
+parseRefineTerm :: Parser Term
+parseRefineTerm = do
+  parent <- parseConstraintAtom
+  _ <- kw "where"
+  _ <- symbol "("
+  paramName <- ident
+  _ <- kw "=>"
+  predicate <- parseExpr [paramName]
+  _ <- symbol ")"
+  pure (Refine "" parent (replaceVarZero predicate))
+  where
+    replaceVarZero (Var 0) = RefParam
+    replaceVarZero (App f a) = App (replaceVarZero f) (replaceVarZero a)
+    replaceVarZero (Lam b) = Lam (replaceVarZero b)
+    replaceVarZero (Let n v b mc) = Let n (replaceVarZero v) (replaceVarZero b) (fmap replaceVarZero mc)
+    replaceVarZero (IfThenElse c t f) = IfThenElse (replaceVarZero c) (replaceVarZero t) (replaceVarZero f)
+    replaceVarZero (Annot t c) = Annot (replaceVarZero t) (replaceVarZero c)
+    replaceVarZero (ByProof t p) = ByProof (replaceVarZero t) (replaceVarZero p)
+    replaceVarZero other = other
 
 parseCurriedParam :: Parser (String, Maybe Term)
 parseCurriedParam = do
@@ -251,33 +300,3 @@ parseDepArrow = do
 
 parseParensConstraint :: Parser Term
 parseParensConstraint = between (symbol "(") (symbol ")") parseConstraint
-
---------------- refine
-
-parseRefineTop :: String -> Either String (Name, Term, Term)
-parseRefineTop input =
-  case runParser (sc >> parseRefineDef) "" input of
-    Left e -> Left (errorBundlePretty e)
-    Right t -> Right t
-
-parseRefineDef :: Parser (Name, Term, Term)
-parseRefineDef = do
-  name <- ident
-  _ <- kw "="
-  parent <- parseConstraintAtom
-  _ <- sc
-  _ <- symbol "("
-  paramName <- ident
-  _ <- kw "=>"
-  predicate <- parseExpr [paramName]
-  _ <- symbol ")"
-  pure (name, parent, replaceVarZero predicate)
-  where
-    replaceVarZero (Var 0) = RefParam
-    replaceVarZero (App f a) = App (replaceVarZero f) (replaceVarZero a)
-    replaceVarZero (Lam b) = Lam (replaceVarZero b)
-    replaceVarZero (Let n v b mc) = Let n (replaceVarZero v) (replaceVarZero b) (fmap replaceVarZero mc)
-    replaceVarZero (IfThenElse c t f) = IfThenElse (replaceVarZero c) (replaceVarZero t) (replaceVarZero f)
-    replaceVarZero (Annot t c) = Annot (replaceVarZero t) (replaceVarZero c)
-    replaceVarZero (ByProof t p) = ByProof (replaceVarZero t) (replaceVarZero p)
-    replaceVarZero other = other

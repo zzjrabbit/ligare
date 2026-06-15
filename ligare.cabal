@@ -36,8 +36,7 @@ executable ligare
     main-is:          Main.hs
     build-depends:
         base ^>=4.20.2.0,
-        ligare,
-        haskeline >= 0.8.4.1
+        ligare
     hs-source-dirs:   app-exe
     default-language: GHC2024
 

@@ -1,0 +1,2 @@
+def nat = int where (x => x >= 0)
+def x : nat = 10
