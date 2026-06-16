@@ -4,7 +4,10 @@ use ligare::core::syntax::{Term, Universe};
 
 #[test]
 fn lit_int_is_data() {
-    assert_eq!(classify(&empty_ctx(), &Term::LitInt(42)), Some(Universe::UData));
+    assert_eq!(
+        classify(&empty_ctx(), &Term::LitInt(42)),
+        Some(Universe::UData)
+    );
 }
 
 #[test]
@@ -36,7 +39,10 @@ fn pi_is_prop() {
 
 #[test]
 fn auto_proof_is_proof() {
-    assert_eq!(classify(&empty_ctx(), &Term::AutoProof), Some(Universe::UProof));
+    assert_eq!(
+        classify(&empty_ctx(), &Term::AutoProof),
+        Some(Universe::UProof)
+    );
 }
 
 #[test]
@@ -66,7 +72,10 @@ fn and_is_prop() {
 #[test]
 fn annot_keeps_inner_universe() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::Annot(&Term::LitInt(5), &Term::Builtin("int"))),
+        classify(
+            &empty_ctx(),
+            &Term::Annot(&Term::LitInt(5), &Term::Builtin("int"))
+        ),
         Some(Universe::UData)
     );
 }
@@ -98,7 +107,14 @@ fn func_is_data() {
     assert_eq!(
         classify(
             &empty_ctx(),
-            &Term::Func("f", &[("x", Some(&Term::Builtin("int")))], None, &[], &[], &Term::Var(0))
+            &Term::Func(
+                "f",
+                &[("x", Some(&Term::Builtin("int")))],
+                None,
+                &[],
+                &[],
+                &Term::Var(0)
+            )
         ),
         Some(Universe::UData)
     );

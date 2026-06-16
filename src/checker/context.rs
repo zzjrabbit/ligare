@@ -1,5 +1,4 @@
-use crate::core::debruijn::{shift, subst};
-use crate::core::pool::TermArena;
+use crate::core::pool::{SubstitutionContext, TermArena};
 use crate::core::syntax::{Name, Term, Universe};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +81,8 @@ impl<'bump> Context<'bump> {
     }
 }
 
+// ── Convenience free functions (backward compatible) ──
+
 pub fn empty_ctx<'bump>() -> Context<'bump> {
     Context::empty()
 }
@@ -109,7 +110,7 @@ pub fn add_theorem<'bump>(
     ctx.add_theorem(name, thm)
 }
 
-// ---- Constraint Table ----
+// ── Constraint Table ──
 
 /// Maps refinement names to `(parent, predicate)` pairs.
 pub type ConstraintTable<'bump> = Vec<(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>)>;
@@ -141,10 +142,11 @@ pub fn lookup_refine<'bump>(
 
 /// Expand a constraint: replace `RefParam` with `arg`.
 pub fn expand_constraint<'bump>(
-    arena: &TermArena<'bump>,
+    arena: &'bump TermArena<'bump>,
     table: &ConstraintTable<'bump>,
     constraint: &'bump Term<'bump>,
 ) -> Option<&'bump Term<'bump>> {
+    let sub = SubstitutionContext::new(arena);
     match constraint {
         Term::App(builtin, arg) => {
             let Term::Builtin(name) = *builtin else {
@@ -154,9 +156,9 @@ pub fn expand_constraint<'bump>(
             if !matches!(parent, Term::Universe(Universe::UData)) {
                 return None;
             }
-            let body_shifted = shift_param(arena, 1, body);
-            let instantiated = subst(arena, arg, 0, body_shifted);
-            let reduced = shift_param(arena, -1, instantiated);
+            let body_shifted = sub.shift_preserve_refparam(1, body);
+            let instantiated = sub.subst(arg, 0, body_shifted);
+            let reduced = sub.shift_preserve_refparam(-1, instantiated);
             Some(reduced)
         }
         _ => None,
@@ -165,28 +167,9 @@ pub fn expand_constraint<'bump>(
 
 /// Shift that preserves `RefParam`.
 pub fn shift_param<'bump>(
-    arena: &TermArena<'bump>,
+    arena: &'bump TermArena<'bump>,
     d: i32,
     t: &'bump Term<'bump>,
 ) -> &'bump Term<'bump> {
-    shift_param_cutoff(arena, d, 0, t)
-}
-
-fn shift_param_cutoff<'bump>(
-    arena: &TermArena<'bump>,
-    d: i32,
-    cutoff: i32,
-    t: &'bump Term<'bump>,
-) -> &'bump Term<'bump> {
-    match t {
-        Term::RefParam => t,
-        Term::Var(i) => {
-            if (*i as i32) >= cutoff {
-                arena.var((*i as i32 + d) as usize)
-            } else {
-                t
-            }
-        }
-        _ => shift(arena, d, cutoff, t),
-    }
+    SubstitutionContext::new(arena).shift_preserve_refparam(d, t)
 }

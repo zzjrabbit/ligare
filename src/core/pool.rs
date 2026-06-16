@@ -68,6 +68,12 @@ impl<'bump> TermArena<'bump> {
         Self { bump }
     }
 
+    /// Access the underlying bump allocator.
+    #[inline]
+    pub fn bump(&self) -> &'bump Bump {
+        self.bump
+    }
+
     /// Allocate a `Term` directly into the arena.
     #[inline]
     pub fn alloc(&self, t: Term<'bump>) -> &'bump Term<'bump> {
@@ -196,6 +202,253 @@ impl<'bump> TermArena<'bump> {
 
     pub fn proof_block(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
         self.alloc(Term::ProofBlock(t))
+    }
+}
+
+// ── SubstitutionContext: encapsulates debruijn operations ──
+
+/// Encapsulates de Bruijn index substitution and shifting operations.
+///
+/// These operations traverse the term tree and allocate new nodes in the
+/// arena as needed.  By bundling the arena reference, callers avoid
+/// passing it as a separate argument to every function.
+pub struct SubstitutionContext<'bump> {
+    arena: &'bump TermArena<'bump>,
+}
+
+impl<'bump> SubstitutionContext<'bump> {
+    pub fn new(arena: &'bump TermArena<'bump>) -> Self {
+        Self { arena }
+    }
+
+    pub fn arena(&self) -> &'bump TermArena<'bump> {
+        self.arena
+    }
+
+    /// Substitute: replace de Bruijn index `i` with `s` in term `t`.
+    pub fn subst(
+        &self,
+        s: &'bump Term<'bump>,
+        i: usize,
+        t: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        self.subst_cutoff(s, i, 0, t)
+    }
+
+    fn subst_cutoff(
+        &self,
+        s: &'bump Term<'bump>,
+        i: usize,
+        cutoff: usize,
+        t: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        match t {
+            Term::Var(j) => {
+                if *j == i + cutoff {
+                    self.shift(cutoff as i32, 0, s)
+                } else {
+                    t
+                }
+            }
+            Term::Lam(body) => {
+                let b = self.subst_cutoff(s, i, cutoff + 1, body);
+                self.arena.lam(b)
+            }
+            Term::App(f, a) => {
+                let f2 = self.subst_cutoff(s, i, cutoff, f);
+                let a2 = self.subst_cutoff(s, i, cutoff, a);
+                self.arena.app(f2, a2)
+            }
+            Term::Pi(n, a, b) => {
+                let a2 = self.subst_cutoff(s, i, cutoff, a);
+                let b2 = self.subst_cutoff(s, i, cutoff + 1, b);
+                self.arena.pi(n, a2, b2)
+            }
+            Term::Let(n, v, b, mc) => {
+                let v2 = self.subst_cutoff(s, i, cutoff, v);
+                let b2 = self.subst_cutoff(s, i, cutoff + 1, b);
+                let mc2 = mc.map(|c| self.subst_cutoff(s, i, cutoff, c));
+                self.arena.let_(n, v2, b2, mc2)
+            }
+            Term::IfThenElse(c, th, el) => {
+                let c2 = self.subst_cutoff(s, i, cutoff, c);
+                let th2 = self.subst_cutoff(s, i, cutoff, th);
+                let el2 = self.subst_cutoff(s, i, cutoff, el);
+                self.arena.if_then_else(c2, th2, el2)
+            }
+            Term::Annot(inner, ct) => {
+                let inner2 = self.subst_cutoff(s, i, cutoff, inner);
+                let ct2 = self.subst_cutoff(s, i, cutoff, ct);
+                self.arena.annot(inner2, ct2)
+            }
+            Term::ByProof(inner, p) => {
+                let inner2 = self.subst_cutoff(s, i, cutoff, inner);
+                let p2 = self.subst_cutoff(s, i, cutoff, p);
+                self.arena.by_proof(inner2, p2)
+            }
+            Term::Refine(n, par, p) => {
+                let par2 = self.subst_cutoff(s, i, cutoff, par);
+                let p2 = self.subst_cutoff(s, i, cutoff, p);
+                self.arena.refine(n, par2, p2)
+            }
+            Term::Func(fname, params, m_ret, pre, post, body) => {
+                let params2 = params
+                    .iter()
+                    .map(|(nm, mc)| {
+                        let mc2 = mc.map(|c| self.subst_cutoff(s, i, cutoff, c));
+                        (*nm, mc2)
+                    })
+                    .collect::<Vec<_>>();
+                let params_slice = self.arena.alloc_slice(&params2);
+                let m_ret2 = m_ret.map(|c| self.subst_cutoff(s, i, cutoff, c));
+                let pre2: Vec<_> = pre
+                    .iter()
+                    .map(|t| *self.subst_cutoff(s, i, cutoff, t))
+                    .collect();
+                let pre_slice = self.arena.alloc_slice(&pre2);
+                let post2: Vec<_> = post
+                    .iter()
+                    .map(|t| *self.subst_cutoff(s, i, cutoff, t))
+                    .collect();
+                let post_slice = self.arena.alloc_slice(&post2);
+                let body2 = self.subst_cutoff(s, i, cutoff + params.len(), body);
+                self.arena
+                    .func(fname, params_slice, m_ret2, pre_slice, post_slice, body2)
+            }
+            Term::ProofBlock(inner) => {
+                let inner2 = self.subst_cutoff(s, i, cutoff, inner);
+                self.arena.proof_block(inner2)
+            }
+            // Leaf nodes: return as-is
+            Term::This
+            | Term::RefParam
+            | Term::AutoProof
+            | Term::LitInt(_)
+            | Term::LitBool(_)
+            | Term::PrimOp(_)
+            | Term::Universe(_)
+            | Term::Builtin(_) => t,
+        }
+    }
+
+    /// Shift: add `d` to all de Bruijn indices >= `cutoff`.
+    pub fn shift(&self, d: i32, cutoff: i32, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        match t {
+            Term::Var(i) => {
+                if (*i as i32) >= cutoff {
+                    self.arena.var((*i as i32 + d) as usize)
+                } else {
+                    t
+                }
+            }
+            Term::Lam(body) => {
+                let b = self.shift(d, cutoff + 1, body);
+                self.arena.lam(b)
+            }
+            Term::App(f, a) => {
+                let f2 = self.shift(d, cutoff, f);
+                let a2 = self.shift(d, cutoff, a);
+                self.arena.app(f2, a2)
+            }
+            Term::Pi(n, a, b) => {
+                let a2 = self.shift(d, cutoff, a);
+                let b2 = self.shift(d, cutoff + 1, b);
+                self.arena.pi(n, a2, b2)
+            }
+            Term::Let(n, v, b, mc) => {
+                let v2 = self.shift(d, cutoff, v);
+                let b2 = self.shift(d, cutoff + 1, b);
+                let mc2 = mc.map(|c| self.shift(d, cutoff, c));
+                self.arena.let_(n, v2, b2, mc2)
+            }
+            Term::IfThenElse(c, th, el) => {
+                let c2 = self.shift(d, cutoff, c);
+                let th2 = self.shift(d, cutoff, th);
+                let el2 = self.shift(d, cutoff, el);
+                self.arena.if_then_else(c2, th2, el2)
+            }
+            Term::Annot(inner, ct) => {
+                let inner2 = self.shift(d, cutoff, inner);
+                let ct2 = self.shift(d, cutoff, ct);
+                self.arena.annot(inner2, ct2)
+            }
+            Term::ByProof(inner, p) => {
+                let inner2 = self.shift(d, cutoff, inner);
+                let p2 = self.shift(d, cutoff, p);
+                self.arena.by_proof(inner2, p2)
+            }
+            Term::Refine(n, par, p) => {
+                let par2 = self.shift(d, cutoff, par);
+                let p2 = self.shift(d, cutoff, p);
+                self.arena.refine(n, par2, p2)
+            }
+            Term::Func(fname, params, m_ret, pre, post, body) => {
+                let params2 = params
+                    .iter()
+                    .map(|(nm, mc)| {
+                        let mc2 = mc.map(|c| self.shift(d, cutoff, c));
+                        (*nm, mc2)
+                    })
+                    .collect::<Vec<_>>();
+                let params_slice = self.arena.alloc_slice(&params2);
+                let m_ret2 = m_ret.map(|c| self.shift(d, cutoff, c));
+                let pre2: Vec<_> = pre.iter().map(|t| *self.shift(d, cutoff, t)).collect();
+                let pre_slice = self.arena.alloc_slice(&pre2);
+                let post2: Vec<_> = post.iter().map(|t| *self.shift(d, cutoff, t)).collect();
+                let post_slice = self.arena.alloc_slice(&post2);
+                let body2 = self.shift(d, cutoff + params.len() as i32, body);
+                self.arena
+                    .func(fname, params_slice, m_ret2, pre_slice, post_slice, body2)
+            }
+            Term::ProofBlock(inner) => {
+                let inner2 = self.shift(d, cutoff, inner);
+                self.arena.proof_block(inner2)
+            }
+            // Leaf nodes
+            Term::RefParam
+            | Term::This
+            | Term::AutoProof
+            | Term::LitInt(_)
+            | Term::LitBool(_)
+            | Term::PrimOp(_)
+            | Term::Universe(_)
+            | Term::Builtin(_) => t,
+        }
+    }
+
+    /// Beta-reduction: substitute arg into the body of a lambda.
+    pub fn beta(
+        &self,
+        lam_body: &'bump Term<'bump>,
+        arg: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        let shifted_arg = self.shift(1, 0, arg);
+        let substituted = self.subst(shifted_arg, 0, lam_body);
+        self.shift(-1, 0, substituted)
+    }
+
+    /// Shift that preserves `RefParam` (leaves it untouched).
+    pub fn shift_preserve_refparam(&self, d: i32, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        self.shift_refparam_cutoff(d, 0, t)
+    }
+
+    fn shift_refparam_cutoff(
+        &self,
+        d: i32,
+        cutoff: i32,
+        t: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        match t {
+            Term::RefParam => t,
+            Term::Var(i) => {
+                if (*i as i32) >= cutoff {
+                    self.arena.var((*i as i32 + d) as usize)
+                } else {
+                    t
+                }
+            }
+            _ => self.shift(d, cutoff, t),
+        }
     }
 }
 
