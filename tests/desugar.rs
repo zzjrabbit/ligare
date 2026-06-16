@@ -1,120 +1,116 @@
 mod common;
 
-use common::bin;
+use common::{bin, leak_bump, s};
 use ligare::core::desugar::desugar;
-use ligare::core::syntax::{PrimOp, Term};
+use ligare::core::pool::TermArena;
+use ligare::core::syntax::PrimOp;
+
+fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
+    let b = leak_bump();
+    (b, TermArena::new(b))
+}
 
 #[test]
 fn func_one_param_no_ret() {
+    let (_bump, arena) = a();
+    let func = arena.func(
+        s(&arena, "id"),
+        arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
+        None,
+        &[],
+        &[],
+        arena.var(0),
+    );
     assert_eq!(
-        desugar(&Term::Func(
-            "id".to_string(),
-            vec![(
-                "x".to_string(),
-                Some(Box::new(Term::Builtin("int".to_string())))
-            )],
-            None,
-            vec![],
-            vec![],
-            Box::new(Term::Var(0)),
-        )),
-        Term::Annot(
-            Box::new(Term::Lam(Box::new(Term::Var(0)))),
-            Box::new(Term::Pi(
-                "x".to_string(),
-                Box::new(Term::Builtin("int".to_string())),
-                Box::new(Term::Builtin("data".to_string()))
-            )),
+        *desugar(&arena, func),
+        *arena.annot(
+            arena.lam(arena.var(0)),
+            arena.pi(
+                s(&arena, "x"),
+                arena.builtin(s(&arena, "int")),
+                arena.builtin(s(&arena, "data"))
+            )
         )
     );
 }
 
 #[test]
 fn func_one_param_with_ret() {
+    let (_bump, arena) = a();
+    let func = arena.func(
+        s(&arena, "f"),
+        arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
+        Some(arena.builtin(s(&arena, "int"))),
+        &[],
+        &[],
+        bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1)),
+    );
     assert_eq!(
-        desugar(&Term::Func(
-            "f".to_string(),
-            vec![(
-                "x".to_string(),
-                Some(Box::new(Term::Builtin("int".to_string())))
-            )],
-            Some(Box::new(Term::Builtin("int".to_string()))),
-            vec![],
-            vec![],
-            Box::new(bin(PrimOp::Add, Term::Var(0), Term::LitInt(1))),
-        )),
-        Term::Annot(
-            Box::new(Term::Lam(Box::new(bin(
-                PrimOp::Add,
-                Term::Var(0),
-                Term::LitInt(1)
-            )))),
-            Box::new(Term::Pi(
-                "x".to_string(),
-                Box::new(Term::Builtin("int".to_string())),
-                Box::new(Term::Builtin("int".to_string()))
-            )),
+        *desugar(&arena, func),
+        *arena.annot(
+            arena.lam(bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1))),
+            arena.pi(
+                s(&arena, "x"),
+                arena.builtin(s(&arena, "int")),
+                arena.builtin(s(&arena, "int"))
+            )
         )
     );
 }
 
 #[test]
 fn func_two_params() {
+    let (_bump, arena) = a();
+    let params = &[
+        (s(&arena, "a"), Some(arena.builtin(s(&arena, "int")))),
+        (s(&arena, "b"), Some(arena.builtin(s(&arena, "int")))),
+    ];
+    let func = arena.func(
+        s(&arena, "add"),
+        arena.alloc_slice(params),
+        Some(arena.builtin(s(&arena, "int"))),
+        &[],
+        &[],
+        bin(&arena, PrimOp::Add, arena.var(1), arena.var(0)),
+    );
+    let inner = bin(&arena, PrimOp::Add, arena.var(1), arena.var(0));
     assert_eq!(
-        desugar(&Term::Func(
-            "add".to_string(),
-            vec![
-                (
-                    "a".to_string(),
-                    Some(Box::new(Term::Builtin("int".to_string())))
-                ),
-                (
-                    "b".to_string(),
-                    Some(Box::new(Term::Builtin("int".to_string())))
-                ),
-            ],
-            Some(Box::new(Term::Builtin("int".to_string()))),
-            vec![],
-            vec![],
-            Box::new(bin(PrimOp::Add, Term::Var(1), Term::Var(0))),
-        )),
-        Term::Annot(
-            Box::new(Term::Lam(Box::new(Term::Lam(Box::new(bin(
-                PrimOp::Add,
-                Term::Var(1),
-                Term::Var(0)
-            )))))),
-            Box::new(Term::Pi(
-                "b".to_string(),
-                Box::new(Term::Builtin("int".to_string())),
-                Box::new(Term::Pi(
-                    "a".to_string(),
-                    Box::new(Term::Builtin("int".to_string())),
-                    Box::new(Term::Builtin("int".to_string())),
-                )),
-            )),
+        *desugar(&arena, func),
+        *arena.annot(
+            arena.lam(arena.lam(inner)),
+            arena.pi(
+                s(&arena, "b"),
+                arena.builtin(s(&arena, "int")),
+                arena.pi(
+                    s(&arena, "a"),
+                    arena.builtin(s(&arena, "int")),
+                    arena.builtin(s(&arena, "int"))
+                )
+            )
         )
     );
 }
 
 #[test]
 fn func_no_constraint() {
+    let (_bump, arena) = a();
+    let func = arena.func(
+        s(&arena, "id"),
+        arena.alloc_slice(&[(s(&arena, "x"), None)]),
+        None,
+        &[],
+        &[],
+        arena.var(0),
+    );
     assert_eq!(
-        desugar(&Term::Func(
-            "id".to_string(),
-            vec![("x".to_string(), None)],
-            None,
-            vec![],
-            vec![],
-            Box::new(Term::Var(0)),
-        )),
-        Term::Annot(
-            Box::new(Term::Lam(Box::new(Term::Var(0)))),
-            Box::new(Term::Pi(
-                "x".to_string(),
-                Box::new(Term::Builtin("data".to_string())),
-                Box::new(Term::Builtin("data".to_string()))
-            )),
+        *desugar(&arena, func),
+        *arena.annot(
+            arena.lam(arena.var(0)),
+            arena.pi(
+                s(&arena, "x"),
+                arena.builtin(s(&arena, "data")),
+                arena.builtin(s(&arena, "data"))
+            )
         )
     );
 }

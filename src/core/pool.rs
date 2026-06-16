@@ -1,7 +1,7 @@
 use bumpalo::Bump;
 use std::cell::RefCell;
 
-use crate::core::syntax::{PrimOp, Term, Universe};
+use crate::core::syntax::{Name, PrimOp, Term, Universe};
 
 /// A bumpalo-backed string interner.
 ///
@@ -13,8 +13,9 @@ use crate::core::syntax::{PrimOp, Term, Universe};
 /// use arena-allocated strings to reduce heap fragmentation.
 pub struct StringPool<'bump> {
     bump: &'bump Bump,
-    // Intern table: maps owned strings to their arena-allocated equivalents
-    intern: RefCell<Vec<(&'bump str, &'bump str)>>,
+    /// Intern table: caches previously allocated strings so identical
+    /// strings share the same bump-allocated pointer.
+    intern: RefCell<Vec<&'bump str>>,
 }
 
 impl<'bump> StringPool<'bump> {
@@ -34,12 +35,13 @@ impl<'bump> StringPool<'bump> {
     /// Intern a string: return a bump-allocated `&str`.
     /// Reuses an existing allocation if the same string was already interned.
     pub fn intern(&self, s: &str) -> &'bump str {
-        let mut intern = self.intern.borrow_mut();
-        if let Some(&(_, existing)) = intern.iter().find(|&&(_, v)| v == s) {
+        let intern = self.intern.borrow();
+        if let Some(&existing) = intern.iter().find(|&&v| v == s) {
             return existing;
         }
+        drop(intern);
         let allocated: &'bump str = self.bump.alloc_str(s);
-        intern.push((allocated, allocated));
+        self.intern.borrow_mut().push(allocated);
         allocated
     }
 
@@ -50,50 +52,9 @@ impl<'bump> StringPool<'bump> {
     }
 }
 
-// ── Bumpalo-backed Term that mirrors syntax::Term but uses arena references ──
+// ── TermArena: fast bump-allocated Term construction ──
 
-/// An arena-allocated variant of `Term` for use in temporary computations
-/// during checking/evaluation. Converted to owned `Term` at boundaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BumpTerm<'bump> {
-    Var(usize),
-    App(&'bump BumpTerm<'bump>, &'bump BumpTerm<'bump>),
-    Lam(&'bump BumpTerm<'bump>),
-    LitInt(i64),
-    LitBool(bool),
-    PrimOp(PrimOp),
-    Universe(Universe),
-    Builtin(&'bump str),
-    Pi(&'bump str, &'bump BumpTerm<'bump>, &'bump BumpTerm<'bump>),
-    Let(
-        &'bump str,
-        &'bump BumpTerm<'bump>,
-        &'bump BumpTerm<'bump>,
-        Option<&'bump BumpTerm<'bump>>,
-    ),
-    IfThenElse(
-        &'bump BumpTerm<'bump>,
-        &'bump BumpTerm<'bump>,
-        &'bump BumpTerm<'bump>,
-    ),
-    Refine(&'bump str, &'bump BumpTerm<'bump>, &'bump BumpTerm<'bump>),
-    Annot(&'bump BumpTerm<'bump>, &'bump BumpTerm<'bump>),
-    ByProof(&'bump BumpTerm<'bump>, &'bump BumpTerm<'bump>),
-    AutoProof,
-    RefParam,
-    This,
-    Func(
-        &'bump str,
-        &'bump [(&'bump str, Option<&'bump BumpTerm<'bump>>)],
-        Option<&'bump BumpTerm<'bump>>,
-        &'bump [BumpTerm<'bump>],
-        &'bump [BumpTerm<'bump>],
-        &'bump BumpTerm<'bump>,
-    ),
-    ProofBlock(&'bump BumpTerm<'bump>),
-}
-
-/// A bumpalo arena for constructing `BumpTerm` nodes efficiently.
+/// A bumpalo arena for constructing `Term` nodes efficiently.
 ///
 /// During checking and evaluation, many intermediate terms are created.
 /// This arena avoids individual heap allocations by allocating all
@@ -107,121 +68,134 @@ impl<'bump> TermArena<'bump> {
         Self { bump }
     }
 
+    /// Allocate a `Term` directly into the arena.
     #[inline]
-    fn alloc(&self, t: BumpTerm<'bump>) -> &'bump BumpTerm<'bump> {
+    pub fn alloc(&self, t: Term<'bump>) -> &'bump Term<'bump> {
         self.bump.alloc(t)
     }
 
-    pub fn var(&self, i: usize) -> &'bump BumpTerm<'bump> {
-        self.alloc(BumpTerm::Var(i))
+    /// Allocate a `&str` into the arena.
+    #[inline]
+    pub fn alloc_str(&self, s: &str) -> &'bump str {
+        self.bump.alloc_str(s)
     }
 
-    pub fn app(
+    /// Allocate a copy of a slice into the arena.
+    #[inline]
+    pub fn alloc_slice<T: Copy>(&self, data: &[T]) -> &'bump [T] {
+        if data.is_empty() {
+            return &[];
+        }
+        self.bump.alloc_slice_copy(data)
+    }
+
+    // ── leaf constructors ──
+
+    pub fn var(&self, i: usize) -> &'bump Term<'bump> {
+        self.alloc(Term::Var(i))
+    }
+
+    pub fn lit_int(&self, n: i64) -> &'bump Term<'bump> {
+        self.alloc(Term::LitInt(n))
+    }
+
+    pub fn lit_bool(&self, b: bool) -> &'bump Term<'bump> {
+        self.alloc(Term::LitBool(b))
+    }
+
+    pub fn prim_op(&self, op: PrimOp) -> &'bump Term<'bump> {
+        self.alloc(Term::PrimOp(op))
+    }
+
+    pub fn universe(&self, u: Universe) -> &'bump Term<'bump> {
+        self.alloc(Term::Universe(u))
+    }
+
+    pub fn builtin(&self, name: Name<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::Builtin(name))
+    }
+
+    pub fn auto_proof(&self) -> &'bump Term<'bump> {
+        self.alloc(Term::AutoProof)
+    }
+
+    pub fn ref_param(&self) -> &'bump Term<'bump> {
+        self.alloc(Term::RefParam)
+    }
+
+    pub fn this_(&self) -> &'bump Term<'bump> {
+        self.alloc(Term::This)
+    }
+
+    // ── recursive constructors ──
+
+    pub fn app(&self, f: &'bump Term<'bump>, a: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::App(f, a))
+    }
+
+    pub fn lam(&self, body: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::Lam(body))
+    }
+
+    pub fn pi(
         &self,
-        f: &'bump BumpTerm<'bump>,
-        a: &'bump BumpTerm<'bump>,
-    ) -> &'bump BumpTerm<'bump> {
-        self.alloc(BumpTerm::App(f, a))
+        name: Name<'bump>,
+        a: &'bump Term<'bump>,
+        b: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::Pi(name, a, b))
     }
 
-    pub fn lam(&self, body: &'bump BumpTerm<'bump>) -> &'bump BumpTerm<'bump> {
-        self.alloc(BumpTerm::Lam(body))
-    }
-
-    pub fn lit_int(&self, n: i64) -> &'bump BumpTerm<'bump> {
-        self.alloc(BumpTerm::LitInt(n))
-    }
-
-    pub fn lit_bool(&self, b: bool) -> &'bump BumpTerm<'bump> {
-        self.alloc(BumpTerm::LitBool(b))
-    }
-
-    pub fn builtin(&self, name: &'bump str) -> &'bump BumpTerm<'bump> {
-        self.alloc(BumpTerm::Builtin(name))
-    }
-
-    pub fn annot(
+    pub fn let_(
         &self,
-        t: &'bump BumpTerm<'bump>,
-        c: &'bump BumpTerm<'bump>,
-    ) -> &'bump BumpTerm<'bump> {
-        self.alloc(BumpTerm::Annot(t, c))
+        name: Name<'bump>,
+        val: &'bump Term<'bump>,
+        body: &'bump Term<'bump>,
+        mconstr: Option<&'bump Term<'bump>>,
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::Let(name, val, body, mconstr))
     }
 
     pub fn if_then_else(
         &self,
-        cond: &'bump BumpTerm<'bump>,
-        th: &'bump BumpTerm<'bump>,
-        el: &'bump BumpTerm<'bump>,
-    ) -> &'bump BumpTerm<'bump> {
-        self.alloc(BumpTerm::IfThenElse(cond, th, el))
+        cond: &'bump Term<'bump>,
+        th: &'bump Term<'bump>,
+        el: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::IfThenElse(cond, th, el))
     }
 
-    /// Convert a `BumpTerm` to an owned `Term` by recursively
-    /// walking the arena-allocated graph.
-    pub fn to_owned(&self, t: &BumpTerm<'bump>) -> Term {
-        match t {
-            BumpTerm::Var(i) => Term::Var(*i),
-            BumpTerm::App(f, a) => {
-                Term::App(Box::new(self.to_owned(f)), Box::new(self.to_owned(a)))
-            }
-            BumpTerm::Lam(b) => Term::Lam(Box::new(self.to_owned(b))),
-            BumpTerm::LitInt(n) => Term::LitInt(*n),
-            BumpTerm::LitBool(b) => Term::LitBool(*b),
-            BumpTerm::PrimOp(op) => Term::PrimOp(*op),
-            BumpTerm::Universe(u) => Term::Universe(*u),
-            BumpTerm::Builtin(n) => Term::Builtin(n.to_string()),
-            BumpTerm::Pi(n, a, b) => Term::Pi(
-                n.to_string(),
-                Box::new(self.to_owned(a)),
-                Box::new(self.to_owned(b)),
-            ),
-            BumpTerm::Let(n, v, b, mc) => Term::Let(
-                n.to_string(),
-                Box::new(self.to_owned(v)),
-                Box::new(self.to_owned(b)),
-                mc.as_ref().map(|c| Box::new(self.to_owned(c))),
-            ),
-            BumpTerm::IfThenElse(c, th, el) => Term::IfThenElse(
-                Box::new(self.to_owned(c)),
-                Box::new(self.to_owned(th)),
-                Box::new(self.to_owned(el)),
-            ),
-            BumpTerm::Refine(n, par, p) => Term::Refine(
-                n.to_string(),
-                Box::new(self.to_owned(par)),
-                Box::new(self.to_owned(p)),
-            ),
-            BumpTerm::Annot(t, c) => {
-                Term::Annot(Box::new(self.to_owned(t)), Box::new(self.to_owned(c)))
-            }
-            BumpTerm::ByProof(t, p) => {
-                Term::ByProof(Box::new(self.to_owned(t)), Box::new(self.to_owned(p)))
-            }
-            BumpTerm::AutoProof => Term::AutoProof,
-            BumpTerm::RefParam => Term::RefParam,
-            BumpTerm::This => Term::This,
-            BumpTerm::Func(name, params, m_ret, pre, post, body) => {
-                let owned_params: Vec<(String, Option<Box<Term>>)> = params
-                    .iter()
-                    .map(|(n, mc)| {
-                        (
-                            n.to_string(),
-                            mc.as_ref().map(|c| Box::new(self.to_owned(c))),
-                        )
-                    })
-                    .collect();
-                Term::Func(
-                    name.to_string(),
-                    owned_params,
-                    m_ret.as_ref().map(|c| Box::new(self.to_owned(c))),
-                    pre.iter().map(|t| self.to_owned(t)).collect(),
-                    post.iter().map(|t| self.to_owned(t)).collect(),
-                    Box::new(self.to_owned(body)),
-                )
-            }
-            BumpTerm::ProofBlock(t) => Term::ProofBlock(Box::new(self.to_owned(t))),
-        }
+    pub fn refine(
+        &self,
+        name: Name<'bump>,
+        parent: &'bump Term<'bump>,
+        pred: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::Refine(name, parent, pred))
+    }
+
+    pub fn annot(&self, t: &'bump Term<'bump>, c: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::Annot(t, c))
+    }
+
+    pub fn by_proof(&self, t: &'bump Term<'bump>, p: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::ByProof(t, p))
+    }
+
+    pub fn func(
+        &self,
+        name: Name<'bump>,
+        params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+        m_ret: Option<&'bump Term<'bump>>,
+        pre: &'bump [Term<'bump>],
+        post: &'bump [Term<'bump>],
+        body: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::Func(name, params, m_ret, pre, post, body))
+    }
+
+    pub fn proof_block(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::ProofBlock(t))
     }
 }
 

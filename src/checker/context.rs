@@ -1,20 +1,24 @@
 use crate::core::debruijn::{shift, subst};
+use crate::core::pool::TermArena;
 use crate::core::syntax::{Name, Term, Universe};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CtxEntry {
-    pub name: Name,
-    pub constraint: Term,
-    pub theorems: Vec<Term>,
+pub struct CtxEntry<'bump> {
+    pub name: Name<'bump>,
+    pub constraint: &'bump Term<'bump>,
+    pub theorems: Vec<&'bump Term<'bump>>,
 }
 
+/// A de Bruijn context — maps indices to type constraints.
+///
+/// Context cloning is O(n) in the number of entries but each entry
+/// only stores cheap references, so clones are fast.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Context {
-    entries: Vec<CtxEntry>,
+pub struct Context<'bump> {
+    entries: Vec<CtxEntry<'bump>>,
 }
 
-impl Context {
+impl<'bump> Context<'bump> {
     pub fn empty() -> Self {
         Self { entries: vec![] }
     }
@@ -23,19 +27,23 @@ impl Context {
         self.entries.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &CtxEntry> {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &CtxEntry<'bump>> {
         self.entries.iter()
     }
 
-    pub fn lookup(&self, i: usize) -> Option<Term> {
-        self.entries.get(i).map(|e| e.constraint.clone())
+    pub fn lookup(&self, i: usize) -> Option<&'bump Term<'bump>> {
+        self.entries.get(i).map(|e| e.constraint)
     }
 
-    pub fn lookup_name(&self, name: &str) -> Option<&CtxEntry> {
+    pub fn lookup_name(&self, name: &str) -> Option<&CtxEntry<'bump>> {
         self.entries.iter().find(|e| e.name == name)
     }
 
-    pub fn extend(&self, name: Name, constraint: Term) -> Self {
+    pub fn extend(&self, name: Name<'bump>, constraint: &'bump Term<'bump>) -> Self {
         let mut entries = self.entries.clone();
         entries.insert(
             0,
@@ -48,21 +56,21 @@ impl Context {
         Self { entries }
     }
 
-    pub fn extend_term(&self, constraint: Term) -> Self {
-        self.extend("_".to_string(), constraint)
+    pub fn extend_term(&self, constraint: &'bump Term<'bump>) -> Self {
+        self.extend("_", constraint)
     }
 
-    pub fn add_theorem(&self, name: &str, thm: Term) -> Self {
-        let entries: Vec<CtxEntry> = self
+    pub fn add_theorem(&self, name: &str, thm: &'bump Term<'bump>) -> Self {
+        let entries: Vec<CtxEntry<'bump>> = self
             .entries
             .iter()
             .map(|e| {
                 if e.name == name {
                     let mut new_thms = e.theorems.clone();
-                    new_thms.insert(0, thm.clone());
+                    new_thms.insert(0, thm);
                     CtxEntry {
-                        name: e.name.clone(),
-                        constraint: e.constraint.clone(),
+                        name: e.name,
+                        constraint: e.constraint,
                         theorems: new_thms,
                     }
                 } else {
@@ -74,78 +82,111 @@ impl Context {
     }
 }
 
-pub fn empty_ctx() -> Context {
+pub fn empty_ctx<'bump>() -> Context<'bump> {
     Context::empty()
 }
 
-pub fn extend_ctx(name: Name, constraint: Term, ctx: &Context) -> Context {
+pub fn extend_ctx<'bump>(
+    name: Name<'bump>,
+    constraint: &'bump Term<'bump>,
+    ctx: &Context<'bump>,
+) -> Context<'bump> {
     ctx.extend(name, constraint)
 }
 
-pub fn extend_ctx_term(constraint: Term, ctx: &Context) -> Context {
+pub fn extend_ctx_term<'bump>(
+    constraint: &'bump Term<'bump>,
+    ctx: &Context<'bump>,
+) -> Context<'bump> {
     ctx.extend_term(constraint)
 }
 
-pub fn add_theorem(name: &str, thm: Term, ctx: &Context) -> Context {
+pub fn add_theorem<'bump>(
+    name: &str,
+    thm: &'bump Term<'bump>,
+    ctx: &Context<'bump>,
+) -> Context<'bump> {
     ctx.add_theorem(name, thm)
 }
 
 // ---- Constraint Table ----
 
-pub type ConstraintTable = Vec<(Name, Term, Term)>;
+/// Maps refinement names to `(parent, predicate)` pairs.
+pub type ConstraintTable<'bump> = Vec<(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>)>;
 
-pub fn empty_table() -> ConstraintTable {
+pub fn empty_table<'bump>() -> ConstraintTable<'bump> {
     vec![]
 }
 
-pub fn add_refine(name: Name, parent: Term, p: Term, table: &ConstraintTable) -> ConstraintTable {
+pub fn add_refine<'bump>(
+    name: Name<'bump>,
+    parent: &'bump Term<'bump>,
+    predicate: &'bump Term<'bump>,
+    table: &ConstraintTable<'bump>,
+) -> ConstraintTable<'bump> {
     let mut t = table.clone();
-    t.insert(0, (name, parent, p));
+    t.insert(0, (name, parent, predicate));
     t
 }
 
-pub fn lookup_refine(name: &str, table: &ConstraintTable) -> Option<(Term, Term)> {
+pub fn lookup_refine<'bump>(
+    name: &str,
+    table: &ConstraintTable<'bump>,
+) -> Option<(&'bump Term<'bump>, &'bump Term<'bump>)> {
     table
         .iter()
-        .find(|(n, _, _)| n == name)
-        .map(|(_, p, pred)| (p.clone(), pred.clone()))
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, p, pred)| (*p, *pred))
 }
 
-/// Expand a constraint: replace RefParam with arg.
-pub fn expand_constraint(table: &ConstraintTable, constraint: &Term) -> Option<Term> {
+/// Expand a constraint: replace `RefParam` with `arg`.
+pub fn expand_constraint<'bump>(
+    arena: &TermArena<'bump>,
+    table: &ConstraintTable<'bump>,
+    constraint: &'bump Term<'bump>,
+) -> Option<&'bump Term<'bump>> {
     match constraint {
         Term::App(builtin, arg) => {
-            if let Term::Builtin(name) = builtin.as_ref() {
-                if let Some((parent, body)) = lookup_refine(name, table) {
-                    if matches!(parent, Term::Universe(Universe::UData)) {
-                        let body_shifted = shift_param(1, &body);
-                        let instantiated = subst(arg, 0, &body_shifted);
-                        let reduced = shift_param(-1, &instantiated);
-                        return Some(reduced);
-                    }
-                }
+            let Term::Builtin(name) = *builtin else {
+                return None;
+            };
+            let (parent, body) = lookup_refine(name, table)?;
+            if !matches!(parent, Term::Universe(Universe::UData)) {
+                return None;
             }
-            None
+            let body_shifted = shift_param(arena, 1, body);
+            let instantiated = subst(arena, arg, 0, body_shifted);
+            let reduced = shift_param(arena, -1, instantiated);
+            Some(reduced)
         }
         _ => None,
     }
 }
 
-/// Shift that preserves RefParam.
-pub fn shift_param(d: i32, t: &Term) -> Term {
-    shift_param_cutoff(d, 0, t)
+/// Shift that preserves `RefParam`.
+pub fn shift_param<'bump>(
+    arena: &TermArena<'bump>,
+    d: i32,
+    t: &'bump Term<'bump>,
+) -> &'bump Term<'bump> {
+    shift_param_cutoff(arena, d, 0, t)
 }
 
-fn shift_param_cutoff(d: i32, cutoff: i32, t: &Term) -> Term {
+fn shift_param_cutoff<'bump>(
+    arena: &TermArena<'bump>,
+    d: i32,
+    cutoff: i32,
+    t: &'bump Term<'bump>,
+) -> &'bump Term<'bump> {
     match t {
-        Term::RefParam => Term::RefParam,
+        Term::RefParam => t,
         Term::Var(i) => {
             if (*i as i32) >= cutoff {
-                Term::Var((*i as i32 + d) as usize)
+                arena.var((*i as i32 + d) as usize)
             } else {
-                Term::Var(*i)
+                t
             }
         }
-        other => shift(d, cutoff, other),
+        _ => shift(arena, d, cutoff, t),
     }
 }

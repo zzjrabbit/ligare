@@ -1,6 +1,6 @@
-use crate::core::syntax::Term;
+use crate::core::syntax::{Name, Term};
 
-pub fn pretty(t: &Term) -> String {
+pub fn pretty(t: &Term<'_>) -> String {
     match t {
         Term::Var(i) => format!("${}", i),
         Term::Lam(body) => format!("λ. {}", pretty(body)),
@@ -13,7 +13,7 @@ pub fn pretty(t: &Term) -> String {
         Term::Pi(name, a, b) => {
             format!("(Pi {} : {} => {})", name, pretty(a), pretty(b))
         }
-        Term::Builtin(s) => s.clone(),
+        Term::Builtin(s) => (*s).to_string(),
         Term::PrimOp(op) => op.to_string(),
         Term::LitBool(b) => b.to_string(),
         Term::Let(name, val, body, mconstr) => {
@@ -55,7 +55,6 @@ pub fn pretty(t: &Term) -> String {
         Term::Func(name, params, m_ret, preconds, postconds, body) => {
             let params_str = pretty_params(params);
             let ret_str = m_ret
-                .as_ref()
                 .map(|r| format!(" : {}", pretty(r)))
                 .unwrap_or_default();
             let pre_str: String = preconds
@@ -79,12 +78,12 @@ pub fn pretty(t: &Term) -> String {
     }
 }
 
-fn pretty_params(params: &[(String, Option<Box<Term>>)]) -> String {
+fn pretty_params(params: &[(Name<'_>, Option<&Term<'_>>)]) -> String {
     params
         .iter()
         .map(|(n, mc)| match mc {
             Some(c) => format!("{} : {}", n, pretty(c)),
-            None => n.clone(),
+            None => (*n).to_string(),
         })
         .collect::<Vec<_>>()
         .join(", ")

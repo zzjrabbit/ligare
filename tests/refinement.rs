@@ -1,40 +1,54 @@
 mod common;
 
-use common::{bin, parse, parse_constraint};
-use ligare::checker::checker::check;
+use common::{bin, leak_bump, parse, parse_constraint, s};
+use ligare::checker::check;
 use ligare::checker::context::{add_refine, empty_ctx, empty_table};
+use ligare::core::pool::TermArena;
 use ligare::core::syntax::{PrimOp, Term};
 
-fn nat_def() -> (String, Term, Term) {
+fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
+    let b = leak_bump();
+    (b, TermArena::new(b))
+}
+
+fn nat_def<'a>(arena: &TermArena<'a>) -> (&'a str, &'a Term<'a>, &'a Term<'a>) {
     (
-        "nat".to_string(),
-        Term::Builtin("int".to_string()),
-        bin(PrimOp::Ge, Term::RefParam, Term::LitInt(0)),
+        "nat",
+        arena.builtin(s(arena, "int")),
+        bin(arena, PrimOp::Ge, arena.ref_param(), arena.lit_int(0)),
     )
 }
 
-fn pos_def() -> (String, Term, Term) {
+fn pos_def<'a>(arena: &TermArena<'a>) -> (&'a str, &'a Term<'a>, &'a Term<'a>) {
     (
-        "pos".to_string(),
-        Term::Builtin("int".to_string()),
-        bin(PrimOp::Gt, Term::RefParam, Term::LitInt(0)),
+        "pos",
+        arena.builtin(s(arena, "int")),
+        bin(arena, PrimOp::Gt, arena.ref_param(), arena.lit_int(0)),
     )
 }
 
-fn check_with(refs: &[(String, Term, Term)], t: &Term, c: &Term) -> Result<(), String> {
-    let table = refs.iter().fold(empty_table(), |tbl, (n, p, pr)| {
-        add_refine(n.clone(), p.clone(), pr.clone(), &tbl)
-    });
-    check(&table, &empty_ctx(), t, c)
+fn check_with<'bump>(
+    arena: &TermArena<'bump>,
+    refs: &[(&str, &'bump Term<'bump>, &'bump Term<'bump>)],
+    t: &'bump Term<'bump>,
+    c: &'bump Term<'bump>,
+) -> Result<(), String> {
+    let table = refs
+        .iter()
+        .fold(empty_table(), |tbl, (n, p, pr)| add_refine(n, p, pr, &tbl));
+    check(arena, &table, &empty_ctx(), t, c)
 }
 
 #[test]
 fn nat_accepts_5() {
+    let (_b, arena) = a();
+    let nat = nat_def(&arena);
     assert_eq!(
         check_with(
-            &[nat_def()],
+            &arena,
+            &[nat],
             &Term::LitInt(5),
-            &Term::Builtin("nat".to_string())
+            arena.builtin(s(&arena, "nat"))
         ),
         Ok(())
     );
@@ -42,11 +56,14 @@ fn nat_accepts_5() {
 
 #[test]
 fn nat_rejects_negative_1() {
+    let (b, arena) = a();
+    let nat = nat_def(&arena);
     assert!(
         check_with(
-            &[nat_def()],
-            &parse("-1"),
-            &Term::Builtin("nat".to_string())
+            &arena,
+            &[nat],
+            parse("-1", b, &arena),
+            arena.builtin(s(&arena, "nat"))
         )
         .is_err()
     );
@@ -54,11 +71,14 @@ fn nat_rejects_negative_1() {
 
 #[test]
 fn nat_accepts_0() {
+    let (_b, arena) = a();
+    let nat = nat_def(&arena);
     assert_eq!(
         check_with(
-            &[nat_def()],
+            &arena,
+            &[nat],
             &Term::LitInt(0),
-            &Term::Builtin("nat".to_string())
+            arena.builtin(s(&arena, "nat"))
         ),
         Ok(())
     );
@@ -66,11 +86,14 @@ fn nat_accepts_0() {
 
 #[test]
 fn pos_rejects_0() {
+    let (_b, arena) = a();
+    let pos = pos_def(&arena);
     assert!(
         check_with(
-            &[pos_def()],
+            &arena,
+            &[pos],
             &Term::LitInt(0),
-            &Term::Builtin("pos".to_string())
+            arena.builtin(s(&arena, "pos"))
         )
         .is_err()
     );
@@ -78,11 +101,14 @@ fn pos_rejects_0() {
 
 #[test]
 fn pos_accepts_3() {
+    let (_b, arena) = a();
+    let pos = pos_def(&arena);
     assert_eq!(
         check_with(
-            &[pos_def()],
+            &arena,
+            &[pos],
             &Term::LitInt(3),
-            &Term::Builtin("pos".to_string())
+            arena.builtin(s(&arena, "pos"))
         ),
         Ok(())
     );
@@ -90,11 +116,14 @@ fn pos_accepts_3() {
 
 #[test]
 fn nat_is_subtype_of_int_variable_check() {
+    let (b, arena) = a();
+    let nat = nat_def(&arena);
     assert_eq!(
         check_with(
-            &[nat_def()],
-            &parse("\\x. x"),
-            &parse_constraint("nat -> int")
+            &arena,
+            &[nat],
+            parse("\\x. x", b, &arena),
+            parse_constraint("nat -> int", b, &arena)
         ),
         Ok(())
     );
@@ -102,11 +131,14 @@ fn nat_is_subtype_of_int_variable_check() {
 
 #[test]
 fn pos_is_subtype_of_int_parent_chain() {
+    let (b, arena) = a();
+    let pos = pos_def(&arena);
     assert_eq!(
         check_with(
-            &[pos_def()],
-            &parse("\\x. x"),
-            &parse_constraint("pos -> int")
+            &arena,
+            &[pos],
+            parse("\\x. x", b, &arena),
+            parse_constraint("pos -> int", b, &arena)
         ),
         Ok(())
     );

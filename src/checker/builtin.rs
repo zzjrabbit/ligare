@@ -1,106 +1,109 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::core::syntax::{Term, Universe};
 
-pub type BuiltinChecker = fn(&Term) -> Result<(), String>;
+pub type BuiltinChecker = fn(&Term<'_>) -> Result<(), String>;
 
 pub struct BuiltinEntry {
     pub universe: Universe,
     pub checker: BuiltinChecker,
 }
 
-fn check_int(t: &Term) -> Result<(), String> {
-    match t {
-        Term::LitInt(_) => Ok(()),
-        _ => Err("Expected an integer".to_string()),
+fn check_int(t: &Term<'_>) -> Result<(), String> {
+    if matches!(t, Term::LitInt(_)) {
+        Ok(())
+    } else {
+        Err("Expected an integer".to_string())
     }
 }
 
-fn check_bool(t: &Term) -> Result<(), String> {
-    match t {
-        Term::LitBool(_) => Ok(()),
-        _ => Err("Expected a boolean".to_string()),
+fn check_bool(t: &Term<'_>) -> Result<(), String> {
+    if matches!(t, Term::LitBool(_)) {
+        Ok(())
+    } else {
+        Err("Expected a boolean".to_string())
     }
 }
 
-fn check_any(_t: &Term) -> Result<(), String> {
+fn check_any(_t: &Term<'_>) -> Result<(), String> {
     Ok(())
 }
 
-fn builtins() -> HashMap<String, BuiltinEntry> {
-    let mut m = HashMap::new();
-    m.insert(
-        "int".to_string(),
-        BuiltinEntry {
-            universe: Universe::UProp,
-            checker: check_int,
-        },
-    );
-    m.insert(
-        "bool".to_string(),
-        BuiltinEntry {
-            universe: Universe::UProp,
-            checker: check_bool,
-        },
-    );
-    m.insert(
-        "data".to_string(),
-        BuiltinEntry {
-            universe: Universe::UProp,
-            checker: check_any,
-        },
-    );
-    m.insert(
-        "theorem".to_string(),
-        BuiltinEntry {
-            universe: Universe::UTheorem,
-            checker: check_any,
-        },
-    );
-    m.insert(
-        "proof".to_string(),
-        BuiltinEntry {
-            universe: Universe::UProof,
-            checker: check_any,
-        },
-    );
-    m.insert(
-        "and".to_string(),
-        BuiltinEntry {
-            universe: Universe::UProp,
-            checker: check_any,
-        },
-    );
-    m.insert(
-        "or".to_string(),
-        BuiltinEntry {
-            universe: Universe::UProp,
-            checker: check_any,
-        },
-    );
-    m.insert(
-        "not".to_string(),
-        BuiltinEntry {
-            universe: Universe::UProp,
-            checker: check_any,
-        },
-    );
-    m.insert(
-        "implies".to_string(),
-        BuiltinEntry {
-            universe: Universe::UProp,
-            checker: check_any,
-        },
-    );
-    m
-}
+/// Statically initialized builtin table via LazyLock, avoiding
+/// repeated heap allocation on every lookup.
+static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|| {
+    HashMap::from([
+        (
+            "int",
+            BuiltinEntry {
+                universe: Universe::UProp,
+                checker: check_int,
+            },
+        ),
+        (
+            "bool",
+            BuiltinEntry {
+                universe: Universe::UProp,
+                checker: check_bool,
+            },
+        ),
+        (
+            "data",
+            BuiltinEntry {
+                universe: Universe::UProp,
+                checker: check_any,
+            },
+        ),
+        (
+            "theorem",
+            BuiltinEntry {
+                universe: Universe::UTheorem,
+                checker: check_any,
+            },
+        ),
+        (
+            "proof",
+            BuiltinEntry {
+                universe: Universe::UProof,
+                checker: check_any,
+            },
+        ),
+        (
+            "and",
+            BuiltinEntry {
+                universe: Universe::UProp,
+                checker: check_any,
+            },
+        ),
+        (
+            "or",
+            BuiltinEntry {
+                universe: Universe::UProp,
+                checker: check_any,
+            },
+        ),
+        (
+            "not",
+            BuiltinEntry {
+                universe: Universe::UProp,
+                checker: check_any,
+            },
+        ),
+        (
+            "implies",
+            BuiltinEntry {
+                universe: Universe::UProp,
+                checker: check_any,
+            },
+        ),
+    ])
+});
 
 pub fn classify_builtin(name: &str) -> Option<Universe> {
-    builtins().get(name).map(|e| e.universe)
+    BUILTINS.get(name).map(|e| e.universe)
 }
 
 pub fn check_builtin(name: &str) -> Option<BuiltinChecker> {
-    builtins().get(name).map(|e| e.checker)
+    BUILTINS.get(name).map(|e| e.checker)
 }

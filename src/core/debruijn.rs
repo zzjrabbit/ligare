@@ -1,141 +1,209 @@
+use crate::core::pool::TermArena;
 use crate::core::syntax::Term;
 
 /// Substitution: replace de Bruijn index `i` with `s` in term `t`.
-pub fn subst(s: &Term, i: usize, t: &Term) -> Term {
-    subst_cutoff(s, i, 0, t)
+/// Allocates the result in the arena.
+pub fn subst<'bump>(
+    arena: &TermArena<'bump>,
+    s: &'bump Term<'bump>,
+    i: usize,
+    t: &'bump Term<'bump>,
+) -> &'bump Term<'bump> {
+    subst_cutoff(arena, s, i, 0, t)
 }
 
-fn subst_cutoff(s: &Term, i: usize, cutoff: usize, t: &Term) -> Term {
+fn subst_cutoff<'bump>(
+    arena: &TermArena<'bump>,
+    s: &'bump Term<'bump>,
+    i: usize,
+    cutoff: usize,
+    t: &'bump Term<'bump>,
+) -> &'bump Term<'bump> {
     match t {
         Term::Var(j) => {
             if *j == i + cutoff {
-                shift(cutoff as i32, 0, s)
+                shift(arena, cutoff as i32, 0, s)
             } else {
-                Term::Var(*j)
+                t
             }
         }
-        Term::Lam(body) => Term::Lam(Box::new(subst_cutoff(s, i, cutoff + 1, body))),
-        Term::App(f, a) => Term::App(
-            Box::new(subst_cutoff(s, i, cutoff, f)),
-            Box::new(subst_cutoff(s, i, cutoff, a)),
-        ),
-        Term::Pi(n, a, b) => Term::Pi(
-            n.clone(),
-            Box::new(subst_cutoff(s, i, cutoff, a)),
-            Box::new(subst_cutoff(s, i, cutoff + 1, b)),
-        ),
-        Term::Let(n, v, b, mc) => Term::Let(
-            n.clone(),
-            Box::new(subst_cutoff(s, i, cutoff, v)),
-            Box::new(subst_cutoff(s, i, cutoff + 1, b)),
-            mc.as_ref().map(|c| Box::new(subst_cutoff(s, i, cutoff, c))),
-        ),
-        Term::IfThenElse(c, th, el) => Term::IfThenElse(
-            Box::new(subst_cutoff(s, i, cutoff, c)),
-            Box::new(subst_cutoff(s, i, cutoff, th)),
-            Box::new(subst_cutoff(s, i, cutoff, el)),
-        ),
-        Term::Annot(t, ct) => Term::Annot(
-            Box::new(subst_cutoff(s, i, cutoff, t)),
-            Box::new(subst_cutoff(s, i, cutoff, ct)),
-        ),
-        Term::ByProof(t, p) => Term::ByProof(
-            Box::new(subst_cutoff(s, i, cutoff, t)),
-            Box::new(subst_cutoff(s, i, cutoff, p)),
-        ),
-        Term::Refine(n, par, p) => Term::Refine(
-            n.clone(),
-            Box::new(subst_cutoff(s, i, cutoff, par)),
-            Box::new(subst_cutoff(s, i, cutoff, p)),
-        ),
-        Term::This => Term::This,
-        Term::Func(fname, params, m_ret, pre, post, body) => Term::Func(
-            fname.clone(),
-            params
+        Term::Lam(body) => {
+            let b = subst_cutoff(arena, s, i, cutoff + 1, body);
+            arena.lam(b)
+        }
+        Term::App(f, a) => {
+            let f2 = subst_cutoff(arena, s, i, cutoff, f);
+            let a2 = subst_cutoff(arena, s, i, cutoff, a);
+            arena.app(f2, a2)
+        }
+        Term::Pi(n, a, b) => {
+            let a2 = subst_cutoff(arena, s, i, cutoff, a);
+            let b2 = subst_cutoff(arena, s, i, cutoff + 1, b);
+            arena.pi(n, a2, b2)
+        }
+        Term::Let(n, v, b, mc) => {
+            let v2 = subst_cutoff(arena, s, i, cutoff, v);
+            let b2 = subst_cutoff(arena, s, i, cutoff + 1, b);
+            let mc2 = mc.map(|c| subst_cutoff(arena, s, i, cutoff, c));
+            arena.let_(n, v2, b2, mc2)
+        }
+        Term::IfThenElse(c, th, el) => {
+            let c2 = subst_cutoff(arena, s, i, cutoff, c);
+            let th2 = subst_cutoff(arena, s, i, cutoff, th);
+            let el2 = subst_cutoff(arena, s, i, cutoff, el);
+            arena.if_then_else(c2, th2, el2)
+        }
+        Term::Annot(inner, ct) => {
+            let inner2 = subst_cutoff(arena, s, i, cutoff, inner);
+            let ct2 = subst_cutoff(arena, s, i, cutoff, ct);
+            arena.annot(inner2, ct2)
+        }
+        Term::ByProof(inner, p) => {
+            let inner2 = subst_cutoff(arena, s, i, cutoff, inner);
+            let p2 = subst_cutoff(arena, s, i, cutoff, p);
+            arena.by_proof(inner2, p2)
+        }
+        Term::Refine(n, par, p) => {
+            let par2 = subst_cutoff(arena, s, i, cutoff, par);
+            let p2 = subst_cutoff(arena, s, i, cutoff, p);
+            arena.refine(n, par2, p2)
+        }
+        Term::Func(fname, params, m_ret, pre, post, body) => {
+            let params2 = params
                 .iter()
                 .map(|(nm, mc)| {
-                    (
-                        nm.clone(),
-                        mc.as_ref().map(|c| Box::new(subst_cutoff(s, i, cutoff, c))),
-                    )
+                    let mc2 = mc.map(|c| subst_cutoff(arena, s, i, cutoff, c));
+                    (*nm, mc2)
                 })
-                .collect(),
-            m_ret
-                .as_ref()
-                .map(|c| Box::new(subst_cutoff(s, i, cutoff, c))),
-            pre.iter().map(|t| subst_cutoff(s, i, cutoff, t)).collect(),
-            post.iter().map(|t| subst_cutoff(s, i, cutoff, t)).collect(),
-            Box::new(subst_cutoff(s, i, cutoff + params.len(), body)),
-        ),
-        Term::ProofBlock(t) => Term::ProofBlock(Box::new(subst_cutoff(s, i, cutoff, t))),
-        other => other.clone(),
+                .collect::<Vec<_>>();
+            let params_slice = arena.alloc_slice(&params2);
+            let m_ret2 = m_ret.map(|c| subst_cutoff(arena, s, i, cutoff, c));
+            let pre2: Vec<_> = pre
+                .iter()
+                .map(|t| *subst_cutoff(arena, s, i, cutoff, t))
+                .collect();
+            let pre_slice = arena.alloc_slice(&pre2);
+            let post2: Vec<_> = post
+                .iter()
+                .map(|t| *subst_cutoff(arena, s, i, cutoff, t))
+                .collect();
+            let post_slice = arena.alloc_slice(&post2);
+            let body2 = subst_cutoff(arena, s, i, cutoff + params.len(), body);
+            arena.func(fname, params_slice, m_ret2, pre_slice, post_slice, body2)
+        }
+        Term::ProofBlock(inner) => {
+            let inner2 = subst_cutoff(arena, s, i, cutoff, inner);
+            arena.proof_block(inner2)
+        }
+        // Leaf nodes: return as-is (reference equality is fine)
+        Term::This
+        | Term::RefParam
+        | Term::AutoProof
+        | Term::LitInt(_)
+        | Term::LitBool(_)
+        | Term::PrimOp(_)
+        | Term::Universe(_)
+        | Term::Builtin(_) => t,
     }
 }
 
 /// Shift: add `d` to all de Bruijn indices >= `cutoff`.
-pub fn shift(d: i32, cutoff: i32, t: &Term) -> Term {
+/// Allocates the result in the arena.
+pub fn shift<'bump>(
+    arena: &TermArena<'bump>,
+    d: i32,
+    cutoff: i32,
+    t: &'bump Term<'bump>,
+) -> &'bump Term<'bump> {
     match t {
         Term::Var(i) => {
             if (*i as i32) >= cutoff {
-                Term::Var((*i as i32 + d) as usize)
+                arena.var((*i as i32 + d) as usize)
             } else {
-                Term::Var(*i)
+                t
             }
         }
-        Term::Lam(body) => Term::Lam(Box::new(shift(d, cutoff + 1, body))),
-        Term::App(f, a) => Term::App(Box::new(shift(d, cutoff, f)), Box::new(shift(d, cutoff, a))),
-        Term::Pi(n, a, b) => Term::Pi(
-            n.clone(),
-            Box::new(shift(d, cutoff, a)),
-            Box::new(shift(d, cutoff + 1, b)),
-        ),
-        Term::Let(n, v, b, mc) => Term::Let(
-            n.clone(),
-            Box::new(shift(d, cutoff, v)),
-            Box::new(shift(d, cutoff + 1, b)),
-            mc.as_ref().map(|c| Box::new(shift(d, cutoff, c))),
-        ),
-        Term::IfThenElse(c, th, el) => Term::IfThenElse(
-            Box::new(shift(d, cutoff, c)),
-            Box::new(shift(d, cutoff, th)),
-            Box::new(shift(d, cutoff, el)),
-        ),
-        Term::Annot(t, ct) => Term::Annot(
-            Box::new(shift(d, cutoff, t)),
-            Box::new(shift(d, cutoff, ct)),
-        ),
-        Term::ByProof(t, p) => {
-            Term::ByProof(Box::new(shift(d, cutoff, t)), Box::new(shift(d, cutoff, p)))
+        Term::Lam(body) => {
+            let b = shift(arena, d, cutoff + 1, body);
+            arena.lam(b)
         }
-        Term::Refine(n, par, p) => Term::Refine(
-            n.clone(),
-            Box::new(shift(d, cutoff, par)),
-            Box::new(shift(d, cutoff, p)),
-        ),
-        Term::Func(fname, params, m_ret, pre, post, body) => Term::Func(
-            fname.clone(),
-            params
+        Term::App(f, a) => {
+            let f2 = shift(arena, d, cutoff, f);
+            let a2 = shift(arena, d, cutoff, a);
+            arena.app(f2, a2)
+        }
+        Term::Pi(n, a, b) => {
+            let a2 = shift(arena, d, cutoff, a);
+            let b2 = shift(arena, d, cutoff + 1, b);
+            arena.pi(n, a2, b2)
+        }
+        Term::Let(n, v, b, mc) => {
+            let v2 = shift(arena, d, cutoff, v);
+            let b2 = shift(arena, d, cutoff + 1, b);
+            let mc2 = mc.map(|c| shift(arena, d, cutoff, c));
+            arena.let_(n, v2, b2, mc2)
+        }
+        Term::IfThenElse(c, th, el) => {
+            let c2 = shift(arena, d, cutoff, c);
+            let th2 = shift(arena, d, cutoff, th);
+            let el2 = shift(arena, d, cutoff, el);
+            arena.if_then_else(c2, th2, el2)
+        }
+        Term::Annot(inner, ct) => {
+            let inner2 = shift(arena, d, cutoff, inner);
+            let ct2 = shift(arena, d, cutoff, ct);
+            arena.annot(inner2, ct2)
+        }
+        Term::ByProof(inner, p) => {
+            let inner2 = shift(arena, d, cutoff, inner);
+            let p2 = shift(arena, d, cutoff, p);
+            arena.by_proof(inner2, p2)
+        }
+        Term::Refine(n, par, p) => {
+            let par2 = shift(arena, d, cutoff, par);
+            let p2 = shift(arena, d, cutoff, p);
+            arena.refine(n, par2, p2)
+        }
+        Term::Func(fname, params, m_ret, pre, post, body) => {
+            let params2 = params
                 .iter()
                 .map(|(nm, mc)| {
-                    (
-                        nm.clone(),
-                        mc.as_ref().map(|c| Box::new(shift(d, cutoff, c))),
-                    )
+                    let mc2 = mc.map(|c| shift(arena, d, cutoff, c));
+                    (*nm, mc2)
                 })
-                .collect(),
-            m_ret.as_ref().map(|c| Box::new(shift(d, cutoff, c))),
-            pre.iter().map(|t| shift(d, cutoff, t)).collect(),
-            post.iter().map(|t| shift(d, cutoff, t)).collect(),
-            Box::new(shift(d, cutoff + params.len() as i32, body)),
-        ),
-        Term::ProofBlock(t) => Term::ProofBlock(Box::new(shift(d, cutoff, t))),
-        other => other.clone(),
+                .collect::<Vec<_>>();
+            let params_slice = arena.alloc_slice(&params2);
+            let m_ret2 = m_ret.map(|c| shift(arena, d, cutoff, c));
+            let pre2: Vec<_> = pre.iter().map(|t| *shift(arena, d, cutoff, t)).collect();
+            let pre_slice = arena.alloc_slice(&pre2);
+            let post2: Vec<_> = post.iter().map(|t| *shift(arena, d, cutoff, t)).collect();
+            let post_slice = arena.alloc_slice(&post2);
+            let body2 = shift(arena, d, cutoff + params.len() as i32, body);
+            arena.func(fname, params_slice, m_ret2, pre_slice, post_slice, body2)
+        }
+        Term::ProofBlock(inner) => {
+            let inner2 = shift(arena, d, cutoff, inner);
+            arena.proof_block(inner2)
+        }
+        // Leaf nodes
+        Term::RefParam
+        | Term::This
+        | Term::AutoProof
+        | Term::LitInt(_)
+        | Term::LitBool(_)
+        | Term::PrimOp(_)
+        | Term::Universe(_)
+        | Term::Builtin(_) => t,
     }
 }
 
 /// Beta-reduction: substitute arg into the body of a lambda.
-pub fn beta(lam_body: &Term, arg: &Term) -> Term {
-    let shifted_arg = shift(1, 0, arg);
-    let substituted = subst(&shifted_arg, 0, lam_body);
-    shift(-1, 0, &substituted)
+pub fn beta<'bump>(
+    arena: &TermArena<'bump>,
+    lam_body: &'bump Term<'bump>,
+    arg: &'bump Term<'bump>,
+) -> &'bump Term<'bump> {
+    let shifted_arg = shift(arena, 1, 0, arg);
+    let substituted = subst(arena, shifted_arg, 0, lam_body);
+    shift(arena, -1, 0, substituted)
 }

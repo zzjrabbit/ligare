@@ -7,6 +7,5 @@ edition = "2024"
 logos = "0.15"
 clap = { version = "4", features = ["derive"] }
 bumpalo = "3"
-peg = "0.8"
 
 [dev-dependencies]

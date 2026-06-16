@@ -1,32 +1,30 @@
+use crate::core::pool::TermArena;
 use crate::core::syntax::Term;
 
+/// Default constraint name used when no type annotation is given.
+const DATA: &str = "data";
+
 /// Desugar `Func` nodes into lambda + Pi annotation.
-pub fn desugar(t: &Term) -> Term {
+pub fn desugar<'bump>(arena: &TermArena<'bump>, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
     match t {
         Term::Func(_fname, params, m_ret, _preconds, _postconds, body) => {
             // Build lambda body: fold params into nested Lam
-            let func_body = params
-                .iter()
-                .fold(body.as_ref().clone(), |b, _| Term::Lam(Box::new(b)));
+            let func_body = params.iter().fold(*body, |b, _| arena.lam(b));
 
             // Build Pi type annotation
-            let default_constraint = Term::Builtin("data".to_string());
-            let func_type = params.iter().rev().rfold(
-                m_ret
-                    .as_ref()
-                    .map(|r| r.as_ref().clone())
-                    .unwrap_or_else(|| default_constraint.clone()),
-                |b, (pn, mc)| {
-                    let constraint = mc
-                        .as_ref()
-                        .map(|c| c.as_ref().clone())
-                        .unwrap_or_else(|| default_constraint.clone());
-                    Term::Pi(pn.clone(), Box::new(constraint), Box::new(b))
-                },
-            );
+            let default_constraint = arena.builtin(arena.alloc_str(DATA));
+            let func_type =
+                params
+                    .iter()
+                    .rev()
+                    .rfold(m_ret.unwrap_or(default_constraint), |b, (pn, mc)| {
+                        let constraint = mc.unwrap_or(default_constraint);
+                        arena.pi(pn, constraint, b)
+                    });
 
-            Term::Annot(Box::new(func_body), Box::new(func_type))
+            arena.annot(func_body, func_type)
         }
-        other => other.clone(),
+        // Non-Func terms return as-is.
+        _ => t,
     }
 }

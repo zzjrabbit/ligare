@@ -1,8 +1,14 @@
 mod common;
 
-use common::bin;
+use common::{bin, leak_bump, s};
+use ligare::core::pool::TermArena;
 use ligare::core::syntax::{PrimOp, Term};
 use ligare::pretty::pretty;
+
+fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
+    let b = leak_bump();
+    (b, TermArena::new(b))
+}
 
 #[test]
 fn integer() {
@@ -11,53 +17,34 @@ fn integer() {
 
 #[test]
 fn lambda() {
-    assert_eq!(pretty(&Term::Lam(Box::new(Term::Var(0)))), "λ. $0");
+    assert_eq!(pretty(&Term::Lam(&Term::Var(0))), "λ. $0");
 }
 
 #[test]
 fn if_() {
-    assert_eq!(
-        pretty(&Term::IfThenElse(
-            Box::new(Term::LitBool(true)),
-            Box::new(Term::LitInt(1)),
-            Box::new(Term::LitInt(0))
-        )),
-        "if true then 1 else 0"
-    );
+    let (_bump, arena) = a();
+    let t = arena.if_then_else(arena.lit_bool(true), arena.lit_int(1), arena.lit_int(0));
+    assert_eq!(pretty(t), "if true then 1 else 0");
 }
 
 #[test]
 fn let_() {
-    assert_eq!(
-        pretty(&Term::Let(
-            "x".to_string(),
-            Box::new(Term::LitInt(5)),
-            Box::new(Term::Var(0)),
-            None
-        )),
-        "let x = 5 in $0"
-    );
+    let (_bump, arena) = a();
+    let t = arena.let_(s(&arena, "x"), arena.lit_int(5), arena.var(0), None);
+    assert_eq!(pretty(t), "let x = 5 in $0");
 }
 
 #[test]
 fn annot() {
-    assert_eq!(
-        pretty(&Term::Annot(
-            Box::new(Term::LitInt(5)),
-            Box::new(Term::Builtin("int".to_string()))
-        )),
-        "(5 : int)"
-    );
+    let (_bump, arena) = a();
+    let t = arena.annot(arena.lit_int(5), arena.builtin(s(&arena, "int")));
+    assert_eq!(pretty(t), "(5 : int)");
 }
 
 #[test]
 fn refine() {
-    assert_eq!(
-        pretty(&Term::Refine(
-            "".to_string(),
-            Box::new(Term::Builtin("int".to_string())),
-            Box::new(bin(PrimOp::Ge, Term::RefParam, Term::LitInt(0)))
-        )),
-        "int where (x => ((>= x) 0))"
-    );
+    let (_bump, arena) = a();
+    let pred = bin(&arena, PrimOp::Ge, arena.ref_param(), arena.lit_int(0));
+    let t = arena.refine(s(&arena, ""), arena.builtin(s(&arena, "int")), pred);
+    assert_eq!(pretty(t), "int where (x => ((>= x) 0))");
 }

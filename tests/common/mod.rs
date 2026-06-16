@@ -1,19 +1,46 @@
 #![allow(dead_code)]
 
-use ligare::core::syntax::{PrimOp, Term};
+use bumpalo::Bump;
+use ligare::core::pool::TermArena;
+use ligare::core::syntax::{Name, PrimOp, Term};
 use ligare::front::parser::parse_expr_top;
 
-pub fn bin(op: PrimOp, l: Term, r: Term) -> Term {
-    Term::App(
-        Box::new(Term::App(Box::new(Term::PrimOp(op)), Box::new(l))),
-        Box::new(r),
-    )
+/// Leak a Bump to get a 'static arena.  Tests are short-lived so leaking
+/// is harmless.
+pub fn leak_bump() -> &'static Bump {
+    Box::leak(Box::new(Bump::new()))
 }
 
-pub fn parse(input: &str) -> Term {
-    parse_expr_top(input).unwrap_or_else(|e| panic!("parse error in test: {}", e))
+/// Build a binary operator application: `(op l) r`.
+pub fn bin<'bump>(
+    arena: &TermArena<'bump>,
+    op: PrimOp,
+    l: &'bump Term<'bump>,
+    r: &'bump Term<'bump>,
+) -> &'bump Term<'bump> {
+    let op_app = arena.app(arena.prim_op(op), l);
+    arena.app(op_app, r)
 }
 
-pub fn parse_constraint(input: &str) -> Term {
-    parse_expr_top(input).unwrap_or_else(|e| panic!("parse constraint error: {}", e))
+/// Convenience: allocate a string in the arena.
+pub fn s<'bump>(arena: &TermArena<'bump>, s: &str) -> Name<'bump> {
+    arena.alloc_str(s)
+}
+
+/// Parse an expression using the given bump + arena.
+pub fn parse<'bump>(
+    input: &str,
+    _bump: &'bump Bump,
+    arena: &'bump TermArena<'bump>,
+) -> &'bump Term<'bump> {
+    parse_expr_top(input, _bump, arena).unwrap_or_else(|e| panic!("parse error in test: {}", e))
+}
+
+/// Parse a constraint expression.
+pub fn parse_constraint<'bump>(
+    input: &str,
+    bump: &'bump Bump,
+    arena: &'bump TermArena<'bump>,
+) -> &'bump Term<'bump> {
+    parse(input, bump, arena)
 }

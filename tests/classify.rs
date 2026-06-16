@@ -4,10 +4,7 @@ use ligare::core::syntax::{Term, Universe};
 
 #[test]
 fn lit_int_is_data() {
-    assert_eq!(
-        classify(&empty_ctx(), &Term::LitInt(42)),
-        Some(Universe::UData)
-    );
+    assert_eq!(classify(&empty_ctx(), &Term::LitInt(42)), Some(Universe::UData));
 }
 
 #[test]
@@ -21,7 +18,7 @@ fn lit_bool_is_data() {
 #[test]
 fn lam_is_data() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::Lam(Box::new(Term::Var(0)))),
+        classify(&empty_ctx(), &Term::Lam(&Term::Var(0))),
         Some(Universe::UData)
     );
 }
@@ -31,11 +28,7 @@ fn pi_is_prop() {
     assert_eq!(
         classify(
             &empty_ctx(),
-            &Term::Pi(
-                "".to_string(),
-                Box::new(Term::Builtin("int".to_string())),
-                Box::new(Term::Builtin("bool".to_string()))
-            )
+            &Term::Pi("", &Term::Builtin("int"), &Term::Builtin("bool"))
         ),
         Some(Universe::UProp)
     );
@@ -43,10 +36,7 @@ fn pi_is_prop() {
 
 #[test]
 fn auto_proof_is_proof() {
-    assert_eq!(
-        classify(&empty_ctx(), &Term::AutoProof),
-        Some(Universe::UProof)
-    );
+    assert_eq!(classify(&empty_ctx(), &Term::AutoProof), Some(Universe::UProof));
 }
 
 #[test]
@@ -60,7 +50,7 @@ fn universe_uprop_is_prop() {
 #[test]
 fn int_builtin_is_prop() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::Builtin("int".to_string())),
+        classify(&empty_ctx(), &Term::Builtin("int")),
         Some(Universe::UProp)
     );
 }
@@ -68,7 +58,7 @@ fn int_builtin_is_prop() {
 #[test]
 fn and_is_prop() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::Builtin("and".to_string())),
+        classify(&empty_ctx(), &Term::Builtin("and")),
         Some(Universe::UProp)
     );
 }
@@ -76,13 +66,7 @@ fn and_is_prop() {
 #[test]
 fn annot_keeps_inner_universe() {
     assert_eq!(
-        classify(
-            &empty_ctx(),
-            &Term::Annot(
-                Box::new(Term::LitInt(5)),
-                Box::new(Term::Builtin("int".to_string()))
-            )
-        ),
+        classify(&empty_ctx(), &Term::Annot(&Term::LitInt(5), &Term::Builtin("int"))),
         Some(Universe::UData)
     );
 }
@@ -92,7 +76,7 @@ fn by_proof_keeps_inner_universe() {
     assert_eq!(
         classify(
             &empty_ctx(),
-            &Term::ByProof(Box::new(Term::LitInt(5)), Box::new(Term::AutoProof))
+            &Term::ByProof(&Term::LitInt(5), &Term::AutoProof)
         ),
         Some(Universe::UData)
     );
@@ -103,11 +87,7 @@ fn if_then_else_is_data() {
     assert_eq!(
         classify(
             &empty_ctx(),
-            &Term::IfThenElse(
-                Box::new(Term::LitBool(true)),
-                Box::new(Term::LitInt(1)),
-                Box::new(Term::LitInt(0))
-            )
+            &Term::IfThenElse(&Term::LitBool(true), &Term::LitInt(1), &Term::LitInt(0))
         ),
         Some(Universe::UData)
     );
@@ -118,17 +98,7 @@ fn func_is_data() {
     assert_eq!(
         classify(
             &empty_ctx(),
-            &Term::Func(
-                "f".to_string(),
-                vec![(
-                    "x".to_string(),
-                    Some(Box::new(Term::Builtin("int".to_string())))
-                )],
-                None,
-                vec![],
-                vec![],
-                Box::new(Term::Var(0))
-            )
+            &Term::Func("f", &[("x", Some(&Term::Builtin("int")))], None, &[], &[], &Term::Var(0))
         ),
         Some(Universe::UData)
     );
@@ -139,12 +109,7 @@ fn let_is_body_universe() {
     assert_eq!(
         classify(
             &empty_ctx(),
-            &Term::Let(
-                "x".to_string(),
-                Box::new(Term::LitInt(5)),
-                Box::new(Term::Var(0)),
-                None
-            )
+            &Term::Let("x", &Term::LitInt(5), &Term::Var(0), None)
         ),
         None
     );
@@ -152,8 +117,5 @@ fn let_is_body_universe() {
 
 #[test]
 fn unknown_builtin_is_nothing() {
-    assert_eq!(
-        classify(&empty_ctx(), &Term::Builtin("unknown".to_string())),
-        None
-    );
+    assert_eq!(classify(&empty_ctx(), &Term::Builtin("unknown")), None);
 }

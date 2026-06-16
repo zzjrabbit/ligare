@@ -1,55 +1,74 @@
 mod common;
 
-use common::{bin, parse};
+use common::{bin, leak_bump, parse, s};
 use ligare::core::eval::eval;
+use ligare::core::pool::TermArena;
 use ligare::core::syntax::{PrimOp, Term};
+
+fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
+    let b = leak_bump();
+    (b, TermArena::new(b))
+}
 
 #[test]
 fn integer_identity() {
-    assert_eq!(eval(&Term::LitInt(42)).unwrap(), Term::LitInt(42));
+    let (_b, arena) = a();
+    assert_eq!(*eval(&arena, &Term::LitInt(42)).unwrap(), Term::LitInt(42));
 }
 
 #[test]
 fn arithmetic() {
-    assert_eq!(eval(&parse("1 + 2 * 3")).unwrap(), Term::LitInt(7));
+    let (b, arena) = a();
+    assert_eq!(
+        *eval(&arena, parse("1 + 2 * 3", b, &arena)).unwrap(),
+        Term::LitInt(7)
+    );
 }
 
 #[test]
 fn if_true() {
+    let (b, arena) = a();
     assert_eq!(
-        eval(&parse("if true then 10 else 20")).unwrap(),
+        *eval(&arena, parse("if true then 10 else 20", b, &arena)).unwrap(),
         Term::LitInt(10)
     );
 }
 
 #[test]
 fn if_false() {
+    let (b, arena) = a();
     assert_eq!(
-        eval(&parse("if false then 10 else 20")).unwrap(),
+        *eval(&arena, parse("if false then 10 else 20", b, &arena)).unwrap(),
         Term::LitInt(20)
     );
 }
 
 #[test]
 fn let_() {
+    let (b, arena) = a();
     assert_eq!(
-        eval(&parse("let x := 5 in x + 3")).unwrap(),
+        *eval(&arena, parse("let x := 5 in x + 3", b, &arena)).unwrap(),
         Term::LitInt(8)
     );
 }
 
 #[test]
 fn beta_reduction() {
-    assert_eq!(eval(&parse("(\\x. x + 1) 5")).unwrap(), Term::LitInt(6));
+    let (b, arena) = a();
+    assert_eq!(
+        *eval(&arena, parse("(\\x. x + 1) 5", b, &arena)).unwrap(),
+        Term::LitInt(6)
+    );
 }
 
 #[test]
 fn annot_strips_annotation() {
+    let (_b, arena) = a();
     assert_eq!(
-        eval(&Term::Annot(
-            Box::new(Term::LitInt(42)),
-            Box::new(Term::Builtin("int".to_string()))
-        ))
+        *eval(
+            &arena,
+            arena.annot(arena.lit_int(42), arena.builtin(s(&arena, "int")))
+        )
         .unwrap(),
         Term::LitInt(42)
     );
@@ -57,11 +76,12 @@ fn annot_strips_annotation() {
 
 #[test]
 fn by_proof_strips_proof() {
+    let (_b, arena) = a();
     assert_eq!(
-        eval(&Term::ByProof(
-            Box::new(Term::LitInt(42)),
-            Box::new(Term::LitBool(true))
-        ))
+        *eval(
+            &arena,
+            arena.by_proof(arena.lit_int(42), arena.lit_bool(true))
+        )
         .unwrap(),
         Term::LitInt(42)
     );
@@ -69,14 +89,23 @@ fn by_proof_strips_proof() {
 
 #[test]
 fn arithmetic_on_bool_fails() {
-    let result = eval(&bin(PrimOp::Add, Term::LitBool(true), Term::LitInt(1)));
+    let (_b, arena) = a();
+    let result = eval(
+        &arena,
+        bin(&arena, PrimOp::Add, arena.lit_bool(true), arena.lit_int(1)),
+    );
     assert!(result.is_err());
 }
 
 #[test]
 fn nested_if() {
+    let (b, arena) = a();
     assert_eq!(
-        eval(&parse("if (if true then false else true) then 1 else 2")).unwrap(),
+        *eval(
+            &arena,
+            parse("if (if true then false else true) then 1 else 2", b, &arena)
+        )
+        .unwrap(),
         Term::LitInt(2)
     );
 }

@@ -1,6 +1,7 @@
 use std::fmt;
 
-pub type Name = String;
+/// A name in the AST, arena-allocated for zero-copy sharing.
+pub type Name<'bump> = &'bump str;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Universe {
@@ -54,33 +55,43 @@ impl fmt::Display for PrimOp {
     }
 }
 
-/// The core Term, using de Bruijn indices for bound variables.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Term {
+/// The core Term, arena-allocated via bumpalo.
+///
+/// All recursive positions use `&'bump Term<'bump>` references instead of
+/// `Box<Term>`, eliminating per-node heap allocations.  The entire term tree
+/// lives in a single bump arena for fast allocation and excellent cache
+/// locality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Term<'bump> {
     Var(usize),
-    App(Box<Term>, Box<Term>),
-    Lam(Box<Term>),
+    App(&'bump Term<'bump>, &'bump Term<'bump>),
+    Lam(&'bump Term<'bump>),
     LitInt(i64),
     LitBool(bool),
     PrimOp(PrimOp),
     Universe(Universe),
-    Builtin(Name),
-    Pi(Name, Box<Term>, Box<Term>),
-    Let(Name, Box<Term>, Box<Term>, Option<Box<Term>>),
-    IfThenElse(Box<Term>, Box<Term>, Box<Term>),
-    Refine(Name, Box<Term>, Box<Term>),
-    Annot(Box<Term>, Box<Term>),
-    ByProof(Box<Term>, Box<Term>),
+    Builtin(Name<'bump>),
+    Pi(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>),
+    Let(
+        Name<'bump>,
+        &'bump Term<'bump>,
+        &'bump Term<'bump>,
+        Option<&'bump Term<'bump>>,
+    ),
+    IfThenElse(&'bump Term<'bump>, &'bump Term<'bump>, &'bump Term<'bump>),
+    Refine(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>),
+    Annot(&'bump Term<'bump>, &'bump Term<'bump>),
+    ByProof(&'bump Term<'bump>, &'bump Term<'bump>),
     AutoProof,
     RefParam,
     This,
     Func(
-        Name,
-        Vec<(Name, Option<Box<Term>>)>,
-        Option<Box<Term>>,
-        Vec<Term>,
-        Vec<Term>,
-        Box<Term>,
+        Name<'bump>,
+        &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+        Option<&'bump Term<'bump>>,
+        &'bump [Term<'bump>],
+        &'bump [Term<'bump>],
+        &'bump Term<'bump>,
     ),
-    ProofBlock(Box<Term>),
+    ProofBlock(&'bump Term<'bump>),
 }
