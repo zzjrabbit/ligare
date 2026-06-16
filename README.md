@@ -1,152 +1,157 @@
-# Ligare 语言设计文档
+# Ligare Language Design Document
 
-> **一切皆项，一切皆约束。**  
-> 文件后缀：`.lig`
+> **Everything is a term. Everything is a constraint.**  
+> File extension: `.lig`
 
-## 1. 核心哲学
+[中文版](README_zh.md)
 
-Ligare 是一种极简主义编程语言。它只承认一种实体——**项（Term）**。  
-没有独立的“类型”语法，没有“类型与值”的二分，也没有“程序与证明”的二分。  
-一切皆为项，一切关系皆为**约束**。
+## 1. Core Philosophy
 
-## 2. 项与约束
+Ligare is a minimalist programming language. It recognizes only one kind of entity — the **Term**.  
+There is no separate "type" syntax, no "type vs. value" dichotomy, and no "program vs. proof" dichotomy.  
+Everything is a term, and every relationship is a **constraint**.
 
-### 2.1 项
-项是语言中唯一的存在。变量、字面量、函数、数据类型、命题、证明、宏……统统是项。
+## 2. Terms and Constraints
 
-### 2.2 约束
-项与项之间通过**约束**产生关系。  
-`a 受 T 约束` 表示项 `a` 归属于项 `T`。  
-约束关系取代了传统语言中的“类型归属”，但约束本身也是项，可以被其他项约束。
+### 2.1 Terms
+A term is the only existence in the language. Variables, literals, functions, data types, propositions, proofs, macros... all are terms.
 
-**示例**  
+### 2.2 Constraints
+Relationships between terms are established through **constraints**.  
+`a constrained by T` means that term `a` belongs to term `T`.  
+The constraint relationship replaces the "type ascription" found in traditional languages, but constraints themselves are also terms and can be constrained by other terms.
+
+**Example**  
 ```
-3 受 int 约束
-int 受 data 约束
-```
-
-### 2.3 层级
-所有项具有层级。约束关系强制层级有序，以防止罗素悖论式的自指结构。  
-（具体层级规则将在形式化部分详细定义。）
-
-## 3. 元约束
-
-语言内置四种根约束，称为**元约束**。它们定义了宇宙的根基。
-
-| 元约束 | 含义 | 运行时存在？ |
-|--------|------|--------------|
-| `data` | 可计算的数据宇宙，一切最终保留的项皆归于此 | 是 |
-| `prop` | 命题宇宙，描述逻辑条件 | 否（擦除） |
-| `theorem` | 已成立的命题，封装证明 | 否（擦除） |
-| `proof` | 证明的具体构造，是证据项 | 否（擦除） |
-
-所有用户定义的约束最终都根植于这四个元约束之下。
-
-## 4. 精化约束（别名约束）
-
-用户可以定义新的约束，并附加命题条件。这是 Ligare 的“类型”定义方式。
-
-**语法**  
-```
-约束 nat 为 (data x & x >= 0)
+3 constrained by int
+int constrained by data
 ```
 
-**解读**  
-`nat` 是一个新约束，任何受 `nat` 约束的项必须：
-1. 受 `data` 约束（即可计算数据）；
-2. 附带一个 `proof` 项，证明该数据满足 `x >= 0`。
+### 2.3 Levels
+All terms have a level. Constraint relationships enforce level ordering to prevent Russell-paradox-style self-referential structures.  
+(Specific level rules will be defined in detail in the formalization section.)
 
-**使用**  
+### 2.4 Naming Conventions
+- **Constraints / Types**: PascalCase (e.g., `Nat`, `Point`, `LinkedList`)
+- **Functions / Theorems**: snake_case (e.g., `div`, `is_sorted`, `add_node`)
+
+## 3. Meta-Constraints
+
+The language has four built-in root constraints, called **meta-constraints**. They define the foundation of the universe.
+
+| Meta-constraint | Meaning | Exists at runtime? |
+|-----------------|---------|---------------------|
+| `data` | The computable data universe; all terms ultimately retained belong here | Yes |
+| `prop` | The proposition universe, describing logical conditions | No (erased) |
+| `theorem` | An established proposition, encapsulating a proof | No (erased) |
+| `proof` | The concrete construction of a proof; an evidence term | No (erased) |
+
+All user-defined constraints are ultimately rooted beneath these four meta-constraints.
+
+## 4. Refinement Constraints (Alias Constraints)
+
+Users can define new constraints with attached propositional conditions. This is Ligare's way of defining "types."
+
+**Syntax**  
 ```
-a : nat   // a 必须是一个非负整数
-```
-编译器在需要处自动要求该证明，或通过上下文推导。
-
-## 5. 函数与契约
-
-函数可以约束自己的参数和返回值，形成前置/后置条件契约。
-
-**语法示例**  
-```
-函数 div(a: int, b: int)
-  参数约束: b ≠ 0
-  输出约束: result * b = a
+constraint nat as (data x & x >= 0)
 ```
 
-**证明义务**  
-- 调用方必须提供 `b ≠ 0` 的证明（或由编译器自动推导）。
-- 函数体内部必须构造 `result * b = a` 的证明。
+**Interpretation**  
+`nat` is a new constraint. Any term constrained by `nat` must:
+1. Be constrained by `data` (i.e., be computable data);
+2. Carry a `proof` term demonstrating that the data satisfies `x >= 0`.
 
-所有证明项（`proof`）在编译期检查通过后擦除，不影响运行性能。
+**Usage**  
+```
+a : nat   // a must be a non-negative integer
+```
+The compiler automatically demands this proof where needed, or derives it from context.
 
-## 6. if 表达式与定理引入
+## 5. Functions and Contracts
 
-`if` 的条件被视为一个命题。进入分支时，分支上下文会自动引入一个对应的 `theorem`。
+Functions can constrain their own parameters and return values, forming pre/post-condition contracts.
 
-**示例**  
+**Syntax example**  
+```
+function div(a: int, b: int)
+  param constraint: b ≠ 0
+  output constraint: result * b = a
+```
+
+**Proof obligations**  
+- The caller must provide a proof of `b ≠ 0` (or the compiler derives it automatically).
+- The function body must construct the proof of `result * b = a`.
+
+All proof terms (`proof`) are erased after passing compile-time checks, with zero runtime overhead.
+
+## 6. `if` Expressions and Theorem Introduction
+
+The condition of an `if` is treated as a proposition. When entering a branch, the branch context automatically introduces a corresponding `theorem`.
+
+**Example**  
 ```
 if (x > 0) then
-  // 此处自动获得 theorem: x > 0
-  // 可用于满足其他约束的证明义务
-  div(10, x)  // 此处 x ≠ 0 可由 x > 0 自动推导
+  // a theorem: x > 0 is automatically available here
+  // it can be used to satisfy proof obligations of other constraints
+  div(10, x)  // x ≠ 0 can be automatically derived from x > 0
 else
-  // 此处自动获得 theorem: not (x > 0)
+  // a theorem: not (x > 0) is automatically available here
 ```
 
-编译后，`if` 仍被编译为简单的条件跳转，证明部分全部擦除。
+After compilation, `if` is still compiled into a simple conditional jump; all proof parts are erased.
 
-## 7. 结构体
+## 7. Structs
 
-结构体是受 `data` 约束的复合项，包含命名字段和可选的不变量。
+A struct is a compound term constrained by `data`, containing named fields and optional invariants.
 
-**定义示例**  
+**Definition example**  
 ```
-约束 Point 为 data 结构体：
-  字段 x : int
-  字段 y : int
-  不变量 : x >= 0 ∧ y >= 0
+constraint Point as data struct:
+  field x : int
+  field y : int
+  invariant : x >= 0 ∧ y >= 0
 ```
 
-**构造**  
-构造 `Point` 时，必须提供不变量成立的 `proof`。  
-编译器自动生成：
-- 构造器（带证明义务）
-- 字段投影函数
-- 不变量对应的 `theorem`（例如：对任意 `p : Point`，`p.x >= 0` 是一个可用定理）
+**Construction**  
+When constructing `Point`, a `proof` that the invariant holds must be provided.  
+The compiler automatically generates:
+- A constructor (with proof obligations)
+- Field projection functions
+- A `theorem` corresponding to the invariant (e.g., for any `p : Point`, `p.x >= 0` is an available theorem)
 
-## 8. 编译期元编程
+## 8. Compile-Time Metaprogramming
 
-`proof` 宇宙同时承担元编程的角色。  
-任何仅用于生成 `data` 代码的程序，都可以写成 `proof` 项，在编译期求值并拼接。
+The `proof` universe also serves the role of metaprogramming.  
+Any program used solely for generating `data` code can be written as a `proof` term, evaluated at compile time and spliced in.
 
-**机制**  
-- 引号（quote）：将代码片段转为可以操作的 AST 数据；
-- 拼接（splice）：将 `proof` 项执行得到的 AST 插回 `data` 上下文。
+**Mechanism**  
+- Quote: converts a code fragment into manipulable AST data;
+- Splice: inserts the AST produced by evaluating a `proof` term back into the `data` context.
 
-**安全保证**  
-拼接时强制验证生成的代码满足目标约束，否则编译失败。
+**Safety guarantee**  
+During splicing, the generated code is forcibly verified to satisfy the target constraint; otherwise compilation fails.
 
-由于 `proof` 最终被擦除，元编程部分完全不会进入运行时。
+Since `proof` is ultimately erased, the metaprogramming parts never enter the runtime.
 
-## 9. 编译与擦除
+## 9. Compilation and Erasure
 
-编译过程分为两大阶段：
+The compilation process is divided into two major phases:
 
-1. **约束检查与证明验证**  
-   对所有项进行约束检查，验证所有 `proof` 义务是否满足。
+1. **Constraint checking and proof verification**  
+   Perform constraint checking on all terms and verify that all `proof` obligations are satisfied.
 
-2. **擦除与代码生成**  
-   保留所有受 `data` 约束的项，删除所有受 `prop`、`theorem`、`proof` 约束的项。  
-   最终产物是纯粹的、无运行开销的可执行代码。
+2. **Erasure and code generation**  
+   Retain all terms constrained by `data`, and remove all terms constrained by `prop`, `theorem`, or `proof`.  
+   The final product is pure, zero-overhead executable code.
 
-## 10. 总结
+## 10. Summary
 
-Ligare 用 **“项约束项”** 这一个核心概念，统一了：
-- 类型系统
-- 命题与证明
-- 契约式设计
-- 编译期元编程
+Ligare uses the single core concept of **"terms constrained by terms"** to unify:
+- The type system
+- Propositions and proofs
+- Design by contract
+- Compile-time metaprogramming
 
-它追求**静态安全的极致与运行时的零负担**，同时保持概念的极小集合。  
-这份文档是其核心理念的概要，后续将逐步补充形式化定义、操作语义与实现细节。
-
+It pursues **the extreme of static safety with zero runtime burden**, while maintaining a minimal set of concepts.  
+This document is an outline of its core ideas; formal definitions, operational semantics, and implementation details will be added progressively.

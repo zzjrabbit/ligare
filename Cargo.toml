@@ -1,0 +1,12 @@
+[package]
+name = "ligare"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+logos = "0.15"
+clap = { version = "4", features = ["derive"] }
+bumpalo = "3"
+peg = "0.8"
+
+[dev-dependencies]
