@@ -1,11 +1,21 @@
+//! Strong evaluator — reduces terms to (full) normal form.
+//!
+//! Unlike `whnf`, this evaluator fully computes recursive function calls
+//! (via `replace_this`) and evaluates arguments eagerly for primitive
+//! operations.  It is used at the top level (`--eval`, `#show`) where
+//! the user explicitly requests runtime computation.
+//!
+//! During type checking, prefer `WhnfEvaluator` from `crate::core::whnf`.
+
 use crate::core::pool::{SubstitutionContext, TermArena};
 use crate::core::syntax::{PrimOp, Term};
 use crate::pretty::pretty;
 
-/// Evaluates terms to normal form using a bump arena for intermediate allocations.
+/// Strong evaluator — reduces terms to normal form using a bump arena
+/// for intermediate allocations.
 ///
 /// Encapsulates the arena and substitution context, providing a clean
-/// OOP interface where evaluation state is bundled with its operations.
+/// interface where evaluation state is bundled with its operations.
 pub struct Evaluator<'bump> {
     arena: &'bump TermArena<'bump>,
     sub: SubstitutionContext<'bump>,
@@ -29,7 +39,8 @@ impl<'bump> Evaluator<'bump> {
         &self.sub
     }
 
-    /// Evaluate a term to normal form.
+    /// Evaluate a term to normal form (strong evaluation).
+    ///
     /// May allocate intermediate terms in the arena; the result lives in the arena.
     pub fn eval(&self, t: &'bump Term<'bump>) -> Result<&'bump Term<'bump>, String> {
         match t {
@@ -185,7 +196,11 @@ impl<'bump> Evaluator<'bump> {
                 };
                 Ok(self.arena.alloc(Self::arith_result(*op, *x, *y)))
             }
-            _ => Err(format!("arithmetic on non-integer: {} and {}.", pretty(x), pretty(y))),
+            _ => Err(format!(
+                "arithmetic on non-integer: {} and {}.",
+                pretty(x),
+                pretty(y)
+            )),
         }
     }
 

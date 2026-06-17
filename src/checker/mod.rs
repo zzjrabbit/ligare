@@ -3,13 +3,13 @@ pub mod context;
 
 use crate::checker::builtin::check_builtin;
 use crate::checker::context::{
-    ConstraintTable, Context, add_refine, add_theorem, expand_constraint, extend_ctx,
+    ConstraintTable, Context, add_refine, add_theorem, empty_table, expand_constraint, extend_ctx,
     extend_ctx_term, lookup_refine,
 };
 use crate::core::desugar::Desugarer;
-use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
 use crate::core::syntax::{Name, PrimOp, Term, Universe};
+use crate::core::whnf::WhnfEvaluator;
 
 /// Common string constants to avoid repeated heap allocation.
 const BOOL: &str = "bool";
@@ -27,7 +27,7 @@ const EXPECTED_LAMBDA: &str = "Expected a lambda";
 /// create temporary table clones without mutating the persistent state.
 pub struct TypeChecker<'bump> {
     arena: &'bump TermArena<'bump>,
-    evaluator: Evaluator<'bump>,
+    evaluator: WhnfEvaluator<'bump>,
     desugarer: Desugarer<'bump>,
     table: ConstraintTable<'bump>,
 }
@@ -36,9 +36,9 @@ impl<'bump> TypeChecker<'bump> {
     pub fn new(arena: &'bump TermArena<'bump>) -> Self {
         Self {
             arena,
-            evaluator: Evaluator::new(arena),
+            evaluator: WhnfEvaluator::new(arena),
             desugarer: Desugarer::new(arena),
-            table: vec![],
+            table: empty_table(),
         }
     }
 
@@ -85,7 +85,7 @@ impl<'bump> TypeChecker<'bump> {
                 self.check_if(ctx, cond, tbranch, fbranch, constraint)
             }
             Term::ProofBlock(proof_term) => {
-                let evald = self.evaluator.eval(term)?;
+                let evald = self.evaluator.whnf(term)?;
                 self.prove_with(ctx, evald, constraint, proof_term)
             }
             Term::Let(_name, val, body, mconstr) => {
@@ -99,7 +99,7 @@ impl<'bump> TypeChecker<'bump> {
     fn with_table(arena: &'bump TermArena<'bump>, table: &ConstraintTable<'bump>) -> Self {
         Self {
             arena,
-            evaluator: Evaluator::new(arena),
+            evaluator: WhnfEvaluator::new(arena),
             desugarer: Desugarer::new(arena),
             table: table.clone(),
         }
@@ -116,8 +116,8 @@ impl<'bump> TypeChecker<'bump> {
         let expected = ctx
             .lookup(i)
             .ok_or_else(|| format!("Unbound variable index: {}", i))?;
-        let expected_val = self.evaluator.eval(expected)?;
-        let constraint_val = self.evaluator.eval(constraint)?;
+        let expected_val = self.evaluator.whnf(expected)?;
+        let constraint_val = self.evaluator.whnf(constraint)?;
         if expected_val == constraint_val || self.is_refinement_of(expected_val, constraint_val) {
             Ok(())
         } else {
@@ -172,11 +172,11 @@ impl<'bump> TypeChecker<'bump> {
             return self.prove_auto(ctx, term, p);
         }
 
-        let norm = self.evaluator.eval(constraint)?;
+        let norm = self.evaluator.whnf(constraint)?;
         match norm {
             Term::Builtin(name) => {
                 if let Some(builtin_checker) = check_builtin(name) {
-                    let evald = self.evaluator.eval(term)?;
+                    let evald = self.evaluator.whnf(term)?;
                     builtin_checker(evald)
                 } else if let Some((parent, pred)) = lookup_refine(name, &self.table) {
                     self.check(ctx, term, parent)?;
@@ -261,7 +261,7 @@ impl<'bump> TypeChecker<'bump> {
         b: &'bump Term<'bump>,
         name: Option<Name<'bump>>,
     ) -> Result<(), String> {
-        let t_val = self.evaluator.eval(t)?;
+        let t_val = self.evaluator.whnf(t)?;
         let Term::Lam(body) = t_val else {
             return Err(EXPECTED_LAMBDA.to_string());
         };
@@ -333,7 +333,7 @@ impl<'bump> TypeChecker<'bump> {
         pred: &'bump Term<'bump>,
     ) -> Result<(), String> {
         let instantiated = self.subst_ref_param(subject, pred);
-        let instantiated_val = self.evaluator.eval(instantiated)?;
+        let instantiated_val = self.evaluator.whnf(instantiated)?;
         match instantiated_val {
             Term::LitBool(true) => Ok(()),
             Term::LitBool(false) => Err(format!("Predicate does not hold for {:?}", subject)),
@@ -406,8 +406,8 @@ impl<'bump> TypeChecker<'bump> {
         t1: &'bump Term<'bump>,
         t2: &'bump Term<'bump>,
     ) -> bool {
-        let v1 = self.evaluator.eval(self.subst_ref_param(subject, t1));
-        let v2 = self.evaluator.eval(self.subst_ref_param(subject, t2));
+        let v1 = self.evaluator.whnf(self.subst_ref_param(subject, t1));
+        let v2 = self.evaluator.whnf(self.subst_ref_param(subject, t2));
         matches!((v1, v2), (Ok(a), Ok(b)) if a == b)
     }
 
@@ -452,7 +452,7 @@ impl<'bump> TypeChecker<'bump> {
 
     fn eval_eq_simple(&self, t1: &'bump Term<'bump>, t2: &'bump Term<'bump>) -> bool {
         matches!(
-            (self.evaluator.eval(t1), self.evaluator.eval(t2)),
+            (self.evaluator.whnf(t1), self.evaluator.whnf(t2)),
             (Ok(a), Ok(b)) if a == b
         )
     }
@@ -523,7 +523,7 @@ pub fn check<'bump>(
 ) -> Result<(), String> {
     let checker = TypeChecker {
         arena,
-        evaluator: Evaluator::new(arena),
+        evaluator: WhnfEvaluator::new(arena),
         desugarer: Desugarer::new(arena),
         table: table.clone(),
     };
