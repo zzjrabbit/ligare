@@ -632,3 +632,263 @@ fn annot_supertype_fails() {
     let term = arena.annot(arena.lit_bool(true), arena.builtin(s(&arena, "bool")));
     assert!(check_empty(&arena, term, arena.builtin(s(&arena, "int"))).is_err());
 }
+
+// ── Data constraint (top type) ──
+
+#[test]
+fn data_constraint_accepts_int() {
+    let (_b, arena) = a();
+    assert_eq!(
+        check_empty(&arena, arena.lit_int(42), arena.builtin(s(&arena, "data"))),
+        Ok(())
+    );
+}
+
+#[test]
+fn data_constraint_accepts_bool() {
+    let (_b, arena) = a();
+    assert_eq!(
+        check_empty(
+            &arena,
+            arena.lit_bool(true),
+            arena.builtin(s(&arena, "data"))
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn data_constraint_accepts_lambda() {
+    let (_b, arena) = a();
+    assert_eq!(
+        check_empty(
+            &arena,
+            arena.lam(arena.var(0)),
+            arena.builtin(s(&arena, "data"))
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn universe_data_constraint_accepts_anything() {
+    let (_b, arena) = a();
+    assert_eq!(
+        check_empty(
+            &arena,
+            arena.lit_int(1),
+            arena.universe(ligare::core::syntax::Universe::UData)
+        ),
+        Ok(())
+    );
+}
+
+// ── Boolean predicate as constraint ──
+
+#[test]
+fn bool_predicate_constraint_true() {
+    let (_b, arena) = a();
+    let constraint = bin(&arena, PrimOp::Gt, arena.ref_param(), arena.lit_int(0));
+    assert_eq!(check_empty(&arena, arena.lit_int(5), constraint), Ok(()));
+}
+
+#[test]
+fn bool_predicate_constraint_false() {
+    let (_b, arena) = a();
+    let constraint = bin(&arena, PrimOp::Gt, arena.ref_param(), arena.lit_int(10));
+    assert!(check_empty(&arena, arena.lit_int(5), constraint).is_err());
+}
+
+#[test]
+fn bool_predicate_eq_as_constraint() {
+    let (_b, arena) = a();
+    let constraint = bin(&arena, PrimOp::Eq, arena.ref_param(), arena.lit_int(5));
+    assert_eq!(check_empty(&arena, arena.lit_int(5), constraint), Ok(()));
+    assert!(check_empty(&arena, arena.lit_int(3), constraint).is_err());
+}
+
+#[test]
+fn bool_predicate_neq_as_constraint() {
+    let (_b, arena) = a();
+    let constraint = bin(&arena, PrimOp::Neq, arena.ref_param(), arena.lit_int(0));
+    assert_eq!(check_empty(&arena, arena.lit_int(5), constraint), Ok(()));
+    assert!(check_empty(&arena, arena.lit_int(0), constraint).is_err());
+}
+
+// ── Annotation edge cases ──
+
+#[test]
+fn annot_data_not_subtype_of_int() {
+    let (_b, arena) = a();
+    // (5 : data) checked against int — this actually PASSES
+    // because the checker first verifies 5 : data (OK), then 5 : int (OK)
+    let term = arena.annot(arena.lit_int(5), arena.builtin(s(&arena, "data")));
+    assert_eq!(
+        check_empty(&arena, term, arena.builtin(s(&arena, "int"))),
+        Ok(())
+    );
+}
+
+#[test]
+fn annot_func_with_refinement_domain_contravariant() {
+    let (_b, arena) = a();
+    // (\x. 5 : nonneg -> int) checked against data -> int
+    // Body is constant 5 (int), so it works for any domain type
+    let nonneg = arena.refine(
+        s(&arena, ""),
+        arena.builtin(s(&arena, "int")),
+        bin(&arena, PrimOp::Ge, arena.ref_param(), arena.lit_int(0)),
+    );
+    let annot = arena.annot(
+        arena.lam(arena.lit_int(5)),
+        arena.pi(s(&arena, ""), nonneg, arena.builtin(s(&arena, "int"))),
+    );
+    assert_eq!(
+        check_empty(
+            &arena,
+            annot,
+            arena.pi(
+                s(&arena, ""),
+                arena.builtin(s(&arena, "data")),
+                arena.builtin(s(&arena, "int"))
+            )
+        ),
+        Ok(())
+    );
+}
+
+// ── Let edge cases ──
+
+#[test]
+fn let_with_wrong_constraint_fails() {
+    let (b, arena) = a();
+    let term = parse("let x : bool := 5 in x", b, &arena);
+    assert!(check_empty(&arena, term, arena.builtin(s(&arena, "int"))).is_err());
+}
+
+#[test]
+fn let_body_mismatches_constraint() {
+    let (_b, arena) = a();
+    let term = arena.let_(s(&arena, "x"), arena.lit_int(5), arena.lit_bool(true), None);
+    assert!(check_empty(&arena, term, arena.builtin(s(&arena, "int"))).is_err());
+}
+
+// ── ProofBlock ──
+
+#[test]
+fn proof_block_with_valid_proof() {
+    let (_b, arena) = a();
+    let term = arena.proof_block(arena.lit_bool(true));
+    assert_eq!(check_empty(&arena, arena.lit_int(42), term), Ok(()));
+}
+
+// ── if-branch with context ──
+
+#[test]
+fn if_branch_with_context() {
+    let (_b, arena) = a();
+    let term = arena.if_then_else(arena.lit_bool(true), arena.var(0), arena.var(0));
+    use ligare::checker::context::{Context, extend_ctx};
+    let ctx = extend_ctx(
+        s(&arena, "x"),
+        arena.builtin(s(&arena, "int")),
+        &Context::empty(),
+    );
+    assert_eq!(
+        check(
+            &arena,
+            &empty_table(),
+            &ctx,
+            term,
+            arena.builtin(s(&arena, "int"))
+        ),
+        Ok(())
+    );
+}
+
+// ── Pi type edge cases ──
+
+#[test]
+fn pi_with_named_param_check() {
+    let (_b, arena) = a();
+    let pi = arena.pi(
+        s(&arena, "x"),
+        arena.builtin(s(&arena, "int")),
+        arena.builtin(s(&arena, "int")),
+    );
+    let lam = arena.lam(arena.var(0));
+    assert_eq!(check_empty(&arena, lam, pi), Ok(()));
+}
+
+#[test]
+fn lambda_rejected_by_pi_wrong_codomain() {
+    let (_b, arena) = a();
+    let lam = arena.lam(arena.lit_bool(true));
+    let pi = arena.pi(
+        s(&arena, "x"),
+        arena.builtin(s(&arena, "int")),
+        arena.builtin(s(&arena, "int")),
+    );
+    assert!(check_empty(&arena, lam, pi).is_err());
+}
+
+// ── Logical constraint edge cases ──
+
+#[test]
+fn constraint_and_fails_second_clause() {
+    let (_b, arena) = a();
+    let constraint_and = arena.app(
+        arena.app(
+            arena.builtin(s(&arena, "and")),
+            arena.builtin(s(&arena, "bool")),
+        ),
+        bin(&arena, PrimOp::Gt, arena.ref_param(), arena.lit_int(100)),
+    );
+    assert!(check_empty(&arena, arena.lit_int(42), constraint_and).is_err());
+}
+
+#[test]
+fn constraint_or_both_fail() {
+    let (_b, arena) = a();
+    let constraint_or = arena.app(
+        arena.app(
+            arena.builtin(s(&arena, "or")),
+            arena.builtin(s(&arena, "bool")),
+        ),
+        bin(&arena, PrimOp::Gt, arena.ref_param(), arena.lit_int(100)),
+    );
+    assert!(check_empty(&arena, arena.lit_int(42), constraint_or).is_err());
+}
+
+// ── App without type information ──
+
+#[test]
+fn app_with_no_type_info_fallback() {
+    let (_b, arena) = a();
+    let term = arena.app(arena.lam(arena.var(0)), arena.lit_int(5));
+    assert_eq!(
+        check_empty(&arena, term, arena.builtin(s(&arena, "int"))),
+        Ok(())
+    );
+}
+
+// ── Direct Refine constraint ──
+
+#[test]
+fn direct_refine_constraint_check() {
+    let (_b, arena) = a();
+    let refine = arena.refine(
+        s(&arena, ""),
+        arena.builtin(s(&arena, "int")),
+        bin(&arena, PrimOp::Ge, arena.ref_param(), arena.lit_int(0)),
+    );
+    assert_eq!(check_empty(&arena, arena.lit_int(5), refine), Ok(()));
+    assert!(
+        check_empty(
+            &arena,
+            bin(&arena, PrimOp::Sub, arena.lit_int(0), arena.lit_int(1)),
+            refine
+        )
+        .is_err()
+    );
+}

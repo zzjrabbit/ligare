@@ -8,8 +8,24 @@
 //! During type checking, prefer `WhnfEvaluator` from `crate::core::whnf`.
 
 use crate::core::pool::{SubstitutionContext, TermArena};
-use crate::core::syntax::{PrimOp, Term};
+use crate::core::syntax::{Term, TermVisitor};
 use crate::pretty::pretty;
+
+/// A `TermVisitor` that replaces `This` nodes with a self-reference term.
+struct ReplaceThisVisitor<'bump> {
+    arena: &'bump TermArena<'bump>,
+    self_term: &'bump Term<'bump>,
+}
+
+impl<'bump> TermVisitor<'bump> for ReplaceThisVisitor<'bump> {
+    fn arena(&self) -> &TermArena<'bump> {
+        self.arena
+    }
+
+    fn visit_this(&self) -> Option<&'bump Term<'bump>> {
+        Some(self.self_term)
+    }
+}
 
 /// Strong evaluator — reduces terms to normal form using a bump arena
 /// for intermediate allocations.
@@ -113,56 +129,11 @@ impl<'bump> Evaluator<'bump> {
         self_term: &'bump Term<'bump>,
         t: &'bump Term<'bump>,
     ) -> &'bump Term<'bump> {
-        match t {
-            Term::This => self_term,
-            Term::App(f, a) => {
-                let f2 = self.replace_this(self_term, f);
-                let a2 = self.replace_this(self_term, a);
-                self.arena.app(f2, a2)
-            }
-            Term::Lam(b) => {
-                let b2 = self.replace_this(self_term, b);
-                self.arena.lam(b2)
-            }
-            Term::Let(n, v, b, mc) => {
-                let v2 = self.replace_this(self_term, v);
-                let b2 = self.replace_this(self_term, b);
-                let mc2 = mc.map(|c| self.replace_this(self_term, c));
-                self.arena.let_(n, v2, b2, mc2)
-            }
-            Term::IfThenElse(c, th, el) => {
-                let c2 = self.replace_this(self_term, c);
-                let th2 = self.replace_this(self_term, th);
-                let el2 = self.replace_this(self_term, el);
-                self.arena.if_then_else(c2, th2, el2)
-            }
-            Term::Annot(inner, c) => {
-                let inner2 = self.replace_this(self_term, inner);
-                let c2 = self.replace_this(self_term, c);
-                self.arena.annot(inner2, c2)
-            }
-            Term::ByProof(inner, p) => {
-                let inner2 = self.replace_this(self_term, inner);
-                let p2 = self.replace_this(self_term, p);
-                self.arena.by_proof(inner2, p2)
-            }
-            Term::Refine(n, par, p) => {
-                let par2 = self.replace_this(self_term, par);
-                let p2 = self.replace_this(self_term, p);
-                self.arena.refine(n, par2, p2)
-            }
-            Term::Pi(n, a, b) => {
-                let a2 = self.replace_this(self_term, a);
-                let b2 = self.replace_this(self_term, b);
-                self.arena.pi(n, a2, b2)
-            }
-            Term::ProofBlock(inner) => {
-                let inner2 = self.replace_this(self_term, inner);
-                self.arena.proof_block(inner2)
-            }
-            // Leaf nodes — return as-is
-            _ => t,
+        ReplaceThisVisitor {
+            arena: self.arena,
+            self_term,
         }
+        .walk(t)
     }
 
     fn is_prim_op(&self, t: &Term<'_>) -> bool {
@@ -194,42 +165,13 @@ impl<'bump> Evaluator<'bump> {
                 let Term::PrimOp(op) = prim else {
                     return Err("expected PrimOp".to_string());
                 };
-                Ok(self.arena.alloc(Self::arith_result(*op, *x, *y)))
+                Ok(self.arena.alloc(op.apply(*x, *y)))
             }
             _ => Err(format!(
                 "arithmetic on non-integer: {} and {}.",
                 pretty(x),
                 pretty(y)
             )),
-        }
-    }
-
-    /// Compute the integer/bool result of a primitive operation.
-    fn arith_result(op: PrimOp, x: i64, y: i64) -> Term<'static> {
-        match op {
-            PrimOp::Add => Term::LitInt(x.wrapping_add(y)),
-            PrimOp::Sub => Term::LitInt(x.wrapping_sub(y)),
-            PrimOp::Mul => Term::LitInt(x.wrapping_mul(y)),
-            PrimOp::Div => {
-                if y == 0 {
-                    Term::LitInt(0)
-                } else {
-                    Term::LitInt(x / y)
-                }
-            }
-            PrimOp::Mod_ => {
-                if y == 0 {
-                    Term::LitInt(0)
-                } else {
-                    Term::LitInt(x % y)
-                }
-            }
-            PrimOp::Eq => Term::LitBool(x == y),
-            PrimOp::Lt => Term::LitBool(x < y),
-            PrimOp::Gt => Term::LitBool(x > y),
-            PrimOp::Le => Term::LitBool(x <= y),
-            PrimOp::Ge => Term::LitBool(x >= y),
-            PrimOp::Neq => Term::LitBool(x != y),
         }
     }
 }

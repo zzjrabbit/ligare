@@ -1,15 +1,22 @@
 //! Type-inference / constraint-checking subroutines for `TypeChecker`.
 
 use crate::checker::TypeChecker;
-use crate::checker::builtin::check_builtin;
+use crate::checker::builtin::{LogicKind, check_builtin, logic_kind};
 use crate::checker::context::{
     Context, add_refine, add_theorem, expand_constraint, extend_ctx, extend_ctx_term, lookup_refine,
 };
-use crate::config::{BUILTIN_AND, BUILTIN_BOOL, BUILTIN_DATA, BUILTIN_NOT, BUILTIN_OR};
+use crate::config::{BUILTIN_BOOL, BUILTIN_DATA};
 use crate::core::syntax::{Term, Universe};
 use crate::pretty::PrettyPrinter;
 
 impl<'bump> TypeChecker<'bump> {
+    /// Returns true if the term represents the universal "data" top type
+    /// (either as `Builtin("data")` or `Universe(UData)`).
+    pub(crate) fn is_data_like(t: &Term<'_>) -> bool {
+        matches!(t, Term::Builtin(n) if *n == BUILTIN_DATA)
+            || matches!(t, Term::Universe(Universe::UData))
+    }
+
     /// Check an application: infer f's type (recursively through
     /// curried applications), check that the argument satisfies the
     /// domain, and that the result matches the constraint.
@@ -170,22 +177,8 @@ impl<'bump> TypeChecker<'bump> {
             )),
             Term::App(app_and, a) => self.try_check_logical_op(ctx, term, app_and, a, norm),
             _ => {
-                // Try to treat the constraint as a boolean predicate.
-                // Substitute `RefParam` with the term and evaluate — if the
-                // result is a boolean, use it as the check result.
-                let instantiated = self.subst_ref_param(term, norm);
-                if let Ok(val) = self.evaluator.whnf(instantiated) {
-                    match val {
-                        Term::LitBool(true) => return Ok(()),
-                        Term::LitBool(false) => {
-                            return Err(format!(
-                                "Constraint does not hold: {} does not satisfy {}",
-                                PrettyPrinter::pretty(term),
-                                PrettyPrinter::pretty(norm)
-                            ));
-                        }
-                        _ => {}
-                    }
+                if let Some(result) = self.try_bool_constraint(term, norm) {
+                    return result;
                 }
 
                 let cname = self.constraint_name(norm);
@@ -210,9 +203,9 @@ impl<'bump> TypeChecker<'bump> {
         arg: &'bump Term<'bump>,
         norm: &'bump Term<'bump>,
     ) -> Result<(), String> {
-        // `not` takes a single argument: (not A).
+        // Single-arg case: (not A) — vacuous operators always succeed.
         if let Term::Builtin(name) = head {
-            if *name == BUILTIN_NOT {
+            if logic_kind(name) == Some(LogicKind::Vacuous) {
                 return Ok(());
             }
             return self.check_app_constraint(ctx, term, norm);
@@ -224,16 +217,16 @@ impl<'bump> TypeChecker<'bump> {
         let Term::Builtin(name) = *builtin else {
             return self.check_app_constraint(ctx, term, norm);
         };
-        match *name {
-            BUILTIN_AND => {
+        match logic_kind(name) {
+            Some(LogicKind::Conj) => {
                 self.check(ctx, term, arg)?;
                 self.check(ctx, term, b)
             }
-            BUILTIN_OR => self
+            Some(LogicKind::Disj) => self
                 .check(ctx, term, arg)
                 .or_else(|_| self.check(ctx, term, b)),
-            BUILTIN_NOT => Ok(()),
-            _ => self.check_app_constraint(ctx, term, norm),
+            Some(LogicKind::Vacuous) => Ok(()),
+            None => self.check_app_constraint(ctx, term, norm),
         }
     }
 
@@ -280,6 +273,27 @@ impl<'bump> TypeChecker<'bump> {
         self.check(&new_ctx, body, b)
     }
 
+    /// Try to satisfy a constraint by treating it as a boolean predicate.
+    fn try_bool_constraint(
+        &self,
+        term: &'bump Term<'bump>,
+        constraint: &'bump Term<'bump>,
+    ) -> Option<Result<(), String>> {
+        let instantiated = self.subst_ref_param(term, constraint);
+        let Ok(val) = self.evaluator.whnf(instantiated) else {
+            return None;
+        };
+        match val {
+            Term::LitBool(true) => Some(Ok(())),
+            Term::LitBool(false) => Some(Err(format!(
+                "Constraint does not hold: {} does not satisfy {}",
+                PrettyPrinter::pretty(term),
+                PrettyPrinter::pretty(constraint)
+            ))),
+            _ => None,
+        }
+    }
+
     pub(crate) fn check_app_constraint(
         &self,
         ctx: &Context<'bump>,
@@ -293,27 +307,15 @@ impl<'bump> TypeChecker<'bump> {
         if let Term::App(f, a) = constraint {
             let cname = self.constraint_name(f);
             if let Some((parent, body)) = lookup_refine(cname, &self.table)
-                && matches!(parent, Term::Universe(Universe::UData))
+                && Self::is_data_like(parent)
             {
                 return self.check(ctx, term, self.arena.app(body, a));
             }
         }
 
-        // Try to treat the constraint as a boolean predicate
-        // (e.g. (x > 0) as a standalone constraint).
-        let instantiated = self.subst_ref_param(term, constraint);
-        if let Ok(val) = self.evaluator.whnf(instantiated) {
-            match val {
-                Term::LitBool(true) => return Ok(()),
-                Term::LitBool(false) => {
-                    return Err(format!(
-                        "Constraint does not hold: {} does not satisfy {}",
-                        PrettyPrinter::pretty(term),
-                        PrettyPrinter::pretty(constraint)
-                    ));
-                }
-                _ => {}
-            }
+        // Try to treat the constraint as a boolean predicate.
+        if let Some(result) = self.try_bool_constraint(term, constraint) {
+            return result;
         }
 
         Err(format!(
@@ -339,9 +341,7 @@ impl<'bump> TypeChecker<'bump> {
                 self.check_pi_match(parent, other)
             }
             (Term::Builtin(n1), Term::Builtin(n2)) if n1 == n2 => Ok(()),
-            (Term::Builtin(n), _) if *n == BUILTIN_DATA => Ok(()),
-            (_, Term::Builtin(n)) if *n == BUILTIN_DATA => Ok(()),
-            (Term::Universe(Universe::UData), _) | (_, Term::Universe(Universe::UData)) => Ok(()),
+            _ if Self::is_data_like(a) || Self::is_data_like(c) => Ok(()),
             _ if a == c => Ok(()),
             _ => Err(format!(
                 "Type mismatch: expected {}, got {}",
@@ -362,16 +362,8 @@ impl<'bump> TypeChecker<'bump> {
         let c_val = self.evaluator.whnf(constraint)?;
         let ok = a_val == c_val
             || self.is_refinement_of(c_val, a_val)
-            || (match c_val {
-                Term::Builtin(n) if *n == BUILTIN_DATA => true,
-                Term::Universe(Universe::UData) => true,
-                _ => false,
-            })
-            || (match a_val {
-                Term::Builtin(n) if *n == BUILTIN_DATA => true,
-                Term::Universe(Universe::UData) => true,
-                _ => false,
-            });
+            || Self::is_data_like(c_val)
+            || Self::is_data_like(a_val);
         if ok {
             Ok(())
         } else {
@@ -396,10 +388,7 @@ impl<'bump> TypeChecker<'bump> {
             return true;
         }
         // `data` is the universal supertype — every term is compatible with it.
-        if matches!(t2, Term::Builtin(n) if *n == BUILTIN_DATA) {
-            return true;
-        }
-        if matches!(t2, Term::Universe(Universe::UData)) {
+        if Self::is_data_like(t2) {
             return true;
         }
         match t1 {

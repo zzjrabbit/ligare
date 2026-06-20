@@ -13,7 +13,7 @@
 //!   `Lam` or `PrimOp` application.
 
 use crate::core::pool::{SubstitutionContext, TermArena};
-use crate::core::syntax::{PrimOp, Term};
+use crate::core::syntax::Term;
 
 /// Weak Head Normal Form evaluator.
 ///
@@ -110,7 +110,7 @@ impl<'bump> WhnfEvaluator<'bump> {
                         let Term::PrimOp(op) = *prim else {
                             unreachable!()
                         };
-                        Ok(self.arena.alloc(Self::arith_result(*op, *x, *y)))
+                        Ok(self.arena.alloc(op.apply(*x, *y)))
                     }
                     _ => {
                         // Arguments are not yet literals — stop here.
@@ -154,35 +154,6 @@ impl<'bump> WhnfEvaluator<'bump> {
             Term::LitBool(true) => self.whnf(tbranch),
             Term::LitBool(false) => self.whnf(fbranch),
             _ => Ok(self.arena.if_then_else(cond_val, tbranch, fbranch)),
-        }
-    }
-
-    /// Compute the integer/bool result of a primitive operation.
-    fn arith_result(op: PrimOp, x: i64, y: i64) -> Term<'static> {
-        match op {
-            PrimOp::Add => Term::LitInt(x.wrapping_add(y)),
-            PrimOp::Sub => Term::LitInt(x.wrapping_sub(y)),
-            PrimOp::Mul => Term::LitInt(x.wrapping_mul(y)),
-            PrimOp::Div => {
-                if y == 0 {
-                    Term::LitInt(0)
-                } else {
-                    Term::LitInt(x / y)
-                }
-            }
-            PrimOp::Mod_ => {
-                if y == 0 {
-                    Term::LitInt(0)
-                } else {
-                    Term::LitInt(x % y)
-                }
-            }
-            PrimOp::Eq => Term::LitBool(x == y),
-            PrimOp::Lt => Term::LitBool(x < y),
-            PrimOp::Gt => Term::LitBool(x > y),
-            PrimOp::Le => Term::LitBool(x <= y),
-            PrimOp::Ge => Term::LitBool(x >= y),
-            PrimOp::Neq => Term::LitBool(x != y),
         }
     }
 }

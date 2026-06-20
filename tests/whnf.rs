@@ -149,6 +149,29 @@ fn division_zero() {
     );
 }
 
+// ── All comparison operators ──
+
+#[test]
+fn all_comparisons_whnf() {
+    let (b, arena) = a();
+    assert_eq!(
+        *whnf(&arena, parse("3 < 5", b, &arena)).unwrap(),
+        Term::LitBool(true)
+    );
+    assert_eq!(
+        *whnf(&arena, parse("5 <= 5", b, &arena)).unwrap(),
+        Term::LitBool(true)
+    );
+    assert_eq!(
+        *whnf(&arena, parse("5 >= 3", b, &arena)).unwrap(),
+        Term::LitBool(true)
+    );
+    assert_eq!(
+        *whnf(&arena, parse("3 /= 5", b, &arena)).unwrap(),
+        Term::LitBool(true)
+    );
+}
+
 // ── If-then-else ──
 
 #[test]
@@ -286,8 +309,6 @@ fn non_literal_primop_stops() {
 #[test]
 fn recursive_call_stops_at_this() {
     let (_b, arena) = a();
-    // Simulate a recursive function body:
-    //   \n. if n < 2 then n else this (n-1) + this (n-2)
     let body = arena.if_then_else(
         bin(&arena, PrimOp::Lt, arena.var(0), arena.lit_int(2)),
         arena.var(0),
@@ -309,7 +330,6 @@ fn recursive_call_stops_at_this() {
     let result = whnf(&arena, app).unwrap();
 
     // The result should NOT be LitInt(5) (fib(5)=5).
-    // It should have stopped at the recursive `This` calls.
     match *result {
         Term::App(..) => {} // stopped — good!
         Term::LitInt(n) => panic!("recursive call was computed: got LitInt({})", n),
@@ -320,7 +340,6 @@ fn recursive_call_stops_at_this() {
 #[test]
 fn recursive_call_base_case_computes() {
     let (_b, arena) = a();
-    // fib(1) should compute to 1 because it hits the base case
     let body = arena.if_then_else(
         bin(&arena, PrimOp::Lt, arena.var(0), arena.lit_int(2)),
         arena.var(0),
@@ -346,11 +365,6 @@ fn recursive_call_base_case_computes() {
 #[test]
 fn recursive_call_partial_reduction() {
     let (_b, arena) = a();
-    // fib(3): condition 3<2 is false, so we get the else branch.
-    // Sub-expressions "this (3-1)" and "this (3-2)" should stop.
-    // Arithmetic: 3-1=2, 3-2=1 (both LitInt → computed).
-    // But "this 2" and "this 1" are not computed because `this` is not λ.
-    // So result: App(App(+, App(This, 2)), App(This, 1))
     let body = arena.if_then_else(
         bin(&arena, PrimOp::Lt, arena.var(0), arena.lit_int(2)),
         arena.var(0),
@@ -371,7 +385,6 @@ fn recursive_call_partial_reduction() {
     let app = arena.app(lam, arena.lit_int(3));
     let result = whnf(&arena, app).unwrap();
 
-    // Verify: result must contain `This` (i.e. recursion stopped)
     fn contains_this(t: &Term<'_>) -> bool {
         match t {
             Term::This => true,
@@ -383,7 +396,6 @@ fn recursive_call_partial_reduction() {
         contains_this(result),
         "WHNF should preserve `This` references (recursion not unrolled)"
     );
-    // Also verify it's NOT a LitInt (i.e. not fully computed)
     assert!(
         !matches!(result, Term::LitInt(_)),
         "WHNF should not fully compute fib(3)"
@@ -395,7 +407,6 @@ fn recursive_call_partial_reduction() {
 #[test]
 fn non_recursive_function_computes() {
     let (b, arena) = a();
-    // apply a non-recursive lambda: (\x. x + 1) 5 → 6
     assert_eq!(
         *whnf(&arena, parse("(\\x. x + 1) 5", b, &arena)).unwrap(),
         Term::LitInt(6)
@@ -407,12 +418,10 @@ fn non_recursive_function_computes() {
 #[test]
 fn arithmetic_on_bool_stops_not_errors() {
     let (_b, arena) = a();
-    // WHNF: true + 1 — operands are not both LitInt, so stop, don't error
     let result = whnf(
         &arena,
         bin(&arena, PrimOp::Add, arena.lit_bool(true), arena.lit_int(1)),
     );
-    // Should return Ok (not error) — the App is preserved as-is
     let term = result.unwrap();
     match *term {
         Term::App(..) => {} // stopped gracefully
@@ -425,9 +434,6 @@ fn arithmetic_on_bool_stops_not_errors() {
 #[test]
 fn func_desugars_to_lambda() {
     let (_b, arena) = a();
-    // Build a simple Func node: func f (x : int) : int := x + 1
-    // Desugarer: Func → Annot(Lam(body), Pi(...))
-    // WHNF: Annot(inner, _) → whnf(inner) → Lam(body) (strips annotation)
     let param_type = Some(arena.builtin(s(&arena, "int")) as &Term<'_>);
     let params: &[(&str, Option<&Term>)] = arena.alloc_slice(&[(s(&arena, "x"), param_type)]);
     let body = bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1));
@@ -440,9 +446,108 @@ fn func_desugars_to_lambda() {
         body,
     );
     let result = whnf(&arena, func).unwrap();
-    // WHNF strips Annot, so desugared Func becomes a bare Lam
     match *result {
         Term::Lam(_) => {} // correct
         other => panic!("expected Lam from Func desugaring + WHNF, got {:?}", other),
     }
+}
+
+// ── New edge case tests ──
+
+#[test]
+fn whnf_universe_identity() {
+    let (_b, arena) = a();
+    let u = arena.universe(ligare::core::syntax::Universe::UProp);
+    assert_eq!(
+        *whnf(&arena, u).unwrap(),
+        Term::Universe(ligare::core::syntax::Universe::UProp)
+    );
+}
+
+#[test]
+fn whnf_var_identity() {
+    let (_b, arena) = a();
+    assert_eq!(*whnf(&arena, arena.var(3)).unwrap(), Term::Var(3));
+}
+
+#[test]
+fn whnf_proof_block_strips() {
+    let (_b, arena) = a();
+    let block = arena.proof_block(arena.lit_int(42));
+    assert_eq!(*whnf(&arena, block).unwrap(), Term::LitInt(42));
+}
+
+#[test]
+fn whnf_arithmetic_sub() {
+    let (b, arena) = a();
+    assert_eq!(
+        *whnf(&arena, parse("10 - 3", b, &arena)).unwrap(),
+        Term::LitInt(7)
+    );
+}
+
+#[test]
+fn whnf_arithmetic_mul() {
+    let (b, arena) = a();
+    assert_eq!(
+        *whnf(&arena, parse("4 * 5", b, &arena)).unwrap(),
+        Term::LitInt(20)
+    );
+}
+
+#[test]
+fn whnf_arithmetic_div() {
+    let (b, arena) = a();
+    assert_eq!(
+        *whnf(&arena, parse("10 / 3", b, &arena)).unwrap(),
+        Term::LitInt(3)
+    );
+}
+
+#[test]
+fn whnf_arithmetic_mod() {
+    let (b, arena) = a();
+    assert_eq!(
+        *whnf(&arena, parse("10 % 3", b, &arena)).unwrap(),
+        Term::LitInt(1)
+    );
+}
+
+#[test]
+fn whnf_mod_zero() {
+    let (b, arena) = a();
+    assert_eq!(
+        *whnf(&arena, parse("5 % 0", b, &arena)).unwrap(),
+        Term::LitInt(0)
+    );
+}
+
+#[test]
+fn whnf_negative_number() {
+    let (b, arena) = a();
+    assert_eq!(
+        *whnf(&arena, parse("-5", b, &arena)).unwrap(),
+        Term::LitInt(-5)
+    );
+}
+
+#[test]
+fn whnf_if_non_bool_stops() {
+    let (_b, arena) = a();
+    let term = arena.if_then_else(arena.lit_int(42), arena.lit_int(1), arena.lit_int(2));
+    let result = whnf(&arena, term).unwrap();
+    assert!(matches!(*result, Term::IfThenElse(..)));
+}
+
+#[test]
+fn whnf_let_with_annotation() {
+    let (_b, arena) = a();
+    // let x : int := 5 in x — annotation on let should not affect WHNF
+    let term = arena.let_(
+        s(&arena, "x"),
+        arena.lit_int(5),
+        arena.var(0),
+        Some(arena.builtin(s(&arena, "int"))),
+    );
+    assert_eq!(*whnf(&arena, term).unwrap(), Term::LitInt(5));
 }

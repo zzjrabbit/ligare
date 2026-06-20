@@ -10,9 +10,22 @@ use crate::pretty::PrettyPrinter;
 
 pub type BuiltinChecker = fn(&Term<'_>) -> Result<(), String>;
 
+/// Describes how a builtin logical operator should be desugared as a constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicKind {
+    /// Conjunctive: `(and A B)` → check term against both A and B.
+    Conj,
+    /// Disjunctive: `(or A B)` → check term against A or B.
+    Disj,
+    /// Vacuous: `(not A)` → always succeeds (cannot be used as a positive constraint).
+    Vacuous,
+}
+
 pub struct BuiltinEntry {
     pub universe: Universe,
     pub checker: BuiltinChecker,
+    /// If present, this builtin is a logical operator with the given combining strategy.
+    pub logic_kind: Option<LogicKind>,
 }
 
 fn check_int(t: &Term<'_>) -> Result<(), String> {
@@ -50,6 +63,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UProp,
                 checker: check_int,
+                logic_kind: None,
             },
         ),
         (
@@ -57,6 +71,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UProp,
                 checker: check_bool,
+                logic_kind: None,
             },
         ),
         (
@@ -64,6 +79,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UProp,
                 checker: check_any,
+                logic_kind: None,
             },
         ),
         (
@@ -71,6 +87,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UTheorem,
                 checker: check_any,
+                logic_kind: None,
             },
         ),
         (
@@ -78,6 +95,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UProof,
                 checker: check_any,
+                logic_kind: None,
             },
         ),
         (
@@ -85,6 +103,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UProp,
                 checker: check_any,
+                logic_kind: Some(LogicKind::Conj),
             },
         ),
         (
@@ -92,6 +111,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UProp,
                 checker: check_any,
+                logic_kind: Some(LogicKind::Disj),
             },
         ),
         (
@@ -99,6 +119,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UProp,
                 checker: check_any,
+                logic_kind: Some(LogicKind::Vacuous),
             },
         ),
         (
@@ -106,6 +127,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
             BuiltinEntry {
                 universe: Universe::UProp,
                 checker: check_any,
+                logic_kind: None,
             },
         ),
     ])
@@ -117,4 +139,9 @@ pub fn classify_builtin(name: &str) -> Option<Universe> {
 
 pub fn check_builtin(name: &str) -> Option<BuiltinChecker> {
     BUILTINS.get(name).map(|e| e.checker)
+}
+
+/// Look up the logical operator kind for a builtin name, if any.
+pub fn logic_kind(name: &str) -> Option<LogicKind> {
+    BUILTINS.get(name).and_then(|e| e.logic_kind)
 }

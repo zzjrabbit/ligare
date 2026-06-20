@@ -209,3 +209,312 @@ fn neq_refinement_accepts_negative() {
         Ok(())
     );
 }
+
+// ── New refinement tests ──
+
+/// even: int where (x => x % 2 == 0)
+fn even_def<'a>(arena: &TermArena<'a>) -> (&'a str, &'a Term<'a>, &'a Term<'a>) {
+    (
+        "even",
+        arena.builtin(s(arena, "int")),
+        bin(
+            arena,
+            PrimOp::Eq,
+            bin(arena, PrimOp::Mod_, arena.ref_param(), arena.lit_int(2)),
+            arena.lit_int(0),
+        ),
+    )
+}
+
+#[test]
+fn even_accepts_4() {
+    let (_b, arena) = a();
+    let even = even_def(&arena);
+    assert_eq!(
+        check_with(
+            &arena,
+            &[even],
+            arena.lit_int(4),
+            arena.builtin(s(&arena, "even"))
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn even_rejects_3() {
+    let (_b, arena) = a();
+    let even = even_def(&arena);
+    assert!(
+        check_with(
+            &arena,
+            &[even],
+            arena.lit_int(3),
+            arena.builtin(s(&arena, "even"))
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn even_accepts_0() {
+    let (_b, arena) = a();
+    let even = even_def(&arena);
+    assert_eq!(
+        check_with(
+            &arena,
+            &[even],
+            arena.lit_int(0),
+            arena.builtin(s(&arena, "even"))
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn even_accepts_negative_2() {
+    let (b, arena) = a();
+    let even = even_def(&arena);
+    assert_eq!(
+        check_with(
+            &arena,
+            &[even],
+            parse("-2", b, &arena),
+            arena.builtin(s(&arena, "even"))
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn nat_accepts_large_number() {
+    let (_b, arena) = a();
+    let nat = nat_def(&arena);
+    assert_eq!(
+        check_with(
+            &arena,
+            &[nat],
+            arena.lit_int(99999),
+            arena.builtin(s(&arena, "nat"))
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn nat_rejects_large_negative() {
+    let (b, arena) = a();
+    let nat = nat_def(&arena);
+    assert!(
+        check_with(
+            &arena,
+            &[nat],
+            parse("-99999", b, &arena),
+            arena.builtin(s(&arena, "nat"))
+        )
+        .is_err()
+    );
+}
+
+/// ten: int where (x => x == 10)
+fn ten_def<'a>(arena: &TermArena<'a>) -> (&'a str, &'a Term<'a>, &'a Term<'a>) {
+    (
+        "ten",
+        arena.builtin(s(arena, "int")),
+        bin(arena, PrimOp::Eq, arena.ref_param(), arena.lit_int(10)),
+    )
+}
+
+#[test]
+fn ten_accepts_10() {
+    let (_b, arena) = a();
+    let ten = ten_def(&arena);
+    assert_eq!(
+        check_with(
+            &arena,
+            &[ten],
+            arena.lit_int(10),
+            arena.builtin(s(&arena, "ten"))
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn ten_rejects_9() {
+    let (_b, arena) = a();
+    let ten = ten_def(&arena);
+    assert!(
+        check_with(
+            &arena,
+            &[ten],
+            arena.lit_int(9),
+            arena.builtin(s(&arena, "ten"))
+        )
+        .is_err()
+    );
+}
+
+// ── Multiple refinements in table ──
+
+#[test]
+fn multiple_refinements_in_table() {
+    let (_b, arena) = a();
+    let nat = nat_def(&arena);
+    let pos = pos_def(&arena);
+    // Both "nat" and "pos" in the table
+    assert_eq!(
+        check_with(
+            &arena,
+            &[nat, pos],
+            arena.lit_int(5),
+            arena.builtin(s(&arena, "nat"))
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        check_with(
+            &arena,
+            &[nat, pos],
+            arena.lit_int(5),
+            arena.builtin(s(&arena, "pos"))
+        ),
+        Ok(())
+    );
+    assert!(
+        check_with(
+            &arena,
+            &[nat, pos],
+            arena.lit_int(0),
+            arena.builtin(s(&arena, "pos"))
+        )
+        .is_err()
+    );
+}
+
+// ── Refinement chain: A is refinement of B ──
+
+#[test]
+fn nat_is_refinement_of_int() {
+    let (_b, arena) = a();
+    let nat = nat_def(&arena);
+    // Anything that satisfies nat must also be int
+    assert_eq!(
+        check_with(
+            &arena,
+            &[nat],
+            arena.lit_int(5),
+            arena.builtin(s(&arena, "int"))
+        ),
+        Ok(())
+    );
+}
+
+// ── Neq refinement with non-zero check ──
+
+#[test]
+fn nonzero_rejects_zero_when_neq_used() {
+    let (_b, arena) = a();
+    let nonzero = (
+        "nonzero",
+        arena.builtin(s(&arena, "int")),
+        bin(&arena, PrimOp::Neq, arena.ref_param(), arena.lit_int(0)),
+    );
+    assert!(
+        check_with(
+            &arena,
+            &[nonzero],
+            arena.lit_int(0),
+            arena.builtin(s(&arena, "nonzero"))
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn nonzero_accepts_one() {
+    let (_b, arena) = a();
+    let nonzero = (
+        "nonzero",
+        arena.builtin(s(&arena, "int")),
+        bin(&arena, PrimOp::Neq, arena.ref_param(), arena.lit_int(0)),
+    );
+    assert_eq!(
+        check_with(
+            &arena,
+            &[nonzero],
+            arena.lit_int(1),
+            arena.builtin(s(&arena, "nonzero"))
+        ),
+        Ok(())
+    );
+}
+
+// ── Le refinement ──
+
+#[test]
+fn le_refinement_accepts_equal() {
+    let (_b, arena) = a();
+    let le_five = (
+        "le5",
+        arena.builtin(s(&arena, "int")),
+        bin(&arena, PrimOp::Le, arena.ref_param(), arena.lit_int(5)),
+    );
+    assert_eq!(
+        check_with(
+            &arena,
+            &[le_five],
+            arena.lit_int(5),
+            arena.builtin(s(&arena, "le5"))
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        check_with(
+            &arena,
+            &[le_five],
+            arena.lit_int(3),
+            arena.builtin(s(&arena, "le5"))
+        ),
+        Ok(())
+    );
+    assert!(
+        check_with(
+            &arena,
+            &[le_five],
+            arena.lit_int(6),
+            arena.builtin(s(&arena, "le5"))
+        )
+        .is_err()
+    );
+}
+
+// ── Lt refinement ──
+
+#[test]
+fn lt_refinement_rejects_equal() {
+    let (_b, arena) = a();
+    let lt_five = (
+        "lt5",
+        arena.builtin(s(&arena, "int")),
+        bin(&arena, PrimOp::Lt, arena.ref_param(), arena.lit_int(5)),
+    );
+    assert_eq!(
+        check_with(
+            &arena,
+            &[lt_five],
+            arena.lit_int(4),
+            arena.builtin(s(&arena, "lt5"))
+        ),
+        Ok(())
+    );
+    assert!(
+        check_with(
+            &arena,
+            &[lt_five],
+            arena.lit_int(5),
+            arena.builtin(s(&arena, "lt5"))
+        )
+        .is_err()
+    );
+}

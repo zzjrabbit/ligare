@@ -3,8 +3,25 @@
 use crate::checker::TypeChecker;
 use crate::checker::context::Context;
 use crate::config::{AND_ELIM_LEFT, AND_INTRO, BUILTIN_AND};
-use crate::core::syntax::{PrimOp, Term};
+use crate::core::pool::TermArena;
+use crate::core::syntax::{PrimOp, Term, TermVisitor};
 use crate::pretty::PrettyPrinter;
+
+/// A `TermVisitor` that substitutes `RefParam` nodes with a specific term.
+struct SubstRefParamVisitor<'bump> {
+    arena: &'bump TermArena<'bump>,
+    subj: &'bump Term<'bump>,
+}
+
+impl<'bump> TermVisitor<'bump> for SubstRefParamVisitor<'bump> {
+    fn arena(&self) -> &TermArena<'bump> {
+        self.arena
+    }
+
+    fn visit_ref_param(&self) -> Option<&'bump Term<'bump>> {
+        Some(self.subj)
+    }
+}
 
 impl<'bump> TypeChecker<'bump> {
     // ── Proof search ──
@@ -34,46 +51,11 @@ impl<'bump> TypeChecker<'bump> {
         subj: &'bump Term<'bump>,
         t: &'bump Term<'bump>,
     ) -> &'bump Term<'bump> {
-        match t {
-            Term::RefParam => subj,
-            Term::App(f, a) => {
-                let f2 = self.subst_ref_param(subj, f);
-                let a2 = self.subst_ref_param(subj, a);
-                self.arena.app(f2, a2)
-            }
-            Term::Lam(b) => {
-                let b2 = self.subst_ref_param(subj, b);
-                self.arena.lam(b2)
-            }
-            Term::Let(n, v, b, mc) => {
-                let v2 = self.subst_ref_param(subj, v);
-                let b2 = self.subst_ref_param(subj, b);
-                let mc2 = mc.map(|c| self.subst_ref_param(subj, c));
-                self.arena.let_(n, v2, b2, mc2)
-            }
-            Term::IfThenElse(c, th, el) => {
-                let c2 = self.subst_ref_param(subj, c);
-                let th2 = self.subst_ref_param(subj, th);
-                let el2 = self.subst_ref_param(subj, el);
-                self.arena.if_then_else(c2, th2, el2)
-            }
-            Term::Annot(inner, c) => {
-                let inner2 = self.subst_ref_param(subj, inner);
-                let c2 = self.subst_ref_param(subj, c);
-                self.arena.annot(inner2, c2)
-            }
-            Term::ByProof(inner, p) => {
-                let inner2 = self.subst_ref_param(subj, inner);
-                let p2 = self.subst_ref_param(subj, p);
-                self.arena.by_proof(inner2, p2)
-            }
-            Term::Refine(n, par, p) => {
-                let par2 = self.subst_ref_param(subj, par);
-                let p2 = self.subst_ref_param(subj, p);
-                self.arena.refine(n, par2, p2)
-            }
-            _ => t,
+        SubstRefParamVisitor {
+            arena: self.arena,
+            subj,
         }
+        .walk(t)
     }
 
     fn search_ctx(
