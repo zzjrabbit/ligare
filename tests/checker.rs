@@ -145,8 +145,6 @@ fn make_two_param_func<'bump>(
         s(arena, "f"),
         arena.alloc_slice(params),
         Some(arena.builtin(s(arena, "int"))),
-        &[],
-        &[],
         body,
     )
 }
@@ -329,8 +327,6 @@ fn app_three_params_order_check() {
         s(&arena, "f"),
         arena.alloc_slice(params),
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         bin(&arena, PrimOp::Add, arena.var(2), arena.var(0)),
     );
     // Correct: int, bool, int
@@ -356,8 +352,6 @@ fn app_three_params_wrong_middle() {
         s(&arena, "f"),
         arena.alloc_slice(params),
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         bin(&arena, PrimOp::Add, arena.var(2), arena.var(0)),
     );
     // Wrong: second arg should be bool, but we pass int
@@ -568,8 +562,6 @@ fn zero_param_func_constant() {
         s(&arena, "x"),
         arena.alloc_slice(&[]),
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         arena.lit_int(5),
     );
     assert_eq!(
@@ -585,8 +577,6 @@ fn zero_param_func_wrong_type_fails() {
         s(&arena, "x"),
         arena.alloc_slice(&[]),
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         arena.lit_int(5),
     );
     assert!(check_empty(&arena, func, arena.builtin(s(&arena, "bool"))).is_err());

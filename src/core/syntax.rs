@@ -102,8 +102,6 @@ pub enum Term<'bump> {
         Name<'bump>,
         &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
         Option<&'bump Term<'bump>>,
-        &'bump [Term<'bump>],
-        &'bump [Term<'bump>],
         &'bump Term<'bump>,
     ),
     ProofBlock(&'bump Term<'bump>),

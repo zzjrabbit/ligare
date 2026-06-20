@@ -44,7 +44,7 @@ impl PrettyPrinter {
             Term::RefParam => "x".to_string(),
             Term::This => "this".to_string(),
             Term::ProofBlock(inner) => format!("proof {{ {} }}", Self::pretty(inner)),
-            Term::Func(name, params, m_ret, pre, post, body) => {
+            Term::Func(name, params, m_ret, body) => {
                 let ps: String = params
                     .iter()
                     .map(|(n, mc)| match mc {
@@ -54,23 +54,7 @@ impl PrettyPrinter {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let rs = m_ret.map_or(String::new(), |r| format!(" : {}", Self::pretty(r)));
-                let pres: String = pre
-                    .iter()
-                    .map(|p| format!(" pre: {}", Self::pretty(p)))
-                    .collect();
-                let posts: String = post
-                    .iter()
-                    .map(|p| format!(" post: {}", Self::pretty(p)))
-                    .collect();
-                format!(
-                    "func {}({}){}{}{} = {}",
-                    name,
-                    ps,
-                    rs,
-                    pres,
-                    posts,
-                    Self::pretty(body)
-                )
+                format!("func {}({}){} = {}", name, ps, rs, Self::pretty(body))
             }
         }
     }

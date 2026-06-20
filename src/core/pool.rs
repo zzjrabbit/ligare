@@ -119,7 +119,7 @@ impl<'bump> TermArena<'bump> {
             Term::Annot(inner, ct) => self.annot(self.map(inner, f), self.map(ct, f)),
             Term::ByProof(inner, p) => self.by_proof(self.map(inner, f), self.map(p, f)),
             Term::Refine(n, par, p) => self.refine(n, self.map(par, f), self.map(p, f)),
-            Term::Func(fname, params, m_ret, pre, post, body) => {
+            Term::Func(fname, params, m_ret, body) => {
                 let params2: Vec<_> = params
                     .iter()
                     .map(|(nm, mc)| (*nm, mc.map(|c| self.map(c, f))))
@@ -128,8 +128,6 @@ impl<'bump> TermArena<'bump> {
                     fname,
                     self.alloc_slice(&params2),
                     m_ret.map(|c| self.map(c, f)),
-                    self.alloc_slice(&pre.iter().map(|t| *self.map(t, f)).collect::<Vec<_>>()),
-                    self.alloc_slice(&post.iter().map(|t| *self.map(t, f)).collect::<Vec<_>>()),
                     self.map(body, f),
                 )
             }
@@ -236,11 +234,9 @@ impl<'bump> TermArena<'bump> {
         name: Name<'bump>,
         params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
         m_ret: Option<&'bump Term<'bump>>,
-        pre: &'bump [Term<'bump>],
-        post: &'bump [Term<'bump>],
         body: &'bump Term<'bump>,
     ) -> &'bump Term<'bump> {
-        self.alloc(Term::Func(name, params, m_ret, pre, post, body))
+        self.alloc(Term::Func(name, params, m_ret, body))
     }
 
     pub fn proof_block(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
@@ -337,7 +333,7 @@ impl<'bump> SubstitutionContext<'bump> {
                 self.arena
                     .refine(n, recurse(par, cutoff), recurse(p, cutoff))
             }
-            Term::Func(fname, params, m_ret, pre, post, body) => {
+            Term::Func(fname, params, m_ret, body) => {
                 let params2: Vec<_> = params
                     .iter()
                     .map(|(nm, mc)| (*nm, mc.map(|c| recurse(c, cutoff))))
@@ -346,10 +342,6 @@ impl<'bump> SubstitutionContext<'bump> {
                     fname,
                     self.arena.alloc_slice(&params2),
                     m_ret.map(|c| recurse(c, cutoff)),
-                    self.arena
-                        .alloc_slice(&pre.iter().map(|t| *recurse(t, cutoff)).collect::<Vec<_>>()),
-                    self.arena
-                        .alloc_slice(&post.iter().map(|t| *recurse(t, cutoff)).collect::<Vec<_>>()),
                     recurse(body, cutoff + params.len() as i32),
                 )
             }

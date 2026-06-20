@@ -111,8 +111,6 @@ fn func_is_data() {
                 "f",
                 &[("x", Some(&Term::Builtin("int")))],
                 None,
-                &[],
-                &[],
                 &Term::Var(0)
             )
         ),

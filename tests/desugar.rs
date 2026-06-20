@@ -17,8 +17,6 @@ fn func_one_param_no_ret() {
         s(&arena, "id"),
         arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
         None,
-        &[],
-        &[],
         arena.var(0),
     );
     assert_eq!(
@@ -41,8 +39,6 @@ fn func_one_param_with_ret() {
         s(&arena, "f"),
         arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1)),
     );
     assert_eq!(
@@ -69,8 +65,6 @@ fn func_two_params() {
         s(&arena, "add"),
         arena.alloc_slice(params),
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         bin(&arena, PrimOp::Add, arena.var(1), arena.var(0)),
     );
     let inner = bin(&arena, PrimOp::Add, arena.var(1), arena.var(0));
@@ -107,8 +101,6 @@ fn func_two_params_refinement() {
         s(&arena, "sdiv"),
         arena.alloc_slice(params),
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         bin(&arena, PrimOp::Div, arena.var(1), arena.var(0)),
     );
     let inner = bin(&arena, PrimOp::Div, arena.var(1), arena.var(0));
@@ -137,8 +129,6 @@ fn func_three_params_order() {
         s(&arena, "f"),
         arena.alloc_slice(params),
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         arena.var(2),
     );
     assert_eq!(
@@ -169,8 +159,6 @@ fn func_no_constraint() {
         s(&arena, "id"),
         arena.alloc_slice(&[(s(&arena, "x"), None)]),
         None,
-        &[],
-        &[],
         arena.var(0),
     );
     assert_eq!(

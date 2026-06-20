@@ -16,9 +16,7 @@ impl<'bump> Desugarer<'bump> {
 
     pub fn desugar(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
         match t {
-            Term::Func(_fname, params, m_ret, _preconds, _postconds, body) => {
-                self.desugar_func(params, m_ret, body)
-            }
+            Term::Func(_fname, params, m_ret, body) => self.desugar_func(params, m_ret, body),
             _ => t,
         }
     }

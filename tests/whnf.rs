@@ -441,8 +441,6 @@ fn func_desugars_to_lambda() {
         s(&arena, "f"),
         params,
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         body,
     );
     let result = whnf(&arena, func).unwrap();

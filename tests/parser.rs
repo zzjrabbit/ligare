@@ -179,7 +179,7 @@ fn def_refinement() {
     );
     assert_eq!(
         *term,
-        *arena.func(s(&arena, "nat"), &[], None, &[], &[], expected_body)
+        *arena.func(s(&arena, "nat"), &[], None, expected_body)
     );
 }
 
@@ -312,8 +312,6 @@ fn def_simple() {
             s(&arena, "x"),
             &[],
             Some(arena.builtin(s(&arena, "int"))),
-            &[],
-            &[],
             arena.lit_int(5)
         )
     );
@@ -332,7 +330,7 @@ fn def_with_params() {
         arena.alloc_slice(&[(s(&arena, "a"), pt), (s(&arena, "b"), pt)]);
     assert_eq!(
         *term,
-        *arena.func(s(&arena, "add"), params, pt, &[], &[], inner)
+        *arena.func(s(&arena, "add"), params, pt, inner)
     );
 }
 
@@ -345,7 +343,7 @@ fn def_no_ret() {
     assert_eq!(name, "x");
     assert_eq!(
         *term,
-        *arena.func(s(&arena, "x"), &[], None, &[], &[], arena.lit_int(5))
+        *arena.func(s(&arena, "x"), &[], None, arena.lit_int(5))
     );
 }
 
@@ -507,7 +505,7 @@ fn def_with_binary_sub_in_body() {
     let params: &[(&str, Option<&Term>)] = arena.alloc_slice(&[(s(&arena, "n"), pt)]);
     assert_eq!(
         *term,
-        *arena.func(s(&arena, "dec"), params, pt, &[], &[], body)
+        *arena.func(s(&arena, "dec"), params, pt, body)
     );
 }
 
@@ -551,7 +549,7 @@ fn fib_def_structure_matches_expected() {
 
     let pt = Some(arena.builtin(s(&arena, "int")) as &Term<'_>);
     let params: &[(&str, Option<&Term>)] = arena.alloc_slice(&[(s(&arena, "n"), pt)]);
-    let expected = arena.func(s(&arena, "fib"), params, pt, &[], &[], body);
+    let expected = arena.func(s(&arena, "fib"), params, pt, body);
     assert_eq!(*term, *expected);
 }
 

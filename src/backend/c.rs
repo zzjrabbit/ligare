@@ -43,7 +43,7 @@ pub fn emit_c(tops: &[TopLevel<'_>]) -> String {
 }
 
 fn emit_def(name: &str, term: &Term<'_>) -> String {
-    let (body, params, self_name) = if let Term::Func(_, params, _, _, _, body) = term {
+    let (body, params, self_name) = if let Term::Func(_, params, _, body) = term {
         (
             *body,
             params

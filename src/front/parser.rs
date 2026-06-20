@@ -224,7 +224,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         let body_expr = self.parse_expr(&env)?;
         let body = subst_this(self.arena, name, body_expr);
         let params_slice = self.arena.alloc_slice(&params);
-        Ok(self.arena.func(name, params_slice, m_ret, &[], &[], body))
+        Ok(self.arena.func(name, params_slice, m_ret, body))
     }
 
     fn parse_curried_param(&mut self) -> Option<(Name<'bump>, Option<&'bump Term<'bump>>)> {

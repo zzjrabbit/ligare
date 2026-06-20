@@ -129,8 +129,6 @@ fn func_desugars_and_evaluates() {
         s(&arena, "f"),
         params,
         Some(arena.builtin(s(&arena, "int"))),
-        &[],
-        &[],
         body,
     );
     let app = arena.app(func, arena.lit_int(5));
