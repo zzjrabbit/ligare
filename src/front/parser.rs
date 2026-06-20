@@ -229,7 +229,10 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         // Produce a Func node to preserve parameter type annotations
         // (otherwise constraints like `b: int where (x => x /= 0)` are lost).
         let params_slice = self.arena.alloc_slice(&params);
-        Ok((name, self.arena.func(name, params_slice, m_ret, &[], &[], body)))
+        Ok((
+            name,
+            self.arena.func(name, params_slice, m_ret, &[], &[], body),
+        ))
     }
 
     fn parse_curried_param(&mut self) -> Option<(Name<'bump>, Option<&'bump Term<'bump>>)> {
