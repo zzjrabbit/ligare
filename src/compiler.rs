@@ -4,7 +4,7 @@ use bumpalo::Bump;
 
 use crate::checker::TypeChecker;
 use crate::checker::context::empty_ctx;
-use crate::core::erase::erase;
+use crate::checker::erase::Eraser;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
 use crate::core::syntax::Term;
@@ -61,17 +61,18 @@ impl<'bump> Compiler<'bump> {
         // Evaluate TLShow/TLExpr terms for codegen, then erase all
         // proof-irrelevant subterms (prop / theorem / proof universes)
         // so the C backend only sees pure data.
+        let eraser = Eraser::new(self.arena);
         let evald_tops: Vec<TopLevel<'bump>> = tops
             .into_iter()
             .map(|top| match top {
                 TopLevel::TLShow(term) | TopLevel::TLExpr(term) => {
                     let resolved = self.subst_top_level(term);
                     match self.evaluator.eval(resolved) {
-                        Ok(val) => TopLevel::TLShow(erase(self.arena, val)),
+                        Ok(val) => TopLevel::TLShow(eraser.erase(val)),
                         Err(_) => top,
                     }
                 }
-                TopLevel::TLDef(name, term) => TopLevel::TLDef(name, erase(self.arena, term)),
+                TopLevel::TLDef(name, term) => TopLevel::TLDef(name, eraser.erase(term)),
                 other => other,
             })
             // Drop zero-param definitions whose body is a bare builtin

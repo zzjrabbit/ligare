@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod context;
+pub mod erase;
 pub mod infer;
 pub mod prove;
 
