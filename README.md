@@ -18,13 +18,13 @@ A term is the only existence in the language. Variables, literals, functions, da
 
 ### 2.2 Constraints
 Relationships between terms are established through **constraints**.  
-`a constrained by T` means that term `a` belongs to term `T`.  
+`a : T` means that term `a` is constrained by term `T` (i.e., `a` has type `T`).  
 The constraint relationship replaces the "type ascription" found in traditional languages, but constraints themselves are also terms and can be constrained by other terms.
 
 **Example**  
-```
-3 constrained by int
-int constrained by data
+```ligare
+3 : int       -- 3 is constrained by int
+int : data    -- int is constrained by data
 ```
 
 ### 2.3 Levels
@@ -48,93 +48,217 @@ The language has four built-in root constraints, called **meta-constraints**. Th
 
 All user-defined constraints are ultimately rooted beneath these four meta-constraints.
 
-## 4. Refinement Constraints (Alias Constraints)
+## 4. Refinement Constraints (Where Clauses)
 
-Users can define new constraints with attached propositional conditions. This is Ligare's way of defining "types."
+Users can define new constraints by refining an existing constraint with a predicate. This is Ligare's way of defining "subtypes."
 
 **Syntax**  
-```
-constraint nat as (data x & x >= 0)
+```ligare
+def nat := int where (x => x >= 0)
 ```
 
 **Interpretation**  
 `nat` is a new constraint. Any term constrained by `nat` must:
-1. Be constrained by `data` (i.e., be computable data);
-2. Carry a `proof` term demonstrating that the data satisfies `x >= 0`.
+1. Be constrained by `int` (which itself is constrained by `data`);
+2. Satisfy the predicate `x >= 0`.
 
 **Usage**  
+```ligare
+def x : nat := 10
+#check x : nat       -- passes
+#check x : int       -- also passes (nat is a subtype of int)
+#check -5 : nat      -- fails: -5 is not >= 0
 ```
-a : nat   // a must be a non-negative integer
-```
+
 The compiler automatically demands this proof where needed, or derives it from context.
 
-## 5. Functions and Contracts
+Multiple refinements can coexist in the same program:
+```ligare
+def pos   := int where (x => x > 0)
+def even  := int where (x => x % 2 = 0)
+def ten   := int where (x => x = 10)
+```
 
-Functions can constrain their own parameters and return values, forming pre/post-condition contracts.
+Refinements can also be used inline in function parameters:
+```ligare
+def sdiv (a : int) (b : int where (x => x /= 0)) : int := a / b
+```
+
+## 5. Functions
+
+Functions are defined with `def` (or `func`), using curried parameter lists. They can constrain their own parameters via `where` clauses, forming pre-condition contracts.
 
 **Syntax example**  
-```
-function div(a: int, b: int)
-  param constraint: b ≠ 0
-  output constraint: result * b = a
+```ligare
+def div (a : int) (b : int where (x => x /= 0)) : int := a / b
 ```
 
 **Proof obligations**  
-- The caller must provide a proof of `b ≠ 0` (or the compiler derives it automatically).
-- The function body must construct the proof of `result * b = a`.
+- The caller must provide a proof that `b /= 0` (or the compiler derives it automatically).
+- The function body operates under the guarantee that the parameter constraints hold.
 
 All proof terms (`proof`) are erased after passing compile-time checks, with zero runtime overhead.
+
+**Function with no return type annotation**  
+```ligare
+def id (x : int) := x
+```
+
+**Recursive function**  
+```ligare
+def fib (n : int) : int :=
+  if n < 2 then n else fib (n - 1) + fib (n - 2)
+```
 
 ## 6. `if` Expressions and Theorem Introduction
 
 The condition of an `if` is treated as a proposition. When entering a branch, the branch context automatically introduces a corresponding `theorem`.
 
 **Example**  
-```
-if (x > 0) then
-  // a theorem: x > 0 is automatically available here
-  // it can be used to satisfy proof obligations of other constraints
-  div(10, x)  // x ≠ 0 can be automatically derived from x > 0
+```ligare
+if x > 0 then
+  -- a theorem: x > 0 is automatically available here
+  -- it can be used to satisfy proof obligations of other constraints
+  div 10 x  -- x /= 0 can be automatically derived from x > 0
 else
-  // a theorem: not (x > 0) is automatically available here
+  -- a theorem: not (x > 0) is automatically available here
 ```
 
 After compilation, `if` is still compiled into a simple conditional jump; all proof parts are erased.
 
-## 7. Structs
+## 7. Proofs and Tactics (Lean 4-style `by` blocks)
+
+Ligare supports interactive proof construction via `by` blocks with tactics, inspired by Lean 4.
+
+**Simple proof with `exact`**  
+```ligare
+#check 5 by
+  exact true : nat
+```
+
+**Multi-tactic proof with `intro`**  
+```ligare
+#check 0 by
+  intro
+  exact 0 : int -> int
+```
+
+**Standalone proof term (no subject)**  
+```ligare
+#check (by
+  intro
+  exact 0) : int -> int
+```
+
+**Applying a proof immediately**  
+```ligare
+#show (by
+  intro
+  exact 0) 5
+```
+
+Available tactics:
+- `exact <term>` — provide a term that satisfies the goal directly
+- `intro [name]` — introduce a Pi-type hypothesis
+- `apply <term>` — apply a function to reduce the goal
+- `have <name> := <term>` — introduce a lemma
+
+## 8. Expressions and Let Bindings
+
+### Lambda expressions
+```ligare
+\x. x + 1
+\a. \b. a + b
+```
+
+### Let expressions
+```ligare
+let x := 5 in x + 3
+let x : int := 5 in x
+let x := 5 in let y := x + 1 in y * 2
+```
+
+### Type annotation
+```ligare
+(5 : int)
+(5 : nat) by exact true
+```
+
+### Function (Pi) types
+```ligare
+int -> bool               -- non-dependent arrow
+(x : int) -> x            -- dependent arrow
+```
+
+### Proposition combinators
+```ligare
+∧ P Q    -- conjunction: P ∧ Q
+∨ P Q    -- disjunction: P ∨ Q
+¬ P      -- negation: ¬P
+```
+
+## 9. Structs *(planned)*
+
+> ⚠️ This feature is not yet implemented. The syntax below represents the intended design.
 
 A struct is a compound term constrained by `data`, containing named fields and optional invariants.
 
-**Definition example**  
-```
-constraint Point as data struct:
-  field x : int
-  field y : int
-  invariant : x >= 0 ∧ y >= 0
+**Planned syntax**
+```ligare
+def Point : data := struct
+  x : int
+  y : int
+invariant: x >= 0 ∧ y >= 0
 ```
 
-**Construction**  
-When constructing `Point`, a `proof` that the invariant holds must be provided.  
-The compiler automatically generates:
+**Construction**
+When constructing `Point`, a `proof` that the invariant holds must be provided.
+The compiler will automatically generate:
 - A constructor (with proof obligations)
 - Field projection functions
 - A `theorem` corresponding to the invariant (e.g., for any `p : Point`, `p.x >= 0` is an available theorem)
 
-## 8. Compile-Time Metaprogramming
+## 10. Compile-Time Metaprogramming *(planned)*
 
-The `proof` universe also serves the role of metaprogramming.  
+> ⚠️ This feature is not yet implemented. The syntax below represents the intended design.
+
+The `proof` universe also serves the role of metaprogramming.
 Any program used solely for generating `data` code can be written as a `proof` term, evaluated at compile time and spliced in.
 
-**Mechanism**  
-- Quote: converts a code fragment into manipulable AST data;
-- Splice: inserts the AST produced by evaluating a `proof` term back into the `data` context.
+**Planned mechanism**
+```ligare
+-- Quote: converts a code fragment into manipulable AST data
+`( x + 1 )
 
-**Safety guarantee**  
+-- Splice: inserts the AST produced by evaluating a proof term back into data context
+$( proof_term )
+```
+
+**Safety guarantee**
 During splicing, the generated code is forcibly verified to satisfy the target constraint; otherwise compilation fails.
 
 Since `proof` is ultimately erased, the metaprogramming parts never enter the runtime.
 
-## 9. Compilation and Erasure
+## 11. Top-Level Commands
+
+Ligare programs consist of a sequence of top-level commands:
+
+| Command | Description |
+|---------|-------------|
+| `def <name> <params>? : <type>? := <body>` | Define a named term or function |
+| `#check <expr> : <type>` | Type-check an expression against a constraint |
+| `#show <expr>` | Evaluate an expression and display the result |
+
+**Example program**  
+```ligare
+def nat := int where (x => x >= 0)
+def x : nat := 10
+
+#check x : int
+#show x
+```
+
+## 12. Compilation and Erasure
 
 The compilation process is divided into two major phases:
 
@@ -145,13 +269,14 @@ The compilation process is divided into two major phases:
    Retain all terms constrained by `data`, and remove all terms constrained by `prop`, `theorem`, or `proof`.  
    The final product is pure, zero-overhead executable code.
 
-## 10. Summary
+## 13. Summary
 
 Ligare uses the single core concept of **"terms constrained by terms"** to unify:
 - The type system
 - Propositions and proofs
 - Design by contract
-- Compile-time metaprogramming
+- Refinement types
+- Compile-time metaprogramming *(planned)*
 
 It pursues **the extreme of static safety with zero runtime burden**, while maintaining a minimal set of concepts.  
-This document is an outline of its core ideas; formal definitions, operational semantics, and implementation details will be added progressively.
+This document describes the currently implemented syntax and planned features; formal definitions, operational semantics, and implementation details will be added progressively.
