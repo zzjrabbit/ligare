@@ -201,24 +201,169 @@ int -> bool               -- 非依赖箭头
 
 > ⚠️ 此特性尚未实现。以下语法代表预期设计。
 
-结构体是受 `data` 约束的复合项，包含命名字段和可选的不变量。
+结构体**定义**是一个**约束**——存在于 `prop` 宇宙，类型检查后被擦除。结构体**值**（构造出的实例）存在于 `data` 宇宙，运行时保留。
+
+结构体拥有命名字段和可选的不变量。它是 Ligare 的**积类型**（∧）：所有字段同时存在。
 
 **预期语法**
 ```ligare
-def Point : data := struct
+def Point : prop := struct
   x : int
   y : int
 invariant: x >= 0 ∧ y >= 0
 ```
 
 **构造**
-构造 `Point` 时，必须提供不变量成立的 `proof`。
+构造结构体值时，必须提供不变量成立的 `proof`：
+```ligare
+def p : Point := Point.mk 3 4 by
+  exact (∧-intro (3 >= 0) (4 >= 0))
+```
 编译器将自动生成：
-- 构造器（带证明义务）
-- 字段投影函数
+- 带证明义务的构造器函数
+- 字段投影函数（如 `Point.x p`）
 - 不变量对应的 `theorem`（例如：对任意 `p : Point`，`p.x >= 0` 是一个可用定理）
 
-## 10. 编译期元编程 *(计划中)*
+## 10. 和类型 *(计划中)*
+
+> ⚠️ 此特性尚未实现。以下语法代表预期设计。
+
+和类型**定义**是一个**约束**——存在于 `prop` 宇宙，类型检查后被擦除。和类型**值**（变体实例）存在于 `data` 宇宙，运行时保留。
+
+和类型拥有命名变体，每个变体可附带零个或多个 payload 字段。它是 Ligare 的**和类型**（∨）：恰好一个变体成立。
+
+### 10.1 定义
+
+和类型使用与 `struct` 对称的 `union` 关键字。每个变体以 `|` 引入：
+
+```ligare
+-- 简单枚举（无 payload）
+def Color : prop := union
+  | Red
+  | Green
+  | Blue
+
+-- 带 payload 的多态和类型
+def Option (A : prop) : prop := union
+  | None
+  | Some of (val : A)
+
+-- 递归和类型 —— 编译器 AST 的核心
+def Expr : prop := union
+  | Lit  of (n : int)
+  | Add  of (l : Expr) (r : Expr)
+  | If   of (c : Expr) (t : Expr) (e : Expr)
+
+-- 多字段带名 payload
+def Result (T : prop) (E : prop) : prop := union
+  | Ok  of (value : T)
+  | Err of (error : E)
+```
+
+### 10.2 构造
+
+变体名即为构造器函数，由 union 定义自动生成：
+
+```ligare
+def c  : Color       := Red
+def x  : Option int  := Some 5
+def y  : Option int  := None              -- 需要类型标注来推断类型参数
+def e  : Expr        := Add (Lit 1) (Lit 2)
+def ok : Result int str := Ok 42
+```
+
+对于无参变体（如 `None`），类型参数无法从参数推导，需要类型标注（`: Option int`）为编译器提供推断 `A = int` 所需的约束信息。
+
+带精化约束的 payload 在构造时需要证明义务：
+
+```ligare
+def PosOption : prop := union
+  | Nothing
+  | Just of (val : int where (x => x > 0))
+
+def j : PosOption := Just 5       -- 自动证明：5 > 0
+def k : PosOption := Just (-3)    -- 编译错误：-3 > 0 不成立
+```
+
+### 10.3 模式匹配（消去）
+
+和类型的值通过 `match` 表达式消去。每个分支覆盖一个变体，并绑定其 payload：
+
+```ligare
+def unwrap_or (opt : Option int) (default : int) : int :=
+  match opt with
+  | None     => default
+  | Some val => val
+```
+
+**定理引入** —— 每个 `match` 分支自动引入该变体成立的 theorem，与 `if` 分支引入条件 theorem 完全一致：
+
+```ligare
+match opt with
+| None =>
+  -- 此处自动获得 theorem：opt = None
+| Some val =>
+  -- 此处自动获得 theorem：opt = Some val
+  -- 如果 val 有精化约束（如 val > 0），该 theorem 同样可用
+```
+
+这使得精化约束能安全地穿透 match 分支：
+
+```ligare
+def safe_div (opt : PosOption) (x : int) : int :=
+  match opt with
+  | Nothing  => 0
+  | Just val =>
+    -- theorem：val > 0（来自 PosOption 的精化约束）
+    -- 这满足了 div 对除数非零的证明义务
+    div x val
+```
+
+**穷尽性检查** —— 编译器验证 match 覆盖了 union 的所有变体。漏掉变体是编译期错误。
+
+嵌套 match 自然支持：
+
+```ligare
+def eval (e : Expr) : int :=
+  match e with
+  | Lit n      => n
+  | Add l r    => eval l + eval r
+  | If c t e   => if eval c /= 0 then eval t else eval e
+```
+
+### 10.4 擦除与编译
+
+和类型**定义**属于 `prop` —— 编译期擦除。和类型**值**和 `match` 表达式属于 `data` —— 运行时保留。
+
+C 后端将和类型编译为 tagged union 结构体，`match` 编译为 `switch` 语句，实现零开销表示：
+
+```c
+// Option_int（A = int）
+typedef struct {
+    int tag;          // 0 = None, 1 = Some
+    union {
+        struct { int64_t val; } Some;
+    } data;
+} Option_int;
+
+// match opt with | None => 0 | Some val => val + 1
+switch (opt.tag) {
+case 0: return 0;
+case 1: { int64_t val = opt.data.Some.val; return val + 1; }
+}
+```
+
+### 10.5 结构体与和类型 —— 对偶性
+
+| | 结构体（积） | 和类型（和） |
+|---|---|---|
+| 逻辑对偶 | `∧`（全部成立） | `∨`（择一成立） |
+| 构造 | 提供所有字段 | 选择一个变体 |
+| 消去 | 字段投影（`.x`） | 模式匹配（`match`） |
+| C 表示 | 连续字段 | tag + union |
+| 宇宙 | 定义：`prop`，值：`data` | 定义：`prop`，值：`data` |
+
+## 11. 编译期元编程 *(计划中)*
 
 > ⚠️ 此特性尚未实现。以下语法代表预期设计。
 
@@ -239,7 +384,7 @@ $( proof_term )
 
 由于 `proof` 最终被擦除，元编程部分完全不会进入运行时。
 
-## 11. 顶层命令
+## 12. 顶层命令
 
 Ligare 程序由一系列顶层命令组成：
 
@@ -261,7 +406,7 @@ theorem x_is_nat : nat := x by
 #show x
 ```
 
-## 12. 编译与擦除
+## 13. 编译与擦除
 
 编译过程分为两大阶段：
 
@@ -272,13 +417,13 @@ theorem x_is_nat : nat := x by
    保留所有受 `data` 约束的项，删除所有受 `prop`、`theorem`、`proof` 约束的项。  
    最终产物是纯粹的、无运行开销的可执行代码。
 
-## 13. 总结
+## 14. 总结
 
 Ligare 用 **"项约束项"** 这一个核心概念，统一了：
-- 类型系统
+- 类型系统（约束是 `prop` 中的项）
 - 命题与证明
-- 契约式设计
-- 精化类型
+- 契约式设计（精化类型）
+- 积类型（struct）与和类型（union）—— 两者皆作为 `prop` 中的约束
 - 编译期元编程 *(计划中)*
 
 它追求**静态安全的极致与运行时的零负担**，同时保持概念的极小集合。  

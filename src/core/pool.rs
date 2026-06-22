@@ -2,7 +2,7 @@ use bumpalo::Bump;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::core::syntax::{Name, PrimOp, Tactic, Term, Universe};
+use crate::core::syntax::{FuncDef, Name, PrimOp, Tactic, Term, Universe};
 
 /// A bumpalo-backed string interner.
 ///
@@ -131,18 +131,6 @@ impl<'bump> TermArena<'bump> {
                 self.by_proof(inner_mapped, self.alloc_slice(&mapped))
             }
             Term::Refine(n, par, p) => self.refine(n, self.map(par, f), self.map(p, f)),
-            Term::Func(fname, params, m_ret, body) => {
-                let params2: Vec<_> = params
-                    .iter()
-                    .map(|(nm, mc)| (*nm, mc.map(|c| self.map(c, f))))
-                    .collect();
-                self.func(
-                    fname,
-                    self.alloc_slice(&params2),
-                    m_ret.map(|c| self.map(c, f)),
-                    self.map(body, f),
-                )
-            }
             _ => t,
         }
     }
@@ -248,14 +236,22 @@ impl<'bump> TermArena<'bump> {
         self.alloc(Term::ByProof(t, tactics))
     }
 
-    pub fn func(
-        &self,
-        name: Name<'bump>,
-        params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
-        m_ret: Option<&'bump Term<'bump>>,
-        body: &'bump Term<'bump>,
-    ) -> &'bump Term<'bump> {
-        self.alloc(Term::Func(name, params, m_ret, body))
+    /// Desugar a `FuncDef` into `Annot(Lam(body), Pi(params..., ret))`.
+    pub fn desugar_func_def(&self, func_def: &FuncDef<'bump>) -> &'bump Term<'bump> {
+        let FuncDef {
+            name: _name,
+            params,
+            ret: m_ret,
+            body,
+        } = *func_def;
+        let func_body = params.iter().fold(body, |b, _| self.lam(b));
+        let default = self.builtin(self.alloc_str(crate::config::BUILTIN_DATA));
+        let func_type = params
+            .iter()
+            .rfold(m_ret.unwrap_or(default), |b, (pn, mc)| {
+                self.pi(pn, mc.unwrap_or(default), b)
+            });
+        self.annot(func_body, func_type)
     }
 }
 
@@ -317,7 +313,7 @@ impl<'bump> SubstitutionContext<'bump> {
     }
 
     /// Shared children-recursion for `shift` and `subst_cutoff`.
-    /// For nodes that bind variables (Lam, Pi, Let, Func), `cutoff` is bumped.
+    /// For nodes that bind variables (Lam, Pi, Let), `cutoff` is bumped.
     fn traverse_children(
         &self,
         t: &'bump Term<'bump>,
@@ -358,18 +354,6 @@ impl<'bump> SubstitutionContext<'bump> {
             Term::Refine(n, par, p) => {
                 self.arena
                     .refine(n, recurse(par, cutoff), recurse(p, cutoff))
-            }
-            Term::Func(fname, params, m_ret, body) => {
-                let params2: Vec<_> = params
-                    .iter()
-                    .map(|(nm, mc)| (*nm, mc.map(|c| recurse(c, cutoff))))
-                    .collect();
-                self.arena.func(
-                    fname,
-                    self.arena.alloc_slice(&params2),
-                    m_ret.map(|c| recurse(c, cutoff)),
-                    recurse(body, cutoff + params.len() as i32),
-                )
             }
             // Leaf nodes — returned unchanged (Var handled by callers)
             _ => t,

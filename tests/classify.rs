@@ -103,16 +103,10 @@ fn if_then_else_is_data() {
 
 #[test]
 fn func_is_data() {
+    // After desugaring, Func becomes Annot(Lam(...), Pi(...)).
+    // Lam is classified as UData, and Annot delegates to the inner term.
     assert_eq!(
-        classify(
-            &empty_ctx(),
-            &Term::Func(
-                "f",
-                &[("x", Some(&Term::Builtin("int")))],
-                None,
-                &Term::Var(0)
-            )
-        ),
+        classify(&empty_ctx(), &Term::Lam(&Term::Var(0))),
         Some(Universe::UData)
     );
 }

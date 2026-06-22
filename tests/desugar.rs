@@ -1,9 +1,8 @@
 mod common;
 
 use common::{bin, leak_bump, s};
-use ligare::core::desugar::desugar;
 use ligare::core::pool::TermArena;
-use ligare::core::syntax::PrimOp;
+use ligare::core::syntax::{FuncDef, PrimOp};
 
 fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
     let b = leak_bump();
@@ -13,14 +12,14 @@ fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
 #[test]
 fn func_one_param_no_ret() {
     let (_bump, arena) = a();
-    let func = arena.func(
-        s(&arena, "id"),
-        arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
-        None,
-        arena.var(0),
-    );
+    let func_def = arena.bump().alloc(FuncDef {
+        name: s(&arena, "id"),
+        params: arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
+        ret: None,
+        body: arena.var(0),
+    });
     assert_eq!(
-        *desugar(&arena, func),
+        *arena.desugar_func_def(func_def),
         *arena.annot(
             arena.lam(arena.var(0)),
             arena.pi(
@@ -35,14 +34,14 @@ fn func_one_param_no_ret() {
 #[test]
 fn func_one_param_with_ret() {
     let (_bump, arena) = a();
-    let func = arena.func(
-        s(&arena, "f"),
-        arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
-        Some(arena.builtin(s(&arena, "int"))),
-        bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1)),
-    );
+    let func_def = arena.bump().alloc(FuncDef {
+        name: s(&arena, "f"),
+        params: arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
+        ret: Some(arena.builtin(s(&arena, "int"))),
+        body: bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1)),
+    });
     assert_eq!(
-        *desugar(&arena, func),
+        *arena.desugar_func_def(func_def),
         *arena.annot(
             arena.lam(bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1))),
             arena.pi(
@@ -61,15 +60,15 @@ fn func_two_params() {
         (s(&arena, "a"), Some(arena.builtin(s(&arena, "int")))),
         (s(&arena, "b"), Some(arena.builtin(s(&arena, "int")))),
     ];
-    let func = arena.func(
-        s(&arena, "add"),
-        arena.alloc_slice(params),
-        Some(arena.builtin(s(&arena, "int"))),
-        bin(&arena, PrimOp::Add, arena.var(1), arena.var(0)),
-    );
+    let func_def = arena.bump().alloc(FuncDef {
+        name: s(&arena, "add"),
+        params: arena.alloc_slice(params),
+        ret: Some(arena.builtin(s(&arena, "int"))),
+        body: bin(&arena, PrimOp::Add, arena.var(1), arena.var(0)),
+    });
     let inner = bin(&arena, PrimOp::Add, arena.var(1), arena.var(0));
     assert_eq!(
-        *desugar(&arena, func),
+        *arena.desugar_func_def(func_def),
         *arena.annot(
             arena.lam(arena.lam(inner)),
             arena.pi(
@@ -97,15 +96,15 @@ fn func_two_params_refinement() {
         (s(&arena, "a"), Some(arena.builtin(s(&arena, "int")))),
         (s(&arena, "b"), Some(refine)),
     ];
-    let func = arena.func(
-        s(&arena, "sdiv"),
-        arena.alloc_slice(params),
-        Some(arena.builtin(s(&arena, "int"))),
-        bin(&arena, PrimOp::Div, arena.var(1), arena.var(0)),
-    );
+    let func_def = arena.bump().alloc(FuncDef {
+        name: s(&arena, "sdiv"),
+        params: arena.alloc_slice(params),
+        ret: Some(arena.builtin(s(&arena, "int"))),
+        body: bin(&arena, PrimOp::Div, arena.var(1), arena.var(0)),
+    });
     let inner = bin(&arena, PrimOp::Div, arena.var(1), arena.var(0));
     assert_eq!(
-        *desugar(&arena, func),
+        *arena.desugar_func_def(func_def),
         *arena.annot(
             arena.lam(arena.lam(inner)),
             arena.pi(
@@ -125,14 +124,14 @@ fn func_three_params_order() {
         (s(&arena, "y"), Some(arena.builtin(s(&arena, "bool")))),
         (s(&arena, "z"), Some(arena.builtin(s(&arena, "int")))),
     ];
-    let func = arena.func(
-        s(&arena, "f"),
-        arena.alloc_slice(params),
-        Some(arena.builtin(s(&arena, "int"))),
-        arena.var(2),
-    );
+    let func_def = arena.bump().alloc(FuncDef {
+        name: s(&arena, "f"),
+        params: arena.alloc_slice(params),
+        ret: Some(arena.builtin(s(&arena, "int"))),
+        body: arena.var(2),
+    });
     assert_eq!(
-        *desugar(&arena, func),
+        *arena.desugar_func_def(func_def),
         *arena.annot(
             arena.lam(arena.lam(arena.lam(arena.var(2)))),
             arena.pi(
@@ -155,14 +154,14 @@ fn func_three_params_order() {
 #[test]
 fn func_no_constraint() {
     let (_bump, arena) = a();
-    let func = arena.func(
-        s(&arena, "id"),
-        arena.alloc_slice(&[(s(&arena, "x"), None)]),
-        None,
-        arena.var(0),
-    );
+    let func_def = arena.bump().alloc(FuncDef {
+        name: s(&arena, "id"),
+        params: arena.alloc_slice(&[(s(&arena, "x"), None)]),
+        ret: None,
+        body: arena.var(0),
+    });
     assert_eq!(
-        *desugar(&arena, func),
+        *arena.desugar_func_def(func_def),
         *arena.annot(
             arena.lam(arena.var(0)),
             arena.pi(

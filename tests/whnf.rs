@@ -2,7 +2,7 @@ mod common;
 
 use common::{bin, leak_bump, parse, s};
 use ligare::core::pool::TermArena;
-use ligare::core::syntax::{PrimOp, Tactic, Term};
+use ligare::core::syntax::{FuncDef, PrimOp, Tactic, Term};
 use ligare::core::whnf::whnf;
 
 fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
@@ -434,15 +434,16 @@ fn func_desugars_to_lambda() {
     let param_type = Some(arena.builtin(s(&arena, "int")) as &Term<'_>);
     let params: &[(&str, Option<&Term>)] = arena.alloc_slice(&[(s(&arena, "x"), param_type)]);
     let body = bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1));
-    let func = arena.func(
-        s(&arena, "f"),
+    let func_def = arena.bump().alloc(FuncDef {
+        name: s(&arena, "f"),
         params,
-        Some(arena.builtin(s(&arena, "int"))),
+        ret: Some(arena.builtin(s(&arena, "int"))),
         body,
-    );
-    let result = whnf(&arena, func).unwrap();
+    });
+    let desugared = arena.desugar_func_def(func_def);
+    let result = whnf(&arena, desugared).unwrap();
     match *result {
-        Term::Lam(_) => {} // correct
+        Term::Lam(_) => {} // correct: Annot(Lam, Pi) → WHNF strips Annot, leaves Lam
         other => panic!("expected Lam from Func desugaring + WHNF, got {:?}", other),
     }
 }

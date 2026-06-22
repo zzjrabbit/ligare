@@ -71,10 +71,6 @@ impl<'bump> Evaluator<'bump> {
             Term::AutoProof => Ok(t),
             Term::RefParam => Ok(t),
             Term::This => Ok(t),
-            Term::Func { .. } => {
-                let d = crate::core::desugar::Desugarer::new(self.arena).desugar(t);
-                self.eval(d)
-            }
             // Leaf values
             Term::Pi(_, _, _)
             | Term::Var(_)

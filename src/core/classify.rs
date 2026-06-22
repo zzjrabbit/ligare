@@ -13,8 +13,7 @@ impl Classifier {
             | Term::Lam(_)
             | Term::PrimOp(_)
             | Term::RefParam
-            | Term::This
-            | Term::Func { .. } => Some(Universe::UData),
+            | Term::This => Some(Universe::UData),
             Term::App(f, _) => Self::classify(ctx, f),
             Term::Universe(u) => Some(*u),
             Term::AutoProof => Some(Universe::UProof),

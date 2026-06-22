@@ -61,18 +61,6 @@ impl PrettyPrinter {
             Term::AutoProof => "auto".to_string(),
             Term::RefParam => "x".to_string(),
             Term::This => "this".to_string(),
-            Term::Func(name, params, m_ret, body) => {
-                let ps: String = params
-                    .iter()
-                    .map(|(n, mc)| match mc {
-                        Some(c) => format!("{} : {}", n, Self::pretty(c)),
-                        None => (*n).to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let rs = m_ret.map_or(String::new(), |r| format!(" : {}", Self::pretty(r)));
-                format!("func {}({}){} = {}", name, ps, rs, Self::pretty(body))
-            }
         }
     }
 

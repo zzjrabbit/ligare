@@ -3,12 +3,12 @@ use logos::Logos;
 use bumpalo::Bump;
 
 use crate::core::pool::{StringPool, TermArena};
-use crate::core::syntax::{Name, PrimOp, Tactic, Term};
+use crate::core::syntax::{FuncDef, Name, PrimOp, Tactic, Term};
 use crate::front::lexer::Token;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopLevel<'bump> {
-    TLDef(Name<'bump>, &'bump Term<'bump>),
+    TLDef(Name<'bump>, &'bump FuncDef<'bump>),
     TLTheorem(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>),
     TLCheck(&'bump Term<'bump>, &'bump Term<'bump>),
     TLShow(&'bump Term<'bump>),
@@ -122,6 +122,11 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         self.pos >= self.tokens.len()
     }
 
+    /// Return the span of the current peek position, or `0..0` at EOF.
+    fn current_span(&self) -> std::ops::Range<usize> {
+        self.peek().map(|(_, s)| s.clone()).unwrap_or(0..0)
+    }
+
     // ── Top-level ──
 
     pub fn parse_program(&mut self) -> Result<Vec<TopLevel<'bump>>, ParseError> {
@@ -137,13 +142,13 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         if !self.is_at_end() {
             return Err(ParseError {
                 message: "unexpected tokens after expression".into(),
-                span: 0..0,
+                span: self.current_span(),
             });
         }
         Ok(t)
     }
 
-    pub fn parse_def_top(&mut self) -> Result<(Name<'bump>, &'bump Term<'bump>), ParseError> {
+    pub fn parse_def_top(&mut self) -> Result<(Name<'bump>, &'bump FuncDef<'bump>), ParseError> {
         self.parse_def()
     }
 
@@ -161,8 +166,8 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             return Ok(TopLevel::TLTheorem(name, prop, body));
         }
         if self.peek_token() == Some(Token::KwDef) {
-            let (name, term) = self.parse_def()?;
-            return Ok(TopLevel::TLDef(name, term));
+            let (name, func_def) = self.parse_def()?;
+            return Ok(TopLevel::TLDef(name, func_def));
         }
         if self.peek_token() == Some(Token::HashCheck) {
             self.advance();
@@ -247,7 +252,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     // ── Definitions ──
 
-    fn parse_def(&mut self) -> Result<(Name<'bump>, &'bump Term<'bump>), ParseError> {
+    fn parse_def(&mut self) -> Result<(Name<'bump>, &'bump FuncDef<'bump>), ParseError> {
         self.expect(&Token::KwDef)?;
         let name = self.parse_ident()?;
         Ok((name, self.parse_func_body(name, &[])?))
@@ -257,7 +262,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         &mut self,
         name: Name<'bump>,
         outer_env: &[Name<'bump>],
-    ) -> Result<&'bump Term<'bump>, ParseError> {
+    ) -> Result<&'bump FuncDef<'bump>, ParseError> {
         let params = self.parse_many_curried_params();
         let m_ret = self.parse_type_annotation(outer_env);
         self.expect(&Token::ColonEq)?;
@@ -267,7 +272,13 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         let body_expr = self.parse_expr(&env)?;
         let body = subst_this(self.arena, name, body_expr);
         let params_slice = self.arena.alloc_slice(&params);
-        Ok(self.arena.func(name, params_slice, m_ret, body))
+        let func_def = FuncDef {
+            name,
+            params: params_slice,
+            ret: m_ret,
+            body,
+        };
+        Ok(self.arena.bump().alloc(func_def))
     }
 
     fn parse_curried_param(&mut self) -> Option<(Name<'bump>, Option<&'bump Term<'bump>>)> {
@@ -400,7 +411,8 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             });
         }
         let name = self.parse_ident()?;
-        self.parse_func_body(name, env)
+        let func_def = self.parse_func_body(name, env)?;
+        Ok(self.arena.desugar_func_def(func_def))
     }
 
     // ── Dependent arrow ──
@@ -574,7 +586,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         } else if KEYWORDS.contains(&name) {
             Err(ParseError {
                 message: format!("keyword '{}' cannot be used as identifier", name),
-                span: 0..0,
+                span: self.current_span(),
             })
         } else {
             Ok(self.arena.builtin(name))
@@ -780,7 +792,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         if tactics.is_empty() {
             return Err(ParseError {
                 message: "Empty proof block".into(),
-                span: 0..0,
+                span: self.current_span(),
             });
         }
         Ok(self.arena.alloc_slice(&tactics))
@@ -890,7 +902,7 @@ pub fn parse_def_top<'bump>(
     input: &str,
     bump: &'bump Bump,
     arena: &'bump TermArena<'bump>,
-) -> Result<(Name<'bump>, &'bump Term<'bump>), String> {
+) -> Result<(Name<'bump>, &'bump FuncDef<'bump>), String> {
     let pool = StringPool::new(bump);
     Parser::new(&tokenize(input), &pool, arena)
         .parse_def_top()

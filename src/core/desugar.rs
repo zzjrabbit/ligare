@@ -1,6 +1,6 @@
 use crate::config::BUILTIN_DATA;
 use crate::core::pool::TermArena;
-use crate::core::syntax::Term;
+use crate::core::syntax::{FuncDef, Term};
 
 pub struct Desugarer<'bump> {
     arena: &'bump TermArena<'bump>,
@@ -15,19 +15,16 @@ impl<'bump> Desugarer<'bump> {
     }
 
     pub fn desugar(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
-        match t {
-            Term::Func(_fname, params, m_ret, body) => self.desugar_func(params, m_ret, body),
-            // All other terms (LitInt, LitBool, LitStr, Var, Pi, etc.) pass through unchanged
-            _ => t,
-        }
+        t
     }
 
-    fn desugar_func(
-        &self,
-        params: &'bump [(crate::core::syntax::Name<'bump>, Option<&'bump Term<'bump>>)],
-        m_ret: &Option<&'bump Term<'bump>>,
-        body: &'bump Term<'bump>,
-    ) -> &'bump Term<'bump> {
+    pub fn desugar_func_def(&self, func_def: &FuncDef<'bump>) -> &'bump Term<'bump> {
+        let FuncDef {
+            name: _name,
+            params,
+            ret: m_ret,
+            body,
+        } = *func_def;
         let func_body = params.iter().fold(body, |b, _| self.arena.lam(b));
         let default = self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA));
         let func_type = params
@@ -41,4 +38,11 @@ impl<'bump> Desugarer<'bump> {
 
 pub fn desugar<'bump>(arena: &'bump TermArena<'bump>, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
     Desugarer::new(arena).desugar(t)
+}
+
+pub fn desugar_func_def<'bump>(
+    arena: &'bump TermArena<'bump>,
+    func_def: &FuncDef<'bump>,
+) -> &'bump Term<'bump> {
+    Desugarer::new(arena).desugar_func_def(func_def)
 }

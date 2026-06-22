@@ -5,27 +5,27 @@
 //! that mirrors De Bruijn binding structure.
 
 use crate::backend::ir::{CType, FunSig};
-use crate::core::syntax::{PrimOp, Term};
+use crate::core::syntax::{FuncDef, PrimOp, Term};
 use crate::front::parser::TopLevel;
 
 /// Emit a complete C source file from a list of top-level items.
 pub fn emit_c(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
     let mut out = String::from("#include <stdio.h>\n#include <stdint.h>\n\n");
-    let mut defs: Vec<(&str, &Term<'_>)> = Vec::new();
+    let mut defs: Vec<(&str, &FuncDef<'_>)> = Vec::new();
     let mut outputs: Vec<&Term<'_>> = Vec::new();
 
     for top in tops {
         match top {
-            TopLevel::TLDef(name, term) => {
-                defs.push((name, term));
+            TopLevel::TLDef(name, func_def) => {
+                defs.push((name, func_def));
             }
             TopLevel::TLShow(term) | TopLevel::TLExpr(term) => outputs.push(term),
             _ => {}
         }
     }
 
-    for (name, term) in &defs {
-        out.push_str(&emit_def(name, term, fun_sigs));
+    for (name, func_def) in &defs {
+        out.push_str(&emit_def(name, func_def, fun_sigs));
         out.push('\n');
     }
 
@@ -48,29 +48,31 @@ pub fn emit_c(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
 }
 
 /// Emit a top-level definition as a C function or constant.
-fn emit_def(name: &str, term: &Term<'_>, fun_sigs: &[(&str, FunSig)]) -> String {
-    match term {
-        Term::Func(_, params, _m_ret, body) => {
-            let pns: Vec<String> = params.iter().map(|(n, _)| n.to_string()).collect();
-            let param_types: Vec<CType> = fun_sigs
-                .iter()
-                .find(|(n, _)| *n == name)
-                .map(|(_, sig)| sig.param_types.clone())
-                .unwrap_or_else(|| vec![CType::Int64; params.len()]);
-            emit_fun(name, &pns, &param_types, body, fun_sigs)
+fn emit_def(name: &str, func_def: &FuncDef<'_>, fun_sigs: &[(&str, FunSig)]) -> String {
+    let params = func_def.params;
+    let body = func_def.body;
+    if params.is_empty() {
+        let arity = count_lams(body);
+        if arity == 0 {
+            let (code, ctype) = emit_expr(body, &[], &mut Vec::new(), None, fun_sigs);
+            format!("const {} {} = {};\n", ctype.c_name(), name, code)
+        } else {
+            let pns: Vec<String> = (0..arity).map(|i| format!("arg_{}", i)).collect();
+            let peeled = peel_lams(body, arity);
+            let param_types = vec![CType::Int64; arity];
+            emit_fun(name, &pns, &param_types, peeled, fun_sigs)
         }
-        _ => {
-            let arity = count_lams(term);
-            if arity == 0 {
-                let (code, ctype) = emit_expr(term, &[], &mut Vec::new(), None, fun_sigs);
-                format!("const {} {} = {};\n", ctype.c_name(), name, code)
-            } else {
-                let pns: Vec<String> = (0..arity).map(|i| format!("arg_{}", i)).collect();
-                let body = peel_lams(term, arity);
-                let param_types = vec![CType::Int64; arity];
-                emit_fun(name, &pns, &param_types, body, fun_sigs)
-            }
-        }
+    } else {
+        let pns: Vec<String> = params.iter().map(|(n, _)| n.to_string()).collect();
+        let param_types: Vec<CType> = fun_sigs
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, sig)| sig.param_types.clone())
+            .unwrap_or_else(|| vec![CType::Int64; params.len()]);
+        // Peel outer Lam wrappers — emit_fun provides param types via
+        // var_types, so the Lam nodes would incorrectly push Int64.
+        let peeled = peel_lams(body, params.len());
+        emit_fun(name, &pns, &param_types, peeled, fun_sigs)
     }
 }
 
@@ -165,18 +167,6 @@ fn emit_expr(
             (b, ret_ty)
         }
 
-        Term::Func(fname, params, _m_ret, body) => {
-            for _ in 0..params.len() {
-                var_types.insert(0, CType::Int64);
-            }
-            let (b, ret_ty) = emit_expr(body, bound, var_types, Some(fname), fun_sigs);
-            for _ in 0..params.len() {
-                var_types.remove(0);
-            }
-            // Func wrapping is done by emit_fun via emit_def.
-            (b, ret_ty)
-        }
-
         Term::IfThenElse(c, t, f) => {
             let (cc, _) = emit_expr(c, bound, var_types, self_name, fun_sigs);
             let (ct, t_ty) = emit_expr(t, bound, var_types, self_name, fun_sigs);
@@ -193,7 +183,7 @@ fn emit_expr(
             let ty = fun_sigs
                 .iter()
                 .find(|(n, _)| *n == *name)
-                .and_then(|(_, sig)| sig.ret_type)
+                .map(|(_, sig)| sig.ret_type)
                 .unwrap_or(CType::Int64);
             ((*name).to_string(), ty)
         }
@@ -230,7 +220,7 @@ fn emit_app(
     let ret_ty = fun_sigs
         .iter()
         .find(|(n, _)| *n == func)
-        .and_then(|(_, sig)| sig.ret_type)
+        .map(|(_, sig)| sig.ret_type)
         .unwrap_or(CType::Int64);
     (format!("{}({})", func, args.join(", ")), ret_ty)
 }
@@ -286,7 +276,7 @@ mod tests {
         (b, TermArena::new(b))
     }
 
-    fn sig(name: &str, param_types: Vec<CType>, ret_type: Option<CType>) -> (&str, FunSig) {
+    fn sig(name: &str, param_types: Vec<CType>, ret_type: CType) -> (&str, FunSig) {
         // Leak the name string so it lives as long as the test.
         let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
         (
@@ -331,23 +321,26 @@ mod tests {
     #[test]
     fn int_const_def() {
         let (_b, arena) = setup();
-        let c = emit_c(
-            &[TopLevel::TLDef(arena.alloc_str("x"), arena.lit_int(5))],
-            &[],
-        );
+        let func_def = arena.bump().alloc(FuncDef {
+            name: arena.alloc_str("x"),
+            params: &[],
+            ret: None,
+            body: arena.lit_int(5),
+        });
+        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("x"), func_def)], &[]);
         assert!(c.contains("const int64_t x = 5;"));
     }
 
     #[test]
     fn str_const_def() {
         let (_b, arena) = setup();
-        let c = emit_c(
-            &[TopLevel::TLDef(
-                arena.alloc_str("g"),
-                arena.lit_str(arena.alloc_str("hi")),
-            )],
-            &[],
-        );
+        let func_def = arena.bump().alloc(FuncDef {
+            name: arena.alloc_str("g"),
+            params: &[],
+            ret: None,
+            body: arena.lit_str(arena.alloc_str("hi")),
+        });
+        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("g"), func_def)], &[]);
         assert!(c.contains("const char* g"));
         assert!(c.contains("\"hi\""));
     }
@@ -363,7 +356,13 @@ mod tests {
             arena.var(0),
         );
         let lam = arena.lam(arena.lam(body));
-        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("add"), lam)], &[]);
+        let func_def = arena.bump().alloc(FuncDef {
+            name: arena.alloc_str("add"),
+            params: &[],
+            ret: None,
+            body: lam,
+        });
+        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("add"), func_def)], &[]);
         assert!(c.contains("int64_t add(int64_t arg_0, int64_t arg_1)"));
     }
 
@@ -371,7 +370,13 @@ mod tests {
     fn lam_returning_str_infers_str_return_type() {
         let (_b, arena) = setup();
         let lam = arena.lam(arena.lit_str(arena.alloc_str("hi")));
-        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("greet"), lam)], &[]);
+        let func_def = arena.bump().alloc(FuncDef {
+            name: arena.alloc_str("greet"),
+            params: &[],
+            ret: None,
+            body: lam,
+        });
+        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("greet"), func_def)], &[]);
         assert!(c.contains("const char* greet(int64_t arg_0)"));
         assert!(c.contains("\"hi\""));
     }
@@ -381,26 +386,26 @@ mod tests {
     #[test]
     fn func_with_str_param_uses_const_char_ptr() {
         let (_b, arena) = setup();
-        let func = arena.func(
-            arena.alloc_str("echo"),
-            arena.alloc_slice(&[(
+        let func_def = arena.bump().alloc(FuncDef {
+            name: arena.alloc_str("echo"),
+            params: arena.alloc_slice(&[(
                 arena.alloc_str("s"),
                 Some(arena.builtin(arena.alloc_str("str"))),
             )]),
-            Some(arena.builtin(arena.alloc_str("str"))),
-            arena.var(0),
-        );
-        let sigs = &[sig("echo", vec![CType::Str], Some(CType::Str))];
-        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("echo"), func)], sigs);
+            ret: Some(arena.builtin(arena.alloc_str("str"))),
+            body: arena.var(0),
+        });
+        let sigs = &[sig("echo", vec![CType::Str], CType::Str)];
+        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("echo"), func_def)], sigs);
         assert!(c.contains("const char* echo(const char* s)"));
     }
 
     #[test]
     fn func_with_mixed_params() {
         let (_b, arena) = setup();
-        let func = arena.func(
-            arena.alloc_str("f"),
-            arena.alloc_slice(&[
+        let func_def = arena.bump().alloc(FuncDef {
+            name: arena.alloc_str("f"),
+            params: arena.alloc_slice(&[
                 (
                     arena.alloc_str("a"),
                     Some(arena.builtin(arena.alloc_str("int"))),
@@ -410,11 +415,11 @@ mod tests {
                     Some(arena.builtin(arena.alloc_str("str"))),
                 ),
             ]),
-            Some(arena.builtin(arena.alloc_str("int"))),
-            arena.var(1), // return first param (int)
-        );
-        let sigs = &[sig("f", vec![CType::Int64, CType::Str], Some(CType::Int64))];
-        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("f"), func)], sigs);
+            ret: Some(arena.builtin(arena.alloc_str("int"))),
+            body: arena.var(1), // return first param (int)
+        });
+        let sigs = &[sig("f", vec![CType::Int64, CType::Str], CType::Int64)];
+        let c = emit_c(&[TopLevel::TLDef(arena.alloc_str("f"), func_def)], sigs);
         assert!(c.contains("int64_t f(int64_t a, const char* b)"));
     }
 
@@ -425,11 +430,17 @@ mod tests {
         let (_b, arena) = setup();
         let fn_name = arena.alloc_str("greet");
         // def greet : str := "hi"
-        let def = TopLevel::TLDef(fn_name, arena.lit_str(arena.alloc_str("hi")));
+        let func_def = arena.bump().alloc(FuncDef {
+            name: fn_name,
+            params: &[],
+            ret: Some(arena.builtin(arena.alloc_str("str"))),
+            body: arena.lit_str(arena.alloc_str("hi")),
+        });
+        let def = TopLevel::TLDef(fn_name, func_def);
         // FunSig tells the backend that greet returns a string
         let sig = FunSig {
             param_types: vec![],
-            ret_type: Some(CType::Str),
+            ret_type: CType::Str,
         };
         // #show greet  →  should use %s because greet returns string
         let show = TopLevel::TLShow(arena.builtin(fn_name));
@@ -469,9 +480,21 @@ mod tests {
     #[test]
     fn emit_multiple_defs_and_outputs() {
         let (_b, arena) = setup();
+        let func_def_a = arena.bump().alloc(FuncDef {
+            name: arena.alloc_str("a"),
+            params: &[],
+            ret: None,
+            body: arena.lit_int(1),
+        });
+        let func_def_b = arena.bump().alloc(FuncDef {
+            name: arena.alloc_str("b"),
+            params: &[],
+            ret: None,
+            body: arena.lit_str(arena.alloc_str("two")),
+        });
         let tops = &[
-            TopLevel::TLDef(arena.alloc_str("a"), arena.lit_int(1)),
-            TopLevel::TLDef(arena.alloc_str("b"), arena.lit_str(arena.alloc_str("two"))),
+            TopLevel::TLDef(arena.alloc_str("a"), func_def_a),
+            TopLevel::TLDef(arena.alloc_str("b"), func_def_b),
             TopLevel::TLShow(arena.lit_int(3)),
             TopLevel::TLShow(arena.lit_str(arena.alloc_str("four"))),
         ];

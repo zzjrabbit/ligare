@@ -89,6 +89,17 @@ pub enum Tactic<'bump> {
     Have(Name<'bump>, &'bump Term<'bump>),
 }
 
+/// Named function definition — syntax sugar produced by the parser.
+/// Desugared into `Annot(Lam(body), Pi(params..., ret))` before any
+/// analysis, so this type never appears in core `Term` nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FuncDef<'bump> {
+    pub name: Name<'bump>,
+    pub params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+    pub ret: Option<&'bump Term<'bump>>,
+    pub body: &'bump Term<'bump>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Term<'bump> {
     Var(usize),
@@ -114,12 +125,6 @@ pub enum Term<'bump> {
     AutoProof,
     RefParam,
     This,
-    Func(
-        Name<'bump>,
-        &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
-        Option<&'bump Term<'bump>>,
-        &'bump Term<'bump>,
-    ),
 }
 
 #[cfg(test)]

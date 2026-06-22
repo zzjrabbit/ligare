@@ -3,7 +3,7 @@ mod common;
 use common::{bin, leak_bump, parse, s};
 use ligare::core::eval::eval;
 use ligare::core::pool::TermArena;
-use ligare::core::syntax::{PrimOp, Tactic, Term};
+use ligare::core::syntax::{FuncDef, PrimOp, Tactic, Term};
 
 fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
     let b = leak_bump();
@@ -122,13 +122,14 @@ fn func_desugars_and_evaluates() {
     let params: &[(&str, Option<&Term>)] =
         arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]);
     let body = bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1));
-    let func = arena.func(
-        s(&arena, "f"),
+    let func_def = arena.bump().alloc(FuncDef {
+        name: s(&arena, "f"),
         params,
-        Some(arena.builtin(s(&arena, "int"))),
+        ret: Some(arena.builtin(s(&arena, "int"))),
         body,
-    );
-    let app = arena.app(func, arena.lit_int(5));
+    });
+    let desugared = arena.desugar_func_def(func_def);
+    let app = arena.app(desugared, arena.lit_int(5));
     assert_eq!(*eval(&arena, app).unwrap(), Term::LitInt(6));
 }
 

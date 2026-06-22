@@ -6,7 +6,7 @@
 use crate::checker::context::Context;
 use crate::core::classify::classify;
 use crate::core::pool::TermArena;
-use crate::core::syntax::{Name, Term, Universe};
+use crate::core::syntax::{Term, Universe};
 
 /// Erases proof-irrelevant subterms from a term tree.
 pub struct Eraser<'bump> {
@@ -20,10 +20,6 @@ impl<'bump> Eraser<'bump> {
 
     fn unit(&self) -> &'bump Term<'bump> {
         self.arena.lit_int(0)
-    }
-
-    fn is_unit(t: &Term<'_>) -> bool {
-        matches!(t, Term::LitInt(0))
     }
 
     /// Erase to plain Term (existing behavior, kept for backward compat).
@@ -49,23 +45,6 @@ impl<'bump> Eraser<'bump> {
                 } else {
                     self.unit()
                 }
-            }
-            Term::Func(fname, params, m_ret, body) => {
-                let erased_params: Vec<(Name<'bump>, Option<&'bump Term<'bump>>)> = params
-                    .iter()
-                    .map(|(n, mc)| {
-                        let ec = mc.map(|c| self.erase(c));
-                        (*n, ec.filter(|c| !Self::is_unit(c)))
-                    })
-                    .collect();
-                let erased_ret = m_ret.map(|r| self.erase(r)).filter(|r| !Self::is_unit(r));
-                let erased_body = self.erase(body);
-                self.arena.func(
-                    fname,
-                    self.arena.alloc_slice(&erased_params),
-                    erased_ret,
-                    erased_body,
-                )
             }
             Term::Pi(..) => self.unit(),
             Term::Refine(_, parent, _pred) => parent,
@@ -100,7 +79,7 @@ mod tests {
         (b, TermArena::new(b))
     }
 
-    fn s<'bump>(arena: &TermArena<'bump>, s: &str) -> Name<'bump> {
+    fn s<'bump>(arena: &TermArena<'bump>, s: &str) -> &'bump str {
         arena.alloc_str(s)
     }
 

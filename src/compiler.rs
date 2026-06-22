@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 
 use bumpalo::Bump;
@@ -8,7 +9,7 @@ use crate::checker::context::empty_ctx;
 use crate::checker::erase::Eraser;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
-use crate::core::syntax::Term;
+use crate::core::syntax::{FuncDef, Term};
 use crate::front::parser::{TopLevel, parse_expr_top, parse_program};
 use crate::pretty::PrettyPrinter;
 
@@ -22,8 +23,8 @@ pub struct Compiler<'bump> {
     arena: &'bump TermArena<'bump>,
     evaluator: Evaluator<'bump>,
     checker: TypeChecker<'bump>,
-    /// Environment: maps top-level names to their defining terms.
-    env: Vec<(&'bump str, &'bump Term<'bump>)>,
+    /// Environment: maps top-level names to their defining terms (O(1) lookup).
+    env: HashMap<&'bump str, &'bump Term<'bump>>,
     /// Accumulated top-level items (for code generation).
     pub tops: Vec<TopLevel<'bump>>,
     /// Function signatures extracted before erasure (for C codegen).
@@ -37,7 +38,7 @@ impl<'bump> Compiler<'bump> {
             arena,
             evaluator: Evaluator::new(arena),
             checker: TypeChecker::new(arena),
-            env: vec![],
+            env: HashMap::new(),
             tops: vec![],
             fun_sigs: vec![],
         }
@@ -49,7 +50,7 @@ impl<'bump> Compiler<'bump> {
         let tops = parse_program(&content, self.bump, self.arena)
             .map_err(|e| format!("{}: parse error: {}", file, e))?;
         for top in tops {
-            self.process_top_level(top)?;
+            self.process_top_level(top, file)?;
         }
         Ok(())
     }
@@ -60,19 +61,17 @@ impl<'bump> Compiler<'bump> {
         let tops = parse_program(&content, self.bump, self.arena)
             .map_err(|e| format!("{}: parse error: {}", file, e))?;
         for top in &tops {
-            self.process_top_level(top.clone())?;
+            self.process_top_level(*top, file)?;
         }
-        // Extract function signatures from the original (un-erased) terms
+        // Extract function signatures from the original (un-erased) FuncDef
         // so the C backend can emit correct parameter and return types.
         for top in &tops {
             match top {
-                TopLevel::TLDef(name, Term::Func(_, params, m_ret, _)) => {
-                    self.fun_sigs
-                        .push((name, FunSig::from_func(params, *m_ret)));
-                }
-                TopLevel::TLTheorem(name, _, Term::Func(_, params, m_ret, _)) => {
-                    self.fun_sigs
-                        .push((name, FunSig::from_func(params, *m_ret)));
+                TopLevel::TLDef(name, func_def) => {
+                    self.fun_sigs.push((
+                        name,
+                        FunSig::from_func(func_def.params, func_def.ret, func_def.body),
+                    ));
                 }
                 _ => {}
             }
@@ -81,9 +80,20 @@ impl<'bump> Compiler<'bump> {
         let evald_tops: Vec<TopLevel<'bump>> = tops
             .into_iter()
             .filter_map(|top| match top {
-                TopLevel::TLDef(name, term) => {
+                TopLevel::TLDef(name, func_def) => {
+                    let term = self.arena.desugar_func_def(func_def);
                     let resolved = self.subst_top_level(term);
-                    Some(TopLevel::TLDef(name, eraser.erase(resolved)))
+                    let erased = eraser.erase(resolved);
+                    let erased_func_def = FuncDef {
+                        name,
+                        params: func_def.params,
+                        ret: func_def.ret,
+                        body: erased,
+                    };
+                    Some(TopLevel::TLDef(
+                        name,
+                        self.arena.bump().alloc(erased_func_def),
+                    ))
                 }
                 TopLevel::TLShow(term) | TopLevel::TLExpr(term) => {
                     let resolved = self.subst_top_level(term);
@@ -94,7 +104,14 @@ impl<'bump> Compiler<'bump> {
                 }
                 TopLevel::TLTheorem(name, _, body) => {
                     let resolved_body = self.subst_top_level(body);
-                    Some(TopLevel::TLDef(name, eraser.erase(resolved_body)))
+                    let erased = eraser.erase(resolved_body);
+                    let func_def = FuncDef {
+                        name,
+                        params: &[],
+                        ret: None,
+                        body: erased,
+                    };
+                    Some(TopLevel::TLDef(name, self.arena.bump().alloc(func_def)))
                 }
                 TopLevel::TLCheck(_, _) => None,
             })
@@ -103,7 +120,7 @@ impl<'bump> Compiler<'bump> {
             .filter(|top| {
                 !matches!(
                     top,
-                    TopLevel::TLDef(_, Term::Func(_, params, _, body))
+                    TopLevel::TLDef(_, FuncDef { params, body, .. })
                         if params.is_empty() && matches!(body, Term::Builtin(_))
                 )
             })
@@ -139,30 +156,25 @@ impl<'bump> Compiler<'bump> {
     // ── private helpers ──
 
     /// Process a single top-level item.
-    fn process_top_level(&mut self, top: TopLevel<'bump>) -> Result<(), String> {
+    fn process_top_level(&mut self, top: TopLevel<'bump>, file: &str) -> Result<(), String> {
         match top {
-            TopLevel::TLDef(name, term) => match term {
-                Term::Refine(_, parent, predicate) => {
-                    println!("[refinement] {}", name);
-                    self.checker.add_refinement(name, parent, predicate);
-                }
-                // parse_def always wraps the body in a Func node.
+            TopLevel::TLDef(name, func_def) => {
+                // parse_def always wraps the body in a FuncDef.
                 // For zero-parameter definitions whose body is a
                 // refinement, extract the Refine so it is properly
                 // registered in the constraint table.
-                Term::Func(_, [], _, Term::Refine(_, parent, predicate)) => {
+                if func_def.params.is_empty() && matches!(func_def.body, Term::Refine(_, _, _)) {
+                    let Term::Refine(_, parent, predicate) = func_def.body else {
+                        unreachable!()
+                    };
                     println!("[refinement] {}", name);
                     self.checker.add_refinement(name, parent, predicate);
-                }
-                Term::Func(_, [], _, _) => {
+                } else {
+                    let term = self.arena.desugar_func_def(func_def);
                     println!("[defined] {}", name);
-                    self.env.push((name, term));
+                    self.env.insert(name, term);
                 }
-                _ => {
-                    println!("[defined] {}", name);
-                    self.env.push((name, term));
-                }
-            },
+            }
             TopLevel::TLCheck(term, constraint) => {
                 let resolved = self.subst_top_level(term);
                 let resolved_constraint = self.subst_top_level(constraint);
@@ -170,7 +182,7 @@ impl<'bump> Compiler<'bump> {
                     .checker
                     .check(&empty_ctx(), resolved, resolved_constraint)
                 {
-                    Err(err) => return Err(format!("check failed: {}", err)),
+                    Err(err) => return Err(format!("{}: check failed: {}", file, err)),
                     Ok(_) => println!("[OK]"),
                 }
             }
@@ -181,24 +193,24 @@ impl<'bump> Compiler<'bump> {
                     .checker
                     .check(&empty_ctx(), resolved_body, resolved_prop)
                 {
-                    Err(err) => return Err(format!("theorem check failed: {}", err)),
+                    Err(err) => return Err(format!("{}: theorem check failed: {}", file, err)),
                     Ok(_) => {
                         println!("[theorem] {}", name);
-                        self.env.push((name, body));
+                        self.env.insert(name, body);
                     }
                 }
             }
             TopLevel::TLShow(term) => {
                 let resolved = self.subst_top_level(term);
                 match self.evaluator.eval(resolved) {
-                    Err(err) => eprintln!("show error: {}", err),
+                    Err(err) => eprintln!("{}: show error: {}", file, err),
                     Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
                 }
             }
             TopLevel::TLExpr(term) => {
                 let resolved = self.subst_top_level(term);
                 match self.evaluator.eval(resolved) {
-                    Err(err) => eprintln!("eval error: {}", err),
+                    Err(err) => eprintln!("{}: eval error: {}", file, err),
                     Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
                 }
             }
@@ -206,14 +218,11 @@ impl<'bump> Compiler<'bump> {
         Ok(())
     }
 
-    /// Substitute known top-level definitions into a term.
+    /// Substitute known top-level definitions into a term (O(1) lookup).
     fn subst_top_level(&self, term: &'bump Term<'bump>) -> &'bump Term<'bump> {
         self.arena.map(term, &|t| {
             if let Term::Builtin(name) = t {
-                self.env
-                    .iter()
-                    .find(|(n, _)| *n == *name)
-                    .map(|(_, body)| *body)
+                self.env.get(name).copied()
             } else {
                 None
             }

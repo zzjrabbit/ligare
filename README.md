@@ -201,24 +201,170 @@ int -> bool               -- non-dependent arrow
 
 > ⚠️ This feature is not yet implemented. The syntax below represents the intended design.
 
-A struct is a compound term constrained by `data`, containing named fields and optional invariants.
+A struct definition is a **constraint** — it lives in the `prop` universe and is erased after type checking.  Struct *values* (constructed instances) live in `data` and are retained at runtime.
+
+A struct has named fields and optional invariants.  It is the **product type** (∧) of Ligare: all fields exist simultaneously.
 
 **Planned syntax**
 ```ligare
-def Point : data := struct
+def Point : prop := struct
   x : int
   y : int
 invariant: x >= 0 ∧ y >= 0
 ```
 
 **Construction**
-When constructing `Point`, a `proof` that the invariant holds must be provided.
+When constructing a struct value, a `proof` that the invariant holds must be provided:
+```ligare
+def p : Point := Point.mk 3 4 by
+  exact (∧-intro (3 >= 0) (4 >= 0))
+```
 The compiler will automatically generate:
-- A constructor (with proof obligations)
-- Field projection functions
+- A constructor function with proof obligations
+- Field projection functions (e.g. `Point.x p`)
 - A `theorem` corresponding to the invariant (e.g., for any `p : Point`, `p.x >= 0` is an available theorem)
 
-## 10. Compile-Time Metaprogramming *(planned)*
+## 10. Union Types *(planned)*
+
+> ⚠️ This feature is not yet implemented. The syntax below represents the intended design.
+
+A union definition is a **constraint** — it lives in the `prop` universe and is erased after type checking.  Union *values* (variant instances) live in `data` and are retained at runtime.
+
+A union has named variants, each with optional payload fields.  It is the **sum type** (∨) of Ligare: exactly one variant holds at a time.
+
+### 10.1 Definition
+
+Unions use the `union` keyword, symmetric with `struct`.  Each variant is introduced by `|`:
+
+```ligare
+-- Simple enumeration (no payload)
+def Color : prop := union
+  | Red
+  | Green
+  | Blue
+
+-- Polymorphic union with payload
+def Option (A : prop) : prop := union
+  | None
+  | Some of (val : A)
+
+-- Recursive union — essential for compiler ASTs
+def Expr : prop := union
+  | Lit  of (n : int)
+  | Add  of (l : Expr) (r : Expr)
+  | If   of (c : Expr) (t : Expr) (e : Expr)
+
+-- Multi-field payload with named parameters
+def Result (T : prop) (E : prop) : prop := union
+  | Ok  of (value : T)
+  | Err of (error : E)
+```
+
+### 10.2 Construction
+
+Variant names are constructor functions.  They are automatically generated from the union definition:
+
+```ligare
+def c  : Color       := Red
+def x  : Option int  := Some 5
+def y  : Option int  := None              -- type annotation needed for inference
+def e  : Expr        := Add (Lit 1) (Lit 2)
+def ok : Result int str := Ok 42
+```
+
+For no-payload variants like `None`, the type parameter cannot be inferred from arguments alone — a type annotation (`: Option int`) provides the necessary constraint for the compiler to resolve `A = int`.
+
+Variants with refinement-constrained payloads require proof obligations at construction time:
+
+```ligare
+def PosOption : prop := union
+  | Nothing
+  | Just of (val : int where (x => x > 0))
+
+def j : PosOption := Just 5       -- auto proof: 5 > 0
+def k : PosOption := Just (-3)    -- compile error: -3 > 0 is false
+```
+
+### 10.3 Pattern Matching (Elimination)
+
+Union values are eliminated via `match` expressions.  Each branch covers one variant and binds its payload:
+
+```ligare
+def unwrap_or (opt : Option int) (default : int) : int :=
+  match opt with
+  | None     => default
+  | Some val => val
+```
+
+**Theorem introduction** — every `match` branch automatically introduces a theorem that the scrutinee is of that variant, exactly like `if` branches introduce the condition theorem:
+
+```ligare
+match opt with
+| None =>
+  -- theorem: opt = None  (available in this branch)
+| Some val =>
+  -- theorem: opt = Some val  (available in this branch)
+  -- if val has a refinement constraint (e.g. val > 0),
+  -- that theorem is also available here
+```
+
+This enables safe refinement propagation through match branches:
+
+```ligare
+def safe_div (opt : PosOption) (x : int) : int :=
+  match opt with
+  | Nothing  => 0
+  | Just val =>
+    -- theorem: val > 0 (from PosOption's refinement)
+    -- this satisfies div's proof obligation that the divisor is non-zero
+    div x val
+```
+
+**Exhaustiveness checking** — the compiler verifies that every variant of the union is covered.  Missing a variant is a compile-time error.
+
+Nested matches are naturally supported:
+
+```ligare
+def eval (e : Expr) : int :=
+  match e with
+  | Lit n      => n
+  | Add l r    => eval l + eval r
+  | If c t e   => if eval c /= 0 then eval t else eval e
+```
+
+### 10.4 Erasure and Compilation
+
+Union **definitions** are `prop` — erased at compile time.  Union **values** and `match` expressions are `data` — retained at runtime.
+
+The C backend compiles unions to tagged union structs and `match` to `switch` statements, achieving zero-overhead representation:
+
+```c
+// Option_int (A = int)
+typedef struct {
+    int tag;          // 0 = None, 1 = Some
+    union {
+        struct { int64_t val; } Some;
+    } data;
+} Option_int;
+
+// match opt with | None => 0 | Some val => val + 1
+switch (opt.tag) {
+case 0: return 0;
+case 1: { int64_t val = opt.data.Some.val; return val + 1; }
+}
+```
+
+### 10.5 Structs vs. Unions — Duality
+
+| | Struct (product) | Union (sum) |
+|---|---|---|
+| Logical dual | `∧` (all hold) | `∨` (one holds) |
+| Construction | Provide all fields | Choose one variant |
+| Elimination | Field projection (`.x`) | Pattern matching (`match`) |
+| C representation | Contiguous fields | Tag + union |
+| Universe | definition: `prop`, value: `data` | definition: `prop`, value: `data` |
+
+## 11. Compile-Time Metaprogramming *(planned)*
 
 > ⚠️ This feature is not yet implemented. The syntax below represents the intended design.
 
@@ -239,7 +385,7 @@ During splicing, the generated code is forcibly verified to satisfy the target c
 
 Since `proof` is ultimately erased, the metaprogramming parts never enter the runtime.
 
-## 11. Top-Level Commands
+## 12. Top-Level Commands
 
 Ligare programs consist of a sequence of top-level commands:
 
@@ -261,7 +407,7 @@ theorem x_is_nat : nat := x by
 #show x
 ```
 
-## 12. Compilation and Erasure
+## 13. Compilation and Erasure
 
 The compilation process is divided into two major phases:
 
@@ -272,13 +418,13 @@ The compilation process is divided into two major phases:
    Retain all terms constrained by `data`, and remove all terms constrained by `prop`, `theorem`, or `proof`.  
    The final product is pure, zero-overhead executable code.
 
-## 13. Summary
+## 14. Summary
 
 Ligare uses the single core concept of **"terms constrained by terms"** to unify:
-- The type system
+- The type system (constraints as terms in `prop`)
 - Propositions and proofs
-- Design by contract
-- Refinement types
+- Design by contract (refinement types)
+- Product types (structs) and sum types (unions) — both as constraints in `prop`
 - Compile-time metaprogramming *(planned)*
 
 It pursues **the extreme of static safety with zero runtime burden**, while maintaining a minimal set of concepts.  

@@ -64,10 +64,6 @@ impl<'bump> WhnfEvaluator<'bump> {
                 let p_val = self.whnf(p)?;
                 Ok(self.arena.refine(name, parent_val, p_val))
             }
-            Term::Func { .. } => {
-                let d = crate::core::desugar::Desugarer::new(self.arena).desugar(t);
-                self.whnf(d)
-            }
             // Leaf values — already in WHNF
             Term::Pi(_, _, _)
             | Term::Var(_)

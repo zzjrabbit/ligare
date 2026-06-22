@@ -40,7 +40,8 @@ impl From<std::io::Error> for CompileError {
 /// Respects the `CC` environment variable.
 pub fn compile_c(c_source: &str, output_path: &Path) -> Result<PathBuf, CompileError> {
     let output_abs = resolve_output(output_path)?;
-    let tmp_file = temp_file(&output_abs, "c");
+    let tmp_file = temp_file("c")?;
+    let _guard = TempGuard(tmp_file.clone());
 
     write_temp(&tmp_file, c_source)?;
 
@@ -57,8 +58,6 @@ pub fn compile_c(c_source: &str, output_path: &Path) -> Result<PathBuf, CompileE
                 CompileError::Io(e)
             }
         })?;
-
-    let _ = std::fs::remove_file(&tmp_file);
 
     if !status.status.success() {
         return Err(CompileError::CompileFailed {
@@ -86,13 +85,30 @@ fn resolve_output(output_path: &Path) -> Result<PathBuf, std::io::Error> {
     Ok(abs)
 }
 
-fn temp_file(output: &Path, ext: &str) -> PathBuf {
-    let stem = output
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("ligare_out");
-    let dir = output.parent().unwrap_or_else(|| Path::new("."));
-    dir.join(format!(".{stem}.tmp.{ext}"))
+/// Create a unique temporary file in the system temp directory.
+fn temp_file(ext: &str) -> Result<PathBuf, CompileError> {
+    let mut dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let mut counter: u32 = 0;
+    loop {
+        let name = format!("ligare_{pid}_{counter}.{ext}");
+        let path = dir.join(&name);
+        if !path.exists() {
+            return Ok(path);
+        }
+        counter = counter.wrapping_add(1);
+        if counter == 0 {
+            dir = std::env::current_dir().map_err(CompileError::Io)?;
+        }
+    }
+}
+
+/// RAII guard that deletes the temp file on drop (best-effort).
+struct TempGuard(PathBuf);
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn write_temp(path: &Path, source: &str) -> Result<(), CompileError> {
