@@ -1,0 +1,15 @@
+-- Peano natural numbers via union (interpreter only — C codegen for recursive types needs heap support)
+def Nat : prop := union
+  | Zero
+  | Succ of (pred : Nat)
+
+def zero  : Nat := Zero
+def one   : Nat := Succ Zero
+def two   : Nat := Succ (Succ Zero)
+
+#check Zero : Nat
+#check Succ (Succ Zero) : Nat
+
+#show match two with
+  | Zero    => 0
+  | Succ _  => 1

@@ -24,7 +24,7 @@ impl Classifier {
             Term::ByProof(None, _) => Some(Universe::UProof),
             Term::Let(_, _, body, _) => Self::classify(ctx, body),
             Term::IfThenElse(_, t, _) => Self::classify(ctx, t),
-            Term::Builtin(name) => classify_builtin(name),
+            Term::Builtin(name) => classify_builtin(name).or(Some(Universe::UData)),
             Term::UnionDef(..) => Some(Universe::UProp),
             Term::Variant(..) => Some(Universe::UData),
             Term::Match(_, branches) => {

@@ -4,18 +4,23 @@
 //! `FunSig` records the erased C types of function parameters and return
 //! values, populated during erasure and consumed by the C backend.
 
+use std::collections::HashSet;
+
 /// Concrete C type — only the data-relevant ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CType {
     Int64,
     Str,
+    /// Named union type (for tagged unions)
+    Union(String),
 }
 
 impl CType {
-    pub fn c_name(self) -> &'static str {
+    pub fn c_name(&self) -> String {
         match self {
-            CType::Int64 => "int64_t",
-            CType::Str => "const char*",
+            CType::Int64 => "int64_t".into(),
+            CType::Str => "const char*".into(),
+            CType::Union(name) => name.clone(),
         }
     }
 }
@@ -32,11 +37,6 @@ pub struct FunSig {
 }
 
 impl FunSig {
-    /// Extract a function's C signature from its FuncDef representation,
-    /// before erasure strips the constraint information.
-    ///
-    /// When the return type annotation is missing, the return C type is
-    /// inferred structurally from the body (matching what `emit_fun` does).
     pub fn from_func(
         params: &[(
             crate::core::syntax::Name<'_>,
@@ -44,13 +44,14 @@ impl FunSig {
         )],
         m_ret: Option<&crate::core::syntax::Term<'_>>,
         body: &crate::core::syntax::Term<'_>,
+        union_names: &HashSet<String>,
     ) -> Self {
         let param_types: Vec<CType> = params
             .iter()
-            .map(|(_, mc)| mc.map_or(CType::Int64, constraint_to_ctype))
+            .map(|(_, mc)| mc.map_or(CType::Int64, |c| constraint_to_ctype(c, union_names)))
             .collect();
         let ret_type = match m_ret {
-            Some(t) => constraint_to_ctype(t),
+            Some(t) => constraint_to_ctype(t, union_names),
             None => infer_ret_ctype(body, &param_types),
         };
         FunSig {
@@ -65,7 +66,7 @@ impl FunSig {
 /// inference that `emit_fun` does during code generation.
 fn infer_ret_ctype(body: &crate::core::syntax::Term<'_>, param_types: &[CType]) -> CType {
     match body {
-        crate::core::syntax::Term::Var(i) => param_types.get(*i).copied().unwrap_or(CType::Int64),
+        crate::core::syntax::Term::Var(i) => param_types.get(*i).cloned().unwrap_or(CType::Int64),
         crate::core::syntax::Term::LitStr(_) => CType::Str,
         crate::core::syntax::Term::Lam(inner) => {
             // Lambda wrapping: the inner body determines the return type.
@@ -78,12 +79,21 @@ fn infer_ret_ctype(body: &crate::core::syntax::Term<'_>, param_types: &[CType]) 
     }
 }
 
-/// Map a constraint Term to its C type.  Only recognizes builtin type
-/// names; everything else defaults to Int64 (the constraint checker
-/// already validated correctness, so this is just a hint for codegen).
-pub fn constraint_to_ctype(t: &crate::core::syntax::Term<'_>) -> CType {
+/// Map a constraint Term to its C type.  Recognizes builtin type names
+/// and user-defined union types; everything else defaults to Int64.
+pub fn constraint_to_ctype(
+    t: &crate::core::syntax::Term<'_>,
+    union_names: &HashSet<String>,
+) -> CType {
     match t {
         crate::core::syntax::Term::Builtin(name) if *name == "str" => CType::Str,
+        crate::core::syntax::Term::Builtin(name) if union_names.contains(&name.to_string()) => {
+            CType::Union(name.to_string())
+        }
+        // This in a type position means self-reference (e.g. recursive union field).
+        // Without the enclosing union name we can't resolve it here;
+        // callers should handle This explicitly.
+        crate::core::syntax::Term::This => CType::Int64,
         _ => CType::Int64,
     }
 }

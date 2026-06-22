@@ -282,7 +282,13 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             env.extend_from_slice(outer_env);
             self.parse_expr(&env)?
         };
-        let body = subst_this(self.arena, name, body_expr);
+        // subst_this replaces self-references for recursive functions.
+        // Union definitions don't have a self-reference body — skip them.
+        let body = if matches!(body_expr, Term::UnionDef(..)) {
+            body_expr
+        } else {
+            subst_this(self.arena, name, body_expr)
+        };
         let params_slice = self.arena.alloc_slice(&params);
         let func_def = FuncDef {
             name,

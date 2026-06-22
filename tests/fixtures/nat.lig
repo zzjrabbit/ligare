@@ -1,0 +1,14 @@
+def Color : prop := union
+  | Red
+  | Green
+  | Blue
+
+def to_int (c : Color) : int :=
+  match c with
+  | Red   => 1
+  | Green => 2
+  | Blue  => 3
+
+#show to_int Red
+#show to_int Green
+#show to_int Blue

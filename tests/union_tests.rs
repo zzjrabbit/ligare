@@ -2,6 +2,7 @@
 //! These tests exercise the full parse → check → eval pipeline.
 
 use bumpalo::Bump;
+use ligare::backend::c::emit_c;
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
 
@@ -111,4 +112,39 @@ fn wrong_union_member_fails() {
             )
             .is_err()
     );
+}
+
+// ── C codegen ──
+
+#[test]
+fn codegen_recursive_union_typedef() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str(
+            "def Nat : prop := union\n  | Zero\n  | Succ of (pred : Nat)\ndef zero : Nat := Zero\n",
+        )
+        .unwrap();
+    let c = emit_c(compiler.tops(), compiler.fun_sigs(), &compiler.union_types);
+    // Recursive field uses struct pointer in typedef
+    assert!(
+        c.contains("struct Nat* pred;"),
+        "typedef missing struct Nat*:\n{c}"
+    );
+    // Empty variant uses designated initializer
+    assert!(c.contains(".Zero = {0}"), "empty variant init wrong:\n{c}");
+}
+
+#[test]
+fn codegen_recursive_variant_address_of() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str(
+            "def Nat : prop := union\n  | Zero\n  | Succ of (pred : Nat)\ndef one : Nat := Succ Zero\n",
+        )
+        .unwrap();
+    let c = emit_c(compiler.tops(), compiler.fun_sigs(), &compiler.union_types);
+    // Recursive variant field must take address
+    assert!(c.contains("&((Nat)"), "recursive field missing &:\n{c}");
 }

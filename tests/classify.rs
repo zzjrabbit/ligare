@@ -124,5 +124,10 @@ fn let_is_body_universe() {
 
 #[test]
 fn unknown_builtin_is_nothing() {
-    assert_eq!(classify(&empty_ctx(), &Term::Builtin("unknown")), None);
+    // Unknown builtins fall back to UData (classify delegates to builtin table
+    // and uses UData as the default for unrecognized names).
+    assert_eq!(
+        classify(&empty_ctx(), &Term::Builtin("unknown")),
+        Some(Universe::UData)
+    );
 }

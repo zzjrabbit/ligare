@@ -29,6 +29,10 @@ pub struct Compiler<'bump> {
     pub tops: Vec<TopLevel<'bump>>,
     /// Function signatures extracted before erasure (for C codegen).
     fun_sigs: Vec<(&'bump str, FunSig)>,
+    /// Union type definitions collected before erasure (for C codegen).
+    pub union_types: Vec<(&'bump str, &'bump Term<'bump>)>,
+    /// Suppress diagnostic output (set during codegen).
+    quiet: bool,
 }
 
 impl<'bump> Compiler<'bump> {
@@ -41,6 +45,8 @@ impl<'bump> Compiler<'bump> {
             env: HashMap::new(),
             tops: vec![],
             fun_sigs: vec![],
+            union_types: vec![],
+            quiet: false,
         }
     }
 
@@ -66,7 +72,18 @@ impl<'bump> Compiler<'bump> {
 
     /// Process a source file, collect top-level items, and type-check.
     pub fn collect_file(&mut self, file: &str) -> Result<(), String> {
+        self.quiet = true;
         let content = fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
+        self.collect_str(&content, file)
+    }
+
+    /// Process source code from a string (for testing).
+    pub fn collect_file_str(&mut self, source: &str) -> Result<(), String> {
+        self.quiet = true;
+        self.collect_str(source, "<str>")
+    }
+
+    fn collect_str(&mut self, content: &str, file: &str) -> Result<(), String> {
         let tops = parse_program(&content, self.bump, self.arena)
             .map_err(|e| format!("{}: parse error: {}", file, e))?;
         for top in &tops {
@@ -74,13 +91,35 @@ impl<'bump> Compiler<'bump> {
         }
         // Extract function signatures from the original (un-erased) FuncDef
         // so the C backend can emit correct parameter and return types.
+        // First pass: collect union names
+        let union_names: std::collections::HashSet<String> = tops
+            .iter()
+            .filter_map(|top| match top {
+                TopLevel::TLDef(name, fd)
+                    if fd.params.is_empty() && matches!(fd.body, Term::UnionDef(..)) =>
+                {
+                    Some(name.to_string())
+                }
+                _ => None,
+            })
+            .collect();
         for top in &tops {
             match top {
                 TopLevel::TLDef(name, func_def) => {
-                    self.fun_sigs.push((
-                        name,
-                        FunSig::from_func(func_def.params, func_def.ret, func_def.body),
-                    ));
+                    // Collect union types for C codegen
+                    if func_def.params.is_empty() && matches!(func_def.body, Term::UnionDef(..)) {
+                        self.union_types.push((name, func_def.body));
+                    } else {
+                        self.fun_sigs.push((
+                            name,
+                            FunSig::from_func(
+                                func_def.params,
+                                func_def.ret,
+                                func_def.body,
+                                &union_names,
+                            ),
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -89,6 +128,12 @@ impl<'bump> Compiler<'bump> {
         let evald_tops: Vec<TopLevel<'bump>> = tops
             .into_iter()
             .filter_map(|top| match top {
+                TopLevel::TLDef(_name, func_def)
+                    if func_def.params.is_empty()
+                        && matches!(func_def.body, Term::UnionDef(..)) =>
+                {
+                    None // Skip union type definitions (emitted as typedefs)
+                }
                 TopLevel::TLDef(name, func_def) => {
                     let term = self.arena.desugar_func_def(func_def);
                     let resolved = self.subst_top_level(term);
@@ -106,10 +151,7 @@ impl<'bump> Compiler<'bump> {
                 }
                 TopLevel::TLShow(term) | TopLevel::TLExpr(term) => {
                     let resolved = self.subst_top_level(term);
-                    match self.evaluator.eval(resolved) {
-                        Ok(val) => Some(TopLevel::TLShow(eraser.erase(val))),
-                        Err(_) => Some(TopLevel::TLShow(eraser.erase(resolved))),
-                    }
+                    Some(TopLevel::TLShow(eraser.erase(resolved)))
                 }
                 TopLevel::TLTheorem(name, _, body) => {
                     let resolved_body = self.subst_top_level(body);
@@ -174,7 +216,9 @@ impl<'bump> Compiler<'bump> {
                 // refinement, extract the Refine so it is properly
                 // registered in the constraint table.
                 if func_def.params.is_empty() && matches!(func_def.body, Term::UnionDef(..)) {
-                    println!("[union] {}", name);
+                    if !self.quiet {
+                        println!("[union] {}", name);
+                    }
                     self.checker.add_union(name, func_def.body);
                 } else if func_def.params.is_empty()
                     && matches!(func_def.body, Term::Refine(_, _, _))
@@ -182,11 +226,15 @@ impl<'bump> Compiler<'bump> {
                     let Term::Refine(_, parent, predicate) = func_def.body else {
                         unreachable!()
                     };
-                    println!("[refinement] {}", name);
+                    if !self.quiet {
+                        println!("[refinement] {}", name);
+                    }
                     self.checker.add_refinement(name, parent, predicate);
                 } else {
                     let term = self.arena.desugar_func_def(func_def);
-                    println!("[defined] {}", name);
+                    if !self.quiet {
+                        println!("[defined] {}", name);
+                    }
                     self.env.insert(name, term);
                 }
             }
@@ -198,7 +246,11 @@ impl<'bump> Compiler<'bump> {
                     .check(&empty_ctx(), resolved, resolved_constraint)
                 {
                     Err(err) => return Err(format!("{}: check failed: {}", file, err)),
-                    Ok(_) => println!("[OK]"),
+                    Ok(_) => {
+                        if !self.quiet {
+                            println!("[OK]");
+                        }
+                    }
                 }
             }
             TopLevel::TLTheorem(name, prop, body) => {
@@ -210,20 +262,28 @@ impl<'bump> Compiler<'bump> {
                 {
                     Err(err) => return Err(format!("{}: theorem check failed: {}", file, err)),
                     Ok(_) => {
-                        println!("[theorem] {}", name);
+                        if !self.quiet {
+                            println!("[theorem] {}", name);
+                        }
                         self.env.insert(name, body);
                     }
                 }
             }
-            TopLevel::TLShow(term) => {
-                let resolved = self.subst_top_level(term);
+            TopLevel::TLShow(_term) => {
+                if self.quiet {
+                    return Ok(()); // codegen handles #show separately
+                }
+                let resolved = self.subst_top_level(_term);
                 match self.evaluator.eval(resolved) {
                     Err(err) => eprintln!("{}: show error: {}", file, err),
                     Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
                 }
             }
-            TopLevel::TLExpr(term) => {
-                let resolved = self.subst_top_level(term);
+            TopLevel::TLExpr(_term) => {
+                if self.quiet {
+                    return Ok(()); // codegen handles #expr separately
+                }
+                let resolved = self.subst_top_level(_term);
                 match self.evaluator.eval(resolved) {
                     Err(err) => eprintln!("{}: eval error: {}", file, err),
                     Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
@@ -235,12 +295,20 @@ impl<'bump> Compiler<'bump> {
 
     /// Substitute known top-level definitions into a term (O(1) lookup).
     /// Also resolves variant constructors to Variant terms.
+    /// Only substitutes zero-param definitions (constants), not functions.
     fn subst_top_level(&self, term: &'bump Term<'bump>) -> &'bump Term<'bump> {
-        // First pass: resolve env lookups only (not variants)
+        // First pass: resolve env lookups only (no variants, no functions)
         let t = self.arena.map(term, &|t| {
             if let Term::Builtin(name) = t {
                 if let Some(def) = self.env.get(name) {
-                    return Some(def);
+                    // Only substitute zero-param definitions (constants).
+                    // Desugared form: Annot(body, type) where body is NOT a Lam.
+                    // Functions have Annot(Lam(...), Pi(...)) — not substituted.
+                    if let Term::Annot(body, _) = def
+                        && !matches!(body, Term::Lam(_))
+                    {
+                        return Some(def);
+                    }
                 }
             }
             None
@@ -262,21 +330,23 @@ impl<'bump> Compiler<'bump> {
 
     /// Convert `App*(Builtin(name), args...)` to `Variant(union, idx, args)`.
     fn resolve_variant_apps(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
-        // Try top-level first (handles the common case)
+        // Try top-level first
         if let Some((uname, idx, field_specs, args)) = self.collect_variant_args(t) {
             if args.len() == field_specs.len() {
-                return self
+                let v = self
                     .arena
                     .variant(uname, idx, self.arena.alloc_slice(&args));
+                // Recurse into payload to resolve nested constructors
+                return self.resolve_variant_apps(v);
             }
         }
         self.arena.map(t, &|node| {
             if let Some((uname, idx, field_specs, args)) = self.collect_variant_args(node) {
                 if args.len() == field_specs.len() {
-                    return Some(
-                        self.arena
-                            .variant(uname, idx, self.arena.alloc_slice(&args)),
-                    );
+                    let v = self
+                        .arena
+                        .variant(uname, idx, self.arena.alloc_slice(&args));
+                    return Some(self.resolve_variant_apps(v));
                 }
             }
             None
