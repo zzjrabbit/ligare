@@ -32,7 +32,7 @@ impl<'bump> Eraser<'bump> {
             Term::Let(name, val, body, _mconstr) => {
                 let ev = self.erase(val);
                 let eb = self.erase(body);
-                self.arena.let_(*name, ev, eb, None)
+                self.arena.let_(name, ev, eb, None)
             }
             Term::IfThenElse(cond, tbranch, fbranch) => {
                 let ec = self.erase(cond);
@@ -61,7 +61,7 @@ impl<'bump> Eraser<'bump> {
                 let erased_ret = m_ret.map(|r| self.erase(r)).filter(|r| !Self::is_unit(r));
                 let erased_body = self.erase(body);
                 self.arena.func(
-                    *fname,
+                    fname,
                     self.arena.alloc_slice(&erased_params),
                     erased_ret,
                     erased_body,

@@ -66,17 +66,13 @@ impl<'bump> Compiler<'bump> {
         // so the C backend can emit correct parameter and return types.
         for top in &tops {
             match top {
-                TopLevel::TLDef(name, term) => {
-                    if let Term::Func(_, params, m_ret, _) = term {
-                        self.fun_sigs
-                            .push((name, FunSig::from_func(params, *m_ret)));
-                    }
+                TopLevel::TLDef(name, Term::Func(_, params, m_ret, _)) => {
+                    self.fun_sigs
+                        .push((name, FunSig::from_func(params, *m_ret)));
                 }
-                TopLevel::TLTheorem(name, _, body) => {
-                    if let Term::Func(_, params, m_ret, _) = body {
-                        self.fun_sigs
-                            .push((name, FunSig::from_func(params, *m_ret)));
-                    }
+                TopLevel::TLTheorem(name, _, Term::Func(_, params, m_ret, _)) => {
+                    self.fun_sigs
+                        .push((name, FunSig::from_func(params, *m_ret)));
                 }
                 _ => {}
             }
@@ -104,13 +100,12 @@ impl<'bump> Compiler<'bump> {
             })
             // Drop zero-param definitions whose body is a bare builtin
             // (type aliases like `def nat := int where ...`).
-            .filter(|top| match top {
-                TopLevel::TLDef(_, Term::Func(_, params, _, body))
-                    if params.is_empty() && matches!(body, Term::Builtin(_)) =>
-                {
-                    false
-                }
-                _ => true,
+            .filter(|top| {
+                !matches!(
+                    top,
+                    TopLevel::TLDef(_, Term::Func(_, params, _, body))
+                        if params.is_empty() && matches!(body, Term::Builtin(_))
+                )
             })
             .collect();
         self.tops.extend(evald_tops);

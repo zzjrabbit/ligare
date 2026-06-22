@@ -58,10 +58,7 @@ impl FunSig {
 /// already validated correctness, so this is just a hint for codegen).
 pub fn constraint_to_ctype(t: &crate::core::syntax::Term<'_>) -> CType {
     match t {
-        crate::core::syntax::Term::Builtin(name) => match *name {
-            "str" => CType::Str,
-            _ => CType::Int64,
-        },
+        crate::core::syntax::Term::Builtin(name) if *name == "str" => CType::Str,
         _ => CType::Int64,
     }
 }

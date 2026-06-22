@@ -45,6 +45,6 @@ def some_sth : str := "hello"
 def some_fn (s : str) := s
 
 -- String literal tests
-#check s some_sth : str
+#check some_fn some_sth : str
 #check "hello" : data
 #show some_fn some_sth

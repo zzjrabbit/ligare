@@ -147,27 +147,27 @@ impl<'bump> TypeChecker<'bump> {
         t: &'bump Term<'bump>,
     ) -> Result<(&'bump Term<'bump>, &'bump Term<'bump>), String> {
         // Direct annotation: `(body : Pi ...)`
-        if let Term::Annot(_, ty) = t {
-            if let Some(pi) = Self::as_pi(ty) {
+        if let Term::Annot(_, ty) = t
+            && let Some(pi) = Self::as_pi(ty)
+        {
+            return Ok(pi);
+        }
+        // Variable lookup
+        if let Term::Var(i) = t
+            && let Some(ty) = ctx.lookup(*i)
+        {
+            let ty_nf = self.evaluator.whnf(ty)?;
+            if let Some(pi) = Self::as_pi(ty_nf) {
                 return Ok(pi);
             }
         }
-        // Variable lookup
-        if let Term::Var(i) = t {
-            if let Some(ty) = ctx.lookup(*i) {
-                let ty_nf = self.evaluator.whnf(ty)?;
-                if let Some(pi) = Self::as_pi(ty_nf) {
-                    return Ok(pi);
-                }
-            }
-        }
         // Named reference in context
-        if let Term::Builtin(name) = t {
-            if let Some(entry) = ctx.lookup_name(name) {
-                let ty_nf = self.evaluator.whnf(entry.constraint)?;
-                if let Some(pi) = Self::as_pi(ty_nf) {
-                    return Ok(pi);
-                }
+        if let Term::Builtin(name) = t
+            && let Some(entry) = ctx.lookup_name(name)
+        {
+            let ty_nf = self.evaluator.whnf(entry.constraint)?;
+            if let Some(pi) = Self::as_pi(ty_nf) {
+                return Ok(pi);
             }
         }
         Err(format!(

@@ -475,16 +475,16 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 // `:` type-annotation suffix — suppressed in `#check`
                 // context so that `:` is reserved for the constraint
                 // separator (e.g. `#check s some_sth : str`).
-                if !self.no_annot {
-                    if let Some(c) = self.try_parse(Token::Colon, |s| s.parse_expr(env)) {
-                        return self.parse_suffixes(env, self.arena.annot(t, c));
-                    }
+                if !self.no_annot
+                    && let Some(c) = self.try_parse(Token::Colon, |s| s.parse_expr(env))
+                {
+                    return self.parse_suffixes(env, self.arena.annot(t, c));
                 }
                 // `by` suffix: term by tactic1; tactic2; ...
-                if !self.no_by {
-                    if let Some(tactics) = self.parse_by_proof_clause(env) {
-                        return self.parse_suffixes(env, self.arena.by_proof(Some(t), tactics));
-                    }
+                if !self.no_by
+                    && let Some(tactics) = self.parse_by_proof_clause(env)
+                {
+                    return self.parse_suffixes(env, self.arena.by_proof(Some(t), tactics));
                 }
                 Ok(t)
             }

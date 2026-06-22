@@ -78,7 +78,7 @@ impl<'bump> TypeChecker<'bump> {
                         .map(|(p, pr)| self.arena.refine(name, p, pr)),
                     _ => None,
                 };
-                let effective = expanded.as_deref().unwrap_or(c_nf);
+                let effective = expanded.unwrap_or(c_nf);
                 match effective {
                     Term::Refine(_, parent, pred) => {
                         // Refinement: subject must satisfy parent, tactics prove predicate.
