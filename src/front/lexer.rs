@@ -44,6 +44,20 @@ pub enum Token {
     #[token("theorem")]
     KwTheorem,
 
+    // Union / Struct keywords
+    #[token("struct")]
+    KwStruct,
+    #[token("union")]
+    KwUnion,
+    #[token("match")]
+    KwMatch,
+    #[token("with")]
+    KwWith,
+    #[token("of")]
+    KwOf,
+    #[token("|")]
+    Bar,
+
     // Directives
     #[token("#check")]
     HashCheck,

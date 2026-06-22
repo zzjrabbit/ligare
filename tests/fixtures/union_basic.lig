@@ -1,0 +1,29 @@
+-- Union type tests
+def Color : prop := union
+  | Red
+  | Green
+  | Blue
+
+def Option : prop := union
+  | None
+  | Some of (val : int)
+
+-- Direct variant check
+#check Red : Color
+#check Some 5 : Option
+#check None : Option
+
+-- Match on concrete variant
+#show match Red with
+  | Red   => 42
+  | Green => 0
+  | Blue  => 0
+
+-- Match on Option
+#show match Some 5 with
+  | None   => -1
+  | Some x => x
+
+#show match None with
+  | None   => 0
+  | Some x => 1

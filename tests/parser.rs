@@ -199,6 +199,51 @@ fn program_with_def_and_check() {
     assert!(matches!(tops[1], TopLevel::TLCheck(..)));
 }
 
+// ── Union & Match tests ──
+
+#[test]
+fn parse_union_def() {
+    let (b, arena) = a();
+    let result = parse_program(
+        "def Color : prop := union\n  | Red\n  | Green\n  | Blue",
+        b,
+        &arena,
+    );
+    assert!(result.is_ok());
+    let tops = result.unwrap();
+    assert_eq!(tops.len(), 1);
+    assert!(matches!(tops[0], TopLevel::TLDef(_, _)));
+}
+
+#[test]
+fn parse_union_with_payload() {
+    let (b, arena) = a();
+    let result = parse_program(
+        "def Option : prop := union\n  | None\n  | Some of (val : int)",
+        b,
+        &arena,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn parse_match_expression() {
+    let (b, arena) = a();
+    let result = parse_expr_top("match x with\n  | Red => 42\n  | Green => 0", b, &arena);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn parse_match_with_bindings() {
+    let (b, arena) = a();
+    let result = parse_expr_top(
+        "match opt with\n  | None => 0\n  | Some val => val",
+        b,
+        &arena,
+    );
+    assert!(result.is_ok());
+}
+
 #[test]
 fn program_with_expr() {
     let (b, arena) = a();

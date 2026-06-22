@@ -25,6 +25,15 @@ impl Classifier {
             Term::Let(_, _, body, _) => Self::classify(ctx, body),
             Term::IfThenElse(_, t, _) => Self::classify(ctx, t),
             Term::Builtin(name) => classify_builtin(name),
+            Term::UnionDef(..) => Some(Universe::UProp),
+            Term::Variant(..) => Some(Universe::UData),
+            Term::Match(_, branches) => {
+                // Match type = type of first branch (all branches must agree)
+                branches
+                    .first()
+                    .map(|(_, _, body)| Self::classify(ctx, body))
+                    .flatten()
+            }
         }
     }
 }

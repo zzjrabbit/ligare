@@ -6,7 +6,7 @@ use crate::checker::context::{
     Context, add_refine, add_theorem, expand_constraint, extend_ctx, extend_ctx_term, lookup_refine,
 };
 use crate::config::{BUILTIN_BOOL, BUILTIN_DATA};
-use crate::core::syntax::{Term, Universe};
+use crate::core::syntax::{Name, Term, Universe};
 use crate::pretty::PrettyPrinter;
 
 impl<'bump> TypeChecker<'bump> {
@@ -27,6 +27,23 @@ impl<'bump> TypeChecker<'bump> {
         a: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
     ) -> Result<(), String> {
+        // Check if f is a variant constructor
+        let f_dsg = self.desugarer.desugar(f);
+        if let Term::Builtin(name) = f_dsg {
+            if let Some((uname, idx, field_specs)) = self.lookup_variant(name) {
+                if field_specs.len() != 1 {
+                    return Err(format!(
+                        "Variant {} expects {} field(s), got 1",
+                        name,
+                        field_specs.len()
+                    ));
+                }
+                let field_constraint = field_specs[0].1;
+                self.check(ctx, a, field_constraint)?;
+                let variant_term = self.arena.variant(uname, idx, self.arena.alloc_slice(&[a]));
+                return self.check_by_constraint(ctx, variant_term, constraint);
+            }
+        }
         match self.infer_fun_type(ctx, f)? {
             Some(ty) => {
                 let ty_norm = self.evaluator.whnf(ty)?;
@@ -133,6 +150,30 @@ impl<'bump> TypeChecker<'bump> {
         self.check(&ctx_f, fbranch, constraint)
     }
 
+    /// Check a match expression: verify scrutinee is a union type, check each branch.
+    pub(crate) fn check_match(
+        &self,
+        ctx: &Context<'bump>,
+        _scrutinee: &'bump Term<'bump>,
+        branches: &'bump [(
+            usize,
+            &'bump [(Name<'bump>, &'bump Term<'bump>)],
+            &'bump Term<'bump>,
+        )],
+        constraint: &'bump Term<'bump>,
+    ) -> Result<(), String> {
+        // For each branch, bind payload variables and check the body
+        for (_idx, binds, body) in branches.iter() {
+            let mut branch_ctx = ctx.clone();
+            // Bind payload variables in reverse order (innermost first)
+            for (name, bind_constraint) in binds.iter().rev() {
+                branch_ctx = branch_ctx.extend(name, bind_constraint);
+            }
+            self.check(&branch_ctx, body, constraint)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn check_let(
         &self,
         ctx: &Context<'bump>,
@@ -164,12 +205,36 @@ impl<'bump> TypeChecker<'bump> {
         let norm = self.evaluator.whnf(constraint)?;
         match norm {
             Term::Builtin(name) => {
+                // Check if term is a Variant — verify union name matches constraint
+                if let Term::Variant(uname, _, _) = term {
+                    if uname == name {
+                        return Ok(());
+                    }
+                }
                 if let Some(builtin_checker) = check_builtin(name) {
                     let evald = self.evaluator.whnf(term)?;
                     builtin_checker(evald)
                 } else if let Some((parent, pred)) = lookup_refine(name, &self.table) {
                     self.check(ctx, term, parent)?;
                     self.prove_auto(ctx, term, pred)
+                } else if self.lookup_union(name).is_some() {
+                    // Union type — check if term is a Variant of this union
+                    if let Term::Variant(uname, _, _) = term {
+                        if uname == name {
+                            Ok(())
+                        } else {
+                            Err(format!(
+                                "Expected variant of {}, got variant of {}",
+                                name, uname
+                            ))
+                        }
+                    } else {
+                        Err(format!(
+                            "Expected a variant of {}, got {}",
+                            name,
+                            PrettyPrinter::pretty(term)
+                        ))
+                    }
                 } else {
                     Err(format!("Unknown builtin type: {}", name))
                 }

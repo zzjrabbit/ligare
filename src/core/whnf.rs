@@ -76,6 +76,45 @@ impl<'bump> WhnfEvaluator<'bump> {
             | Term::AutoProof
             | Term::RefParam
             | Term::This => Ok(t),
+            Term::UnionDef(..) => Ok(t),
+            Term::Variant(name, idx, payloads) => {
+                let ep: Vec<_> = payloads
+                    .iter()
+                    .map(|p| self.whnf(p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(self.arena.variant(name, *idx, self.arena.alloc_slice(&ep)))
+            }
+            Term::Match(scrut, branches) => {
+                let s = self.whnf(scrut)?;
+                if let Term::Variant(_, idx, payloads) = s {
+                    // Found a concrete variant — select the matching branch
+                    if let Some((_, _binds, body)) = branches.get(*idx) {
+                        // Bind payload values to branch body via beta reduction
+                        let mut result = *body;
+                        // Bind in reverse order (innermost first)
+                        for payload in payloads.iter().rev() {
+                            result = self.sub.beta(result, payload);
+                        }
+                        return self.whnf(result);
+                    }
+                }
+                // Scrutinee is not a variant — stuck; normalize branches
+                let bs: Vec<_> = branches
+                    .iter()
+                    .map(|(idx, binds, body)| {
+                        let eb: Vec<_> = binds
+                            .iter()
+                            .map(|(n, c)| {
+                                let cn = self.whnf(c).unwrap_or(c);
+                                (*n, cn)
+                            })
+                            .collect();
+                        let bb = self.whnf(body).unwrap_or(body);
+                        (*idx, self.arena.alloc_slice(&eb), bb)
+                    })
+                    .collect();
+                Ok(self.arena.match_(s, self.arena.alloc_slice(&bs)))
+            }
         }
     }
 

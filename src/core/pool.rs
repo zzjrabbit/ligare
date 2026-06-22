@@ -131,6 +131,34 @@ impl<'bump> TermArena<'bump> {
                 self.by_proof(inner_mapped, self.alloc_slice(&mapped))
             }
             Term::Refine(n, par, p) => self.refine(n, self.map(par, f), self.map(p, f)),
+            Term::UnionDef(name, variants) => {
+                let mapped: Vec<_> = variants
+                    .iter()
+                    .map(|(vname, fields)| {
+                        let mf: Vec<_> = fields
+                            .iter()
+                            .map(|(fnm, fc)| (*fnm, self.map(fc, f)))
+                            .collect();
+                        (*vname, self.alloc_slice(&mf))
+                    })
+                    .collect();
+                self.union_def(name, self.alloc_slice(&mapped))
+            }
+            Term::Variant(name, idx, payloads) => {
+                let mapped: Vec<_> = payloads.iter().map(|p| self.map(p, f)).collect();
+                self.variant(name, *idx, self.alloc_slice(&mapped))
+            }
+            Term::Match(scrut, branches) => {
+                let s = self.map(scrut, f);
+                let mapped: Vec<_> = branches
+                    .iter()
+                    .map(|(idx, binds, body)| {
+                        let mb: Vec<_> = binds.iter().map(|(n, c)| (*n, self.map(c, f))).collect();
+                        (*idx, self.alloc_slice(&mb), self.map(body, f))
+                    })
+                    .collect();
+                self.match_(s, self.alloc_slice(&mapped))
+            }
             _ => t,
         }
     }
@@ -234,6 +262,35 @@ impl<'bump> TermArena<'bump> {
         tactics: &'bump [Tactic<'bump>],
     ) -> &'bump Term<'bump> {
         self.alloc(Term::ByProof(t, tactics))
+    }
+
+    pub fn union_def(
+        &self,
+        name: Name<'bump>,
+        variants: &'bump [(Name<'bump>, &'bump [(Name<'bump>, &'bump Term<'bump>)])],
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::UnionDef(name, variants))
+    }
+
+    pub fn variant(
+        &self,
+        union_name: Name<'bump>,
+        variant_idx: usize,
+        payloads: &'bump [&'bump Term<'bump>],
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::Variant(union_name, variant_idx, payloads))
+    }
+
+    pub fn match_(
+        &self,
+        scrutinee: &'bump Term<'bump>,
+        branches: &'bump [(
+            usize,
+            &'bump [(Name<'bump>, &'bump Term<'bump>)],
+            &'bump Term<'bump>,
+        )],
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::Match(scrutinee, branches))
     }
 
     /// Desugar a `FuncDef` into `Annot(Lam(body), Pi(params..., ret))`.
@@ -354,6 +411,43 @@ impl<'bump> SubstitutionContext<'bump> {
             Term::Refine(n, par, p) => {
                 self.arena
                     .refine(n, recurse(par, cutoff), recurse(p, cutoff))
+            }
+            Term::UnionDef(name, variants) => {
+                let mapped: Vec<_> = variants
+                    .iter()
+                    .map(|(vname, fields)| {
+                        let mf: Vec<_> = fields
+                            .iter()
+                            .map(|(fnm, fc)| (*fnm, recurse(fc, cutoff)))
+                            .collect();
+                        (*vname, self.arena.alloc_slice(&mf))
+                    })
+                    .collect();
+                self.arena.union_def(name, self.arena.alloc_slice(&mapped))
+            }
+            Term::Variant(name, idx, payloads) => {
+                let mapped: Vec<_> = payloads.iter().map(|p| recurse(p, cutoff)).collect();
+                self.arena
+                    .variant(name, *idx, self.arena.alloc_slice(&mapped))
+            }
+            Term::Match(scrut, branches) => {
+                let s = recurse(scrut, cutoff);
+                let mapped: Vec<_> = branches
+                    .iter()
+                    .map(|(idx, binds, body)| {
+                        let mb: Vec<_> = binds
+                            .iter()
+                            .map(|(n, c)| (*n, recurse(c, cutoff)))
+                            .collect();
+                        // branch body binds payload variables → bump cutoff
+                        (
+                            *idx,
+                            self.arena.alloc_slice(&mb),
+                            recurse(body, cutoff + binds.len() as i32),
+                        )
+                    })
+                    .collect();
+                self.arena.match_(s, self.arena.alloc_slice(&mapped))
             }
             // Leaf nodes — returned unchanged (Var handled by callers)
             _ => t,

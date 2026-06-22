@@ -65,6 +65,22 @@ impl<'bump> Eraser<'bump> {
             | Term::RefParam
             | Term::This
             | Term::Var(_) => t,
+            Term::UnionDef(..) => self.unit(),
+            Term::Variant(name, idx, payloads) => {
+                let ep: Vec<_> = payloads.iter().map(|p| self.erase(p)).collect();
+                self.arena.variant(name, *idx, self.arena.alloc_slice(&ep))
+            }
+            Term::Match(scrut, branches) => {
+                let s = self.erase(scrut);
+                let bs: Vec<_> = branches
+                    .iter()
+                    .map(|(idx, binds, body)| {
+                        let eb: Vec<_> = binds.iter().map(|(n, c)| (*n, self.erase(c))).collect();
+                        (*idx, self.arena.alloc_slice(&eb), self.erase(body))
+                    })
+                    .collect();
+                self.arena.match_(s, self.arena.alloc_slice(&bs))
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::checker::context::empty_ctx;
 use crate::checker::erase::Eraser;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
-use crate::core::syntax::{FuncDef, Term};
+use crate::core::syntax::{FuncDef, Name, Term};
 use crate::front::parser::{TopLevel, parse_expr_top, parse_program};
 use crate::pretty::PrettyPrinter;
 
@@ -47,6 +47,15 @@ impl<'bump> Compiler<'bump> {
     /// Process a source file: parse it and handle each top-level item.
     pub fn process_file(&mut self, file: &str) -> Result<(), String> {
         let content = fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
+        self.process_str(&content, file)
+    }
+
+    /// Process source code from a string (for testing).
+    pub fn process_file_str(&mut self, source: &str) -> Result<(), String> {
+        self.process_str(source, "<str>")
+    }
+
+    fn process_str(&mut self, content: &str, file: &str) -> Result<(), String> {
         let tops = parse_program(&content, self.bump, self.arena)
             .map_err(|e| format!("{}: parse error: {}", file, e))?;
         for top in tops {
@@ -121,7 +130,8 @@ impl<'bump> Compiler<'bump> {
                 !matches!(
                     top,
                     TopLevel::TLDef(_, FuncDef { params, body, .. })
-                        if params.is_empty() && matches!(body, Term::Builtin(_))
+                        if params.is_empty()
+                            && matches!(body, Term::Builtin(_) | Term::UnionDef(..))
                 )
             })
             .collect();
@@ -163,7 +173,12 @@ impl<'bump> Compiler<'bump> {
                 // For zero-parameter definitions whose body is a
                 // refinement, extract the Refine so it is properly
                 // registered in the constraint table.
-                if func_def.params.is_empty() && matches!(func_def.body, Term::Refine(_, _, _)) {
+                if func_def.params.is_empty() && matches!(func_def.body, Term::UnionDef(..)) {
+                    println!("[union] {}", name);
+                    self.checker.add_union(name, func_def.body);
+                } else if func_def.params.is_empty()
+                    && matches!(func_def.body, Term::Refine(_, _, _))
+                {
                     let Term::Refine(_, parent, predicate) = func_def.body else {
                         unreachable!()
                     };
@@ -219,13 +234,81 @@ impl<'bump> Compiler<'bump> {
     }
 
     /// Substitute known top-level definitions into a term (O(1) lookup).
+    /// Also resolves variant constructors to Variant terms.
     fn subst_top_level(&self, term: &'bump Term<'bump>) -> &'bump Term<'bump> {
-        self.arena.map(term, &|t| {
+        // First pass: resolve env lookups only (not variants)
+        let t = self.arena.map(term, &|t| {
             if let Term::Builtin(name) = t {
-                self.env.get(name).copied()
-            } else {
-                None
+                if let Some(def) = self.env.get(name) {
+                    return Some(def);
+                }
             }
+            None
+        });
+        // Second pass: resolve variant apps
+        let t = self.resolve_variant_apps(t);
+        // Third pass: resolve remaining zero-arg variant constructors
+        self.arena.map(t, &|t| {
+            if let Term::Builtin(name) = t {
+                if let Some((uname, idx, field_specs)) = self.checker.lookup_variant(name) {
+                    if field_specs.is_empty() {
+                        return Some(self.arena.variant(uname, idx, &[]));
+                    }
+                }
+            }
+            None
         })
+    }
+
+    /// Convert `App*(Builtin(name), args...)` to `Variant(union, idx, args)`.
+    fn resolve_variant_apps(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        // Try top-level first (handles the common case)
+        if let Some((uname, idx, field_specs, args)) = self.collect_variant_args(t) {
+            if args.len() == field_specs.len() {
+                return self
+                    .arena
+                    .variant(uname, idx, self.arena.alloc_slice(&args));
+            }
+        }
+        self.arena.map(t, &|node| {
+            if let Some((uname, idx, field_specs, args)) = self.collect_variant_args(node) {
+                if args.len() == field_specs.len() {
+                    return Some(
+                        self.arena
+                            .variant(uname, idx, self.arena.alloc_slice(&args)),
+                    );
+                }
+            }
+            None
+        })
+    }
+
+    /// Unwrap an App chain to find a variant constructor and collect its args.
+    fn collect_variant_args(
+        &self,
+        t: &'bump Term<'bump>,
+    ) -> Option<(
+        Name<'bump>,
+        usize,
+        &'bump [(Name<'bump>, &'bump Term<'bump>)],
+        Vec<&'bump Term<'bump>>,
+    )> {
+        let mut args: Vec<&'bump Term<'bump>> = Vec::new();
+        let mut current = t;
+        loop {
+            if let Term::App(f, a) = current {
+                args.push(*a);
+                current = f;
+            } else {
+                break;
+            }
+        }
+        args.reverse();
+        if let Term::Builtin(name) = current {
+            if let Some((uname, idx, field_specs)) = self.checker.lookup_variant(name) {
+                return Some((uname, idx, field_specs, args));
+            }
+        }
+        None
     }
 }

@@ -61,6 +61,38 @@ impl PrettyPrinter {
             Term::AutoProof => "auto".to_string(),
             Term::RefParam => "x".to_string(),
             Term::This => "this".to_string(),
+            Term::UnionDef(name, variants) => {
+                let vs: Vec<String> = variants
+                    .iter()
+                    .map(|(vn, fields)| {
+                        if fields.is_empty() {
+                            format!("| {}", vn)
+                        } else {
+                            let fs: Vec<String> = fields
+                                .iter()
+                                .map(|(fnm, fc)| format!("({} : {})", fnm, Self::pretty(fc)))
+                                .collect();
+                            format!("| {} of {}", vn, fs.join(" "))
+                        }
+                    })
+                    .collect();
+                format!("union {}\n  {}", name, vs.join("\n  "))
+            }
+            Term::Variant(name, _idx, payloads) => {
+                let ps: Vec<String> = payloads.iter().map(|p| Self::pretty(p)).collect();
+                format!("({}.{} {})", name, "variant", ps.join(" "))
+            }
+            Term::Match(scrut, branches) => {
+                let bs: Vec<String> = branches
+                    .iter()
+                    .map(|(_idx, binds, body)| {
+                        let bpat: Vec<String> =
+                            binds.iter().map(|(n, _)| n.to_string()).collect();
+                        format!("| {} => {}", bpat.join(" "), Self::pretty(body))
+                    })
+                    .collect();
+                format!("match {} with\n  {}", Self::pretty(scrut), bs.join("\n  "))
+            }
         }
     }
 

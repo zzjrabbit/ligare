@@ -80,6 +80,35 @@ impl<'bump> Evaluator<'bump> {
             | Term::PrimOp(_)
             | Term::Universe(_)
             | Term::Builtin(_) => Ok(t),
+            Term::UnionDef(..) => Ok(t),
+            Term::Variant(name, idx, payloads) => {
+                let ep: Vec<_> = payloads
+                    .iter()
+                    .map(|p| self.eval(p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(self.arena.variant(name, *idx, self.arena.alloc_slice(&ep)))
+            }
+            Term::Match(scrut, branches) => {
+                let s = self.eval(scrut)?;
+                if let Term::Variant(_, idx, payloads) = s {
+                    if let Some((_, _, body)) = branches.get(*idx) {
+                        let mut result = *body;
+                        for payload in payloads.iter().rev() {
+                            result = self.sub.beta(result, payload);
+                        }
+                        return self.eval(result);
+                    }
+                }
+                // Stuck — keep the match expression
+                let bs: Vec<_> = branches
+                    .iter()
+                    .map(|(idx, binds, body)| {
+                        let bb = self.eval(body).unwrap_or(body);
+                        (*idx, *binds, bb)
+                    })
+                    .collect();
+                Ok(self.arena.match_(s, self.arena.alloc_slice(&bs)))
+            }
         }
     }
 

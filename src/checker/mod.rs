@@ -21,6 +21,8 @@ pub struct TypeChecker<'bump> {
     pub(crate) evaluator: WhnfEvaluator<'bump>,
     pub(crate) desugarer: Desugarer<'bump>,
     table: ConstraintTable<'bump>,
+    /// Registry of union definitions: maps union name → UnionDef term
+    pub(crate) union_table: Vec<(Name<'bump>, &'bump Term<'bump>)>,
 }
 
 impl<'bump> TypeChecker<'bump> {
@@ -30,6 +32,7 @@ impl<'bump> TypeChecker<'bump> {
             evaluator: WhnfEvaluator::new(arena),
             desugarer: Desugarer::new(arena),
             table: empty_table(),
+            union_table: Vec::new(),
         }
     }
 
@@ -45,6 +48,40 @@ impl<'bump> TypeChecker<'bump> {
         predicate: &'bump Term<'bump>,
     ) {
         self.table.insert(0, (name, parent, predicate));
+    }
+
+    /// Add a union definition to the persistent union table.
+    pub fn add_union(&mut self, name: Name<'bump>, def: &'bump Term<'bump>) {
+        self.union_table.insert(0, (name, def));
+    }
+
+    /// Look up a variant constructor name → (union_name, variant_index, field_specs).
+    pub fn lookup_variant(
+        &self,
+        ctor_name: &str,
+    ) -> Option<(
+        Name<'bump>,
+        usize,
+        &'bump [(Name<'bump>, &'bump Term<'bump>)],
+    )> {
+        for (uname, udef) in &self.union_table {
+            if let Term::UnionDef(_, variants) = udef {
+                for (idx, (vname, fields)) in variants.iter().enumerate() {
+                    if *vname == ctor_name {
+                        return Some((*uname, idx, *fields));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Look up a union definition by name.
+    pub fn lookup_union(&self, name: &str) -> Option<&'bump Term<'bump>> {
+        self.union_table
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, def)| *def)
     }
 
     /// Get a reference to the persistent constraint table.
@@ -127,14 +164,21 @@ impl<'bump> TypeChecker<'bump> {
             Term::Let(_name, val, body, mconstr) => {
                 self.check_let(ctx, val, body, *mconstr, constraint)
             }
+            Term::Match(scrutinee, branches) => {
+                self.check_match(ctx, scrutinee, branches, constraint)
+            }
             // Application: use the function's type rather than forcing
             // full evaluation (which would compute recursive calls).
             Term::App(f, a) => self.check_app(ctx, f, a, constraint),
             // A bare Builtin name may be a type (int, str, etc.) or a
-            // refinement (nat).  If neither, it's an undefined variable.
+            // refinement (nat).  If neither, check if it's a variant constructor.
             Term::Builtin(name) => {
                 if check_builtin(name).is_some() || lookup_refine(name, &self.table).is_some() {
                     self.check_by_constraint(ctx, desugared, constraint)
+                } else if let Some((uname, idx, _)) = self.lookup_variant(name) {
+                    // Zero-arg variant constructor → wrap as Variant
+                    let variant_term = self.arena.variant(uname, idx, &[]);
+                    self.check(ctx, variant_term, constraint)
                 } else {
                     Err(format!("Undefined variable: {}", name))
                 }
@@ -153,6 +197,7 @@ impl<'bump> TypeChecker<'bump> {
             evaluator: WhnfEvaluator::new(arena),
             desugarer: Desugarer::new(arena),
             table: table.clone(),
+            union_table: Vec::new(),
         }
     }
 }
@@ -170,6 +215,7 @@ pub fn check<'bump>(
         evaluator: WhnfEvaluator::new(arena),
         desugarer: Desugarer::new(arena),
         table: table.clone(),
+        union_table: Vec::new(),
     };
     checker.check(ctx, term, constraint)
 }

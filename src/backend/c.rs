@@ -187,6 +187,42 @@ fn emit_expr(
                 .unwrap_or(CType::Int64);
             ((*name).to_string(), ty)
         }
+        Term::UnionDef(..) => (String::new(), CType::Int64),
+        Term::Variant(_name, idx, payloads) => {
+            // Emit as a compound literal: ((UnionTy){ .tag = idx, .data = {...} })
+            let ps: Vec<_> = payloads
+                .iter()
+                .map(|p| {
+                    let (code, ty) = emit_expr(p, bound, var_types, self_name, fun_sigs);
+                    (code, ty)
+                })
+                .collect();
+            let fields: Vec<String> = ps
+                .iter()
+                .enumerate()
+                .map(|(i, (code, _))| format!("f{} = {}", i, code))
+                .collect();
+            (
+                format!("{{ .tag = {}, .data = {{ {} }} }}", idx, fields.join(", ")),
+                CType::Int64,
+            )
+        }
+        Term::Match(scrut, branches) => {
+            let (sc, _) = emit_expr(scrut, bound, var_types, self_name, fun_sigs);
+            let mut cases = String::new();
+            for (idx, binds, body) in branches.iter() {
+                let mut ext = bound.to_vec();
+                let mut ext_types = var_types.clone();
+                // Bind payload variables
+                for (name, _) in binds.iter().rev() {
+                    ext.insert(0, (*name).to_string());
+                    ext_types.insert(0, CType::Int64);
+                }
+                let (bc, _) = emit_expr(body, &ext, &mut ext_types, self_name, fun_sigs);
+                cases.push_str(&format!("case {}: {{ {}; }} break;\n", idx, bc));
+            }
+            (format!("switch ({}.tag) {{ {} }}", sc, cases), CType::Int64)
+        }
         _ => ("0".into(), CType::Int64),
     }
 }

@@ -125,6 +125,22 @@ pub enum Term<'bump> {
     AutoProof,
     RefParam,
     This,
+    /// Union type definition (in `prop`): (name, [(variant_name, [(field_name, constraint)])])
+    UnionDef(
+        Name<'bump>,
+        &'bump [(Name<'bump>, &'bump [(Name<'bump>, &'bump Term<'bump>)])],
+    ),
+    /// Variant constructor (in `data`): (union_name, variant_index, payload_values)
+    Variant(Name<'bump>, usize, &'bump [&'bump Term<'bump>]),
+    /// Pattern match elimination (in `data`): (scrutinee, [(var_idx, [(bind_name, bind_type)], body)])
+    Match(
+        &'bump Term<'bump>,
+        &'bump [(
+            usize,
+            &'bump [(Name<'bump>, &'bump Term<'bump>)],
+            &'bump Term<'bump>,
+        )],
+    ),
 }
 
 #[cfg(test)]

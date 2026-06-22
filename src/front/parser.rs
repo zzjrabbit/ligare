@@ -82,13 +82,15 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         self.peek().map(|(t, _)| t.clone())
     }
     fn advance(&mut self) {
-        // Advance past the current token and any following newlines,
-        // so that `pos` always points to a meaningful token.
-        loop {
+        // Skip any leading Newlines (to reach the current token that peek() would return)
+        while matches!(self.tokens.get(self.pos), Some((Token::Newline, _))) {
             self.pos += 1;
-            if !matches!(self.tokens.get(self.pos), Some((Token::Newline, _))) {
-                break;
-            }
+        }
+        // Skip past the current token
+        self.pos += 1;
+        // Then skip any following Newlines
+        while matches!(self.tokens.get(self.pos), Some((Token::Newline, _))) {
+            self.pos += 1;
         }
     }
 
@@ -266,10 +268,20 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         let params = self.parse_many_curried_params();
         let m_ret = self.parse_type_annotation(outer_env);
         self.expect(&Token::ColonEq)?;
-        let param_names: Vec<Name<'bump>> = params.iter().map(|(n, _)| *n).collect();
-        let mut env: Vec<Name<'bump>> = param_names.iter().rev().copied().collect();
-        env.extend_from_slice(outer_env);
-        let body_expr = self.parse_expr(&env)?;
+        // Check for union / struct body (zero-param definitions)
+        let body_expr = if self.peek_token() == Some(Token::KwUnion) {
+            self.parse_union_body(name)?
+        } else if self.peek_token() == Some(Token::KwStruct) {
+            return Err(ParseError {
+                message: "struct definitions are not yet implemented".into(),
+                span: self.current_span(),
+            });
+        } else {
+            let param_names: Vec<Name<'bump>> = params.iter().map(|(n, _)| *n).collect();
+            let mut env: Vec<Name<'bump>> = param_names.iter().rev().copied().collect();
+            env.extend_from_slice(outer_env);
+            self.parse_expr(&env)?
+        };
         let body = subst_this(self.arena, name, body_expr);
         let params_slice = self.arena.alloc_slice(&params);
         let func_def = FuncDef {
@@ -307,6 +319,9 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     // ── Expressions ──
 
     fn parse_expr(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+        if let Ok(t) = self.parse_match_expr(env) {
+            return Ok(t);
+        }
         if let Ok(t) = self.parse_if_expr(env) {
             return Ok(t);
         }
@@ -327,6 +342,108 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(self
             .arena
             .if_then_else(cond, tbranch, self.parse_expr(env)?))
+    }
+
+    fn parse_match_expr(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+        if !self.try_expect(&Token::KwMatch) {
+            return Err(ParseError {
+                message: "not a match expression".into(),
+                span: 0..0,
+            });
+        }
+        let scrutinee = self.parse_expr(env)?;
+        self.expect(&Token::KwWith)?;
+        // Parse branches: `| Pattern => body` repeated
+        let mut branches: Vec<(
+            usize,
+            Vec<(Name<'bump>, &'bump Term<'bump>)>,
+            &'bump Term<'bump>,
+        )> = Vec::new();
+        loop {
+            if !self.try_expect(&Token::Bar) {
+                break;
+            }
+            let _variant_name = self.parse_ident()?;
+            // Parse optional bindings: `name1 name2 ...` (stop at `=>` or end)
+            let mut binds: Vec<(Name<'bump>, &'bump Term<'bump>)> = Vec::new();
+            while self
+                .peek_token()
+                .map_or(false, |t| matches!(t, Token::Ident(_)))
+            {
+                let bind_name = self.parse_ident()?;
+                // Infer constraint as `data` for bindings
+                let bind_ty = self.arena.builtin(self.pool.intern("data"));
+                binds.push((bind_name, bind_ty));
+            }
+            self.expect(&Token::FatArrow)?;
+            // Build extended env with bindings
+            let mut ext_env: Vec<Name<'bump>> = binds.iter().map(|(n, _)| *n).collect();
+            ext_env.extend_from_slice(env);
+            let body = self.parse_expr(&ext_env)?;
+            // Use variant name as index placeholder — real index resolved during check
+            let idx = branches.len();
+            branches.push((idx, binds, body));
+        }
+        if branches.is_empty() {
+            return Err(ParseError {
+                message: "match expression must have at least one branch".into(),
+                span: self.current_span(),
+            });
+        }
+        let branches_slice: Vec<_> = branches
+            .into_iter()
+            .map(|(idx, b, body)| (idx, self.arena.alloc_slice(&b), body))
+            .collect();
+        Ok(self
+            .arena
+            .match_(scrutinee, self.arena.alloc_slice(&branches_slice)))
+    }
+
+    /// Parse a union body: `union\n  | Variant1 of (x : Type)\n  | Variant2 ...`
+    fn parse_union_body(&mut self, name: Name<'bump>) -> Result<&'bump Term<'bump>, ParseError> {
+        self.expect(&Token::KwUnion)?;
+        let mut variants: Vec<(Name<'bump>, Vec<(Name<'bump>, &'bump Term<'bump>)>)> = Vec::new();
+        loop {
+            if !self.try_expect(&Token::Bar) {
+                break;
+            }
+            let vname = self.parse_ident()?;
+            // Parse optional payload: `of (field1 : Type1) (field2 : Type2)`
+            let fields: Vec<(Name<'bump>, &'bump Term<'bump>)> = if self.try_expect(&Token::KwOf) {
+                let mut fs = Vec::new();
+                // Parse one or more `(name : type)` pairs
+                loop {
+                    if !self.try_expect(&Token::LParen) {
+                        break;
+                    }
+                    let fname = self.parse_ident()?;
+                    let fty = if self.try_expect(&Token::Colon) {
+                        self.parse_expr(&[])?
+                    } else {
+                        self.arena.builtin(self.pool.intern("data"))
+                    };
+                    self.expect(&Token::RParen)?;
+                    fs.push((fname, fty));
+                }
+                fs
+            } else {
+                Vec::new()
+            };
+            variants.push((vname, fields));
+        }
+        if variants.is_empty() {
+            return Err(ParseError {
+                message: "union must have at least one variant".into(),
+                span: self.current_span(),
+            });
+        }
+        let variants_slice: Vec<_> = variants
+            .into_iter()
+            .map(|(vn, fs)| (vn, self.arena.alloc_slice(&fs)))
+            .collect();
+        Ok(self
+            .arena
+            .union_def(name, self.arena.alloc_slice(&variants_slice)))
     }
 
     fn parse_operators(
