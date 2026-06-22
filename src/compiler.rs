@@ -73,6 +73,9 @@ impl<'bump> Compiler<'bump> {
                     }
                 }
                 TopLevel::TLDef(name, term) => TopLevel::TLDef(name, eraser.erase(term)),
+                TopLevel::TLTheorem(name, prop, body) => {
+                    TopLevel::TLTheorem(name, eraser.erase(prop), eraser.erase(body))
+                }
                 other => other,
             })
             // Drop zero-param definitions whose body is a bare builtin
@@ -145,6 +148,20 @@ impl<'bump> Compiler<'bump> {
                 {
                     Err(err) => return Err(format!("check failed: {}", err)),
                     Ok(_) => println!("[OK]"),
+                }
+            }
+            TopLevel::TLTheorem(name, prop, body) => {
+                let resolved_body = self.subst_top_level(body);
+                let resolved_prop = self.subst_top_level(prop);
+                match self
+                    .checker
+                    .check(&empty_ctx(), resolved_body, resolved_prop)
+                {
+                    Err(err) => return Err(format!("theorem check failed: {}", err)),
+                    Ok(_) => {
+                        println!("[theorem] {}", name);
+                        self.env.push((name, body));
+                    }
                 }
             }
             TopLevel::TLShow(term) => {

@@ -13,7 +13,7 @@ use ligare::core::pool::TermArena;
 #[command(
     name = "ligare",
     about = "Ligare compiler frontend",
-    long_about = "Each source file may contain:\n  def <name> [params] [: <type>] := <body>   top-level definition\n  #check <term> : <constraint>               type-check assertion\n  <expr>                                      evaluate expression"
+    long_about = "Each source file may contain:\n  def <name> [params] [: <type>] := <body>   top-level definition\n  theorem <name> : <type> := <body>           named theorem/proof\n  #check <term> : <constraint>               type-check assertion\n  <expr>                                      evaluate expression"
 )]
 struct Cli {
     /// Evaluate an expression after processing all files

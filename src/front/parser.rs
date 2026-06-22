@@ -9,6 +9,7 @@ use crate::front::lexer::Token;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopLevel<'bump> {
     TLDef(Name<'bump>, &'bump Term<'bump>),
+    TLTheorem(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>),
     TLCheck(&'bump Term<'bump>, &'bump Term<'bump>),
     TLShow(&'bump Term<'bump>),
     TLExpr(&'bump Term<'bump>),
@@ -16,6 +17,7 @@ pub enum TopLevel<'bump> {
 
 const KEYWORDS: &[&str] = &[
     "let", "in", "if", "then", "else", "true", "false", "by", "func", "where", "def", "auto",
+    "theorem",
 ];
 
 type SpannedToken = (Token, std::ops::Range<usize>);
@@ -142,6 +144,18 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     }
 
     fn parse_top_level(&mut self) -> Result<TopLevel<'bump>, ParseError> {
+        if self.peek_token() == Some(Token::KwTheorem) {
+            self.advance();
+            let name = self.parse_ident()?;
+            let prop = if self.try_expect(&Token::Colon) {
+                self.parse_expr(&[])?
+            } else {
+                self.arena.builtin(self.pool.intern("data"))
+            };
+            self.expect(&Token::ColonEq)?;
+            let body = self.parse_expr(&[])?;
+            return Ok(TopLevel::TLTheorem(name, prop, body));
+        }
         if self.peek_token() == Some(Token::KwDef) {
             let (name, term) = self.parse_def()?;
             return Ok(TopLevel::TLDef(name, term));

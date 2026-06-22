@@ -17,6 +17,9 @@ pub fn emit_c(tops: &[TopLevel<'_>]) -> String {
             TopLevel::TLDef(name, term) => {
                 defs.push((name, term));
             }
+            TopLevel::TLTheorem(name, _, body) => {
+                defs.push((name, body));
+            }
             TopLevel::TLCheck(_, _) => {}
             TopLevel::TLShow(term) | TopLevel::TLExpr(term) => outputs.push(term),
         }

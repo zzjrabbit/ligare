@@ -27,3 +27,16 @@ def fib (n : int) : int := if n < 2 then n else fib (n-1) + fib (n-2)
 #show (by
   intro
   exact 0) 5
+
+-- Basic theorem: a value satisfies a type
+theorem zero_is_nat : nat := 0 by
+  exact true
+
+-- Theorem with function type
+theorem identity : int -> int := \x. x
+
+-- Theorem referencing a previously defined theorem
+#check zero_is_nat : nat
+
+-- Theorem can be used as a value
+#check identity 5 : int

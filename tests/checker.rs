@@ -1279,3 +1279,89 @@ fn by_proof_subject_passes_skips_tactics() {
     );
     assert_eq!(check_empty(&arena, term, pi), Ok(()));
 }
+
+// ── Theorem tests (simulating `theorem name : type := body` checking) ──
+
+/// Simulate `theorem t : int := 5` — body must satisfy the declared type.
+#[test]
+fn theorem_body_matches_type() {
+    let (_b, arena) = a();
+    let body = arena.lit_int(5);
+    let prop = arena.builtin(s(&arena, "int"));
+    assert_eq!(check_empty(&arena, body, prop), Ok(()));
+}
+
+/// Simulate `theorem t : int := true` — body fails to match.
+#[test]
+fn theorem_body_mismatches_type() {
+    let (_b, arena) = a();
+    let body = arena.lit_bool(true);
+    let prop = arena.builtin(s(&arena, "int"));
+    assert!(check_empty(&arena, body, prop).is_err());
+}
+
+/// Simulate `theorem id : int -> int := \x. x` — lambda satisfies arrow type.
+#[test]
+fn theorem_lambda_matches_arrow_type() {
+    let (_b, arena) = a();
+    let body = arena.lam(arena.var(0));
+    let prop = arena.pi(
+        s(&arena, ""),
+        arena.builtin(s(&arena, "int")),
+        arena.builtin(s(&arena, "int")),
+    );
+    assert_eq!(check_empty(&arena, body, prop), Ok(()));
+}
+
+/// Simulate `theorem t : nat := 5 by exact true` — refinement with by-block.
+#[test]
+fn theorem_refinement_with_by_passes() {
+    let (_b, arena) = a();
+    // Register nat in constraint table
+    let table = add_refine(
+        s(&arena, "nat"),
+        arena.builtin(s(&arena, "int")),
+        bin(&arena, PrimOp::Ge, arena.ref_param(), arena.lit_int(0)),
+        &empty_table(),
+    );
+    let body = arena.by_proof(
+        Some(arena.lit_int(5)),
+        arena.alloc_slice(&[Tactic::Exact(arena.lit_bool(true))]),
+    );
+    assert_eq!(
+        check(
+            &arena,
+            &table,
+            &empty_ctx(),
+            body,
+            arena.builtin(s(&arena, "nat"))
+        ),
+        Ok(())
+    );
+}
+
+/// Simulate `theorem t : nat := 5 by exact false` — proof evaluates to false so check fails.
+#[test]
+fn theorem_refinement_with_by_fails() {
+    let (_b, arena) = a();
+    let table = add_refine(
+        s(&arena, "nat"),
+        arena.builtin(s(&arena, "int")),
+        bin(&arena, PrimOp::Ge, arena.ref_param(), arena.lit_int(0)),
+        &empty_table(),
+    );
+    let body = arena.by_proof(
+        Some(arena.lit_int(5)),
+        arena.alloc_slice(&[Tactic::Exact(arena.lit_bool(false))]),
+    );
+    assert!(
+        check(
+            &arena,
+            &table,
+            &empty_ctx(),
+            body,
+            arena.builtin(s(&arena, "nat"))
+        )
+        .is_err()
+    );
+}

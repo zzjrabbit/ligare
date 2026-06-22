@@ -246,6 +246,7 @@ Ligare 程序由一系列顶层命令组成：
 | 命令 | 描述 |
 |------|------|
 | `def <名称> <参数>? : <类型>? := <体>` | 定义命名项或函数 |
+| `theorem <名称> : <类型> := <体>` | 定义命名定理（经类型检查后可作为项使用） |
 | `#check <表达式> : <类型>` | 对表达式进行类型检查 |
 | `#show <表达式>` | 求值表达式并显示结果 |
 
@@ -253,6 +254,8 @@ Ligare 程序由一系列顶层命令组成：
 ```ligare
 def nat := int where (x => x >= 0)
 def x : nat := 10
+theorem x_is_nat : nat := x by
+  exact true
 
 #check x : int
 #show x

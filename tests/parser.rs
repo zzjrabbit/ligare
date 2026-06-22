@@ -595,3 +595,95 @@ fn parens_respect_binary_op() {
         *arena.lam(bin(&arena, PrimOp::Mul, sub, arena.lit_int(2)))
     );
 }
+
+// ── Theorem tests ──
+
+#[test]
+fn theorem_with_type_and_by_block() {
+    let (b, arena) = a();
+    let result = parse_program(
+        "theorem zero_is_nat : int := 0 by
+  exact true",
+        b,
+        &arena,
+    );
+    assert!(result.is_ok());
+    let tops = result.unwrap();
+    assert_eq!(tops.len(), 1);
+    assert!(matches!(tops[0], TopLevel::TLTheorem(..)));
+}
+
+#[test]
+fn theorem_simple_value() {
+    let (b, arena) = a();
+    let result = parse_program("theorem answer : int := 42", b, &arena);
+    assert!(result.is_ok());
+    let tops = result.unwrap();
+    assert_eq!(tops.len(), 1);
+    match &tops[0] {
+        TopLevel::TLTheorem(name, prop, body) => {
+            assert_eq!(*name, "answer");
+            assert_eq!(**prop, *arena.builtin(s(&arena, "int")));
+            assert_eq!(**body, Term::LitInt(42));
+        }
+        _ => panic!("expected TLTheorem"),
+    }
+}
+
+#[test]
+fn theorem_with_lambda_body() {
+    let (b, arena) = a();
+    let result = parse_program("theorem id : int -> int := \\x. x", b, &arena);
+    assert!(result.is_ok());
+    let tops = result.unwrap();
+    assert_eq!(tops.len(), 1);
+    assert!(matches!(tops[0], TopLevel::TLTheorem(..)));
+}
+
+#[test]
+fn theorem_without_type_defaults_to_data() {
+    let (b, arena) = a();
+    let result = parse_program("theorem foo := 5", b, &arena);
+    assert!(result.is_ok());
+    let tops = result.unwrap();
+    assert_eq!(tops.len(), 1);
+    match &tops[0] {
+        TopLevel::TLTheorem(name, prop, body) => {
+            assert_eq!(*name, "foo");
+            assert_eq!(**prop, *arena.builtin(s(&arena, "data")));
+            assert_eq!(**body, Term::LitInt(5));
+        }
+        _ => panic!("expected TLTheorem"),
+    }
+}
+
+#[test]
+fn program_with_theorem_and_def_and_check() {
+    let (b, arena) = a();
+    let result = parse_program(
+        "def nat := int where (x => x >= 0)\ntheorem t : int := 0\n#check 1 : int",
+        b,
+        &arena,
+    );
+    assert!(result.is_ok());
+    let tops = result.unwrap();
+    assert_eq!(tops.len(), 3);
+    assert!(matches!(tops[0], TopLevel::TLDef(..)));
+    assert!(matches!(tops[1], TopLevel::TLTheorem(..)));
+    assert!(matches!(tops[2], TopLevel::TLCheck(..)));
+}
+
+#[test]
+fn theorem_with_refinement_type() {
+    let (b, arena) = a();
+    let result = parse_program(
+        "theorem pos5 : int where (x => x > 0) := 5 by
+  exact true",
+        b,
+        &arena,
+    );
+    assert!(result.is_ok());
+    let tops = result.unwrap();
+    assert_eq!(tops.len(), 1);
+    assert!(matches!(tops[0], TopLevel::TLTheorem(..)));
+}

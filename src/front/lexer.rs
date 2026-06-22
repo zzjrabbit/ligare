@@ -41,6 +41,8 @@ pub enum Token {
     KwIntro,
     #[token("have")]
     KwHave,
+    #[token("theorem")]
+    KwTheorem,
 
     // Directives
     #[token("#check")]
