@@ -13,7 +13,7 @@
 //!   `Lam` or `PrimOp` application.
 
 use crate::core::pool::{SubstitutionContext, TermArena};
-use crate::core::syntax::{Tactic, Term};
+use crate::core::syntax::Term;
 
 /// Weak Head Normal Form evaluator.
 ///
@@ -55,7 +55,7 @@ impl<'bump> WhnfEvaluator<'bump> {
                 if let Some(inner) = inner {
                     self.whnf(inner)
                 } else {
-                    let expanded = self.expand_proof_tactics(tactics)?;
+                    let expanded = self.arena.expand_proof_tactics(tactics)?;
                     self.whnf(expanded)
                 }
             }
@@ -190,34 +190,6 @@ impl<'bump> WhnfEvaluator<'bump> {
         }
     }
 
-    /// Mechanically expand `intro*; exact t` tactics to a lambda term.
-    fn expand_proof_tactics(
-        &self,
-        tactics: &'bump [Tactic<'bump>],
-    ) -> Result<&'bump Term<'bump>, String> {
-        let mut intro_count = 0usize;
-        let n = tactics.len();
-        for (i, tactic) in tactics.iter().enumerate() {
-            let is_last = i == n - 1;
-            match tactic {
-                Tactic::Intro(_) if !is_last => intro_count += 1,
-                Tactic::Exact(t) if is_last => {
-                    let mut result = *t;
-                    for _ in 0..intro_count {
-                        result = self.arena.lam(result);
-                    }
-                    return Ok(result);
-                }
-                _ => {
-                    return Err(
-                        "Only `intro`+`exact` tactics are supported in standalone proof eval"
-                            .into(),
-                    );
-                }
-            }
-        }
-        Err("Proof block must end with `exact`".into())
-    }
 }
 
 /// Convenience wrapper for backward-compatible free-function style.

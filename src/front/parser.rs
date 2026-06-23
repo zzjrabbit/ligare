@@ -1112,11 +1112,9 @@ pub fn parse_expr_top<'bump>(
     input: &str,
     bump: &'bump Bump,
     arena: &'bump TermArena<'bump>,
-) -> Result<&'bump Term<'bump>, String> {
+) -> Result<&'bump Term<'bump>, ParseError> {
     let pool = StringPool::new(bump);
-    Parser::new(&tokenize(input), &pool, arena)
-        .parse_expr_top()
-        .map_err(|e| e.to_string())
+    Parser::new(&tokenize(input), &pool, arena).parse_expr_top()
 }
 
 pub fn parse_def_top<'bump>(
@@ -1134,9 +1132,192 @@ pub fn parse_program<'bump>(
     input: &str,
     bump: &'bump Bump,
     arena: &'bump TermArena<'bump>,
-) -> Result<Vec<TopLevel<'bump>>, String> {
+) -> Result<Vec<TopLevel<'bump>>, ParseError> {
     let pool = StringPool::new(bump);
-    Parser::new(&tokenize(input), &pool, arena)
-        .parse_program()
-        .map_err(|e| e.to_string())
+    Parser::new(&tokenize(input), &pool, arena).parse_program()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::pool::TermArena;
+
+    fn setup() -> (&'static bumpalo::Bump, TermArena<'static>) {
+        let b = Box::leak(Box::new(bumpalo::Bump::new()));
+        (b, TermArena::new(b))
+    }
+
+    // ── Destructuring let ──
+    // `let Point{x, y} := p in x + y` desugars to:
+    //   let x := Point.x p in let y := Point.y p in x + y
+    #[test]
+    fn let_destructuring_ast() {
+        let (bump, arena) = setup();
+        let term = parse_expr_top("let Point{x, y} := p in x + y", bump, &arena)
+            .expect("parse should succeed");
+
+        // Outer let: let x := Point.x p in <inner>
+        match term {
+            Term::Let(name_x, val_x, body, None) => {
+                // x is the first-declared field, becomes the outermost let binder
+                assert_eq!(name_x, &"x");
+
+                // val = Point.x applied to p
+                match val_x {
+                    Term::App(proj_x, arg_x) => {
+                        assert_eq!(**proj_x, Term::Builtin(&"Point.x"));
+                        assert_eq!(**arg_x, Term::Builtin(&"p"));
+                    }
+                    other => panic!("expected App for x projection, got {:?}", other),
+                }
+
+                // Inner let: let y := Point.y p in x + y
+                match body {
+                    Term::Let(name_y, val_y, inner_body, None) => {
+                        assert_eq!(name_y, &"y");
+
+                        match val_y {
+                            Term::App(proj_y, arg_y) => {
+                                assert_eq!(**proj_y, Term::Builtin(&"Point.y"));
+                                // p has no De Bruijn vars, so shift by 1 is a no-op
+                                assert_eq!(**arg_y, Term::Builtin(&"p"));
+                            }
+                            other => panic!("expected App for y projection, got {:?}", other),
+                        }
+
+                        // inner_body = x + y
+                        // With binding stack [y (Var 0), x (Var 1)] at parse time,
+                        // x = Var(1), y = Var(0)
+                        match inner_body {
+                            Term::App(op_app, rhs) => {
+                                match op_app {
+                                    Term::App(op, lhs) => {
+                                        assert_eq!(**op, Term::PrimOp(PrimOp::Add)); // x
+                                        assert_eq!(**lhs, Term::Var(1)); // x
+                                        assert_eq!(**rhs, Term::Var(0)); // y
+                                    }
+                                    other => {
+                                        panic!("expected App(PrimOp(Add), lhs), got {:?}", other)
+                                    }
+                                }
+                            }
+                            other => panic!("expected App for addition, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Let for y binding, got {:?}", other),
+                }
+            }
+            other => panic!("expected Let at top, got {:?}", other),
+        }
+    }
+
+    // ── Struct defintion ──
+    #[test]
+    fn struct_definition_ast() {
+        let (bump, arena) = setup();
+        let (name, func_def) =
+            parse_def_top("def Foo : prop := struct a : int b : str", bump, &arena)
+                .expect("parse should succeed");
+
+        assert_eq!(name, "Foo");
+        assert_eq!(func_def.name, "Foo");
+        // No curried params
+        assert!(func_def.params.is_empty());
+        // Return type annotation
+        assert_eq!(func_def.ret.map(|t| *t), Some(Term::Builtin(&"prop")));
+
+        // Body is StructDef
+        match func_def.body {
+            Term::StructDef(struct_name, fields) => {
+                assert_eq!(struct_name, &"Foo");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "a");
+                assert_eq!(*fields[0].1, Term::Builtin(&"int"));
+                assert_eq!(fields[1].0, "b");
+                assert_eq!(*fields[1].1, Term::Builtin(&"str"));
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    // ── Lambda wrapping an application ──
+    #[test]
+    fn lambda_application_ast() {
+        let (bump, arena) = setup();
+        let term = parse_expr_top("\\x. x + 1", bump, &arena).expect("parse should succeed");
+
+        match term {
+            Term::Lam(body) => {
+                // body = x + 1  i.e. App(App(PrimOp(Add), Var(0)), LitInt(1))
+                match body {
+                    Term::App(op_app, rhs) => {
+                        match op_app {
+                            Term::App(op, lhs) => {
+                                assert_eq!(**op, Term::PrimOp(PrimOp::Add));
+                                assert_eq!(**lhs, Term::Var(0));
+                            }
+                            other => panic!("expected App(PrimOp(Add), lhs), got {:?}", other),
+                        }
+                        assert_eq!(**rhs, Term::LitInt(1));
+                    }
+                    other => panic!("expected App in lam body, got {:?}", other),
+                }
+            }
+            other => panic!("expected Lam, got {:?}", other),
+        }
+    }
+
+    // ── If-then-else ──
+    #[test]
+    fn if_expression_ast() {
+        let (bump, arena) = setup();
+        let term =
+            parse_expr_top("if true then 1 else 0", bump, &arena).expect("parse should succeed");
+
+        match term {
+            Term::IfThenElse(cond, tbranch, fbranch) => {
+                assert_eq!(**cond, Term::LitBool(true));
+                assert_eq!(**tbranch, Term::LitInt(1));
+                assert_eq!(**fbranch, Term::LitInt(0));
+            }
+            other => panic!("expected IfThenElse, got {:?}", other),
+        }
+    }
+
+    // ── Match expression ──
+    #[test]
+    fn match_expression_ast() {
+        let (bump, arena) = setup();
+        let term = parse_expr_top("match x with | A => 1 | B => 2", bump, &arena)
+            .expect("parse should succeed");
+
+        match term {
+            Term::Match(scrutinee, branches) => {
+                assert_eq!(**scrutinee, Term::Builtin(&"x"));
+                assert_eq!(branches.len(), 2);
+
+                // Branch 0: | A => 1
+                let (idx0, binds0, body0) = &branches[0];
+                assert_eq!(*idx0, 0);
+                assert!(binds0.is_empty());
+                assert_eq!(**body0, Term::LitInt(1));
+
+                // Branch 1: | B => 2
+                let (idx1, binds1, body1) = &branches[1];
+                assert_eq!(*idx1, 1);
+                assert!(binds1.is_empty());
+                assert_eq!(**body1, Term::LitInt(2));
+            }
+            other => panic!("expected Match, got {:?}", other),
+        }
+    }
+
+    // ── Dotted name ──
+    #[test]
+    fn dotted_name_ast() {
+        let (bump, arena) = setup();
+        let term = parse_expr_top("Foo.bar", bump, &arena).expect("parse should succeed");
+
+        assert_eq!(*term, Term::Builtin(&"Foo.bar"));
+    }
 }

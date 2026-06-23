@@ -1,4 +1,5 @@
 //! Strong evaluator — reduces terms to (full) normal form.
+//! This evaluator is only for debug use.
 //!
 //! Unlike `whnf`, this evaluator fully computes recursive function calls
 //! (via `inject_self`) and evaluates arguments eagerly for primitive
@@ -8,7 +9,7 @@
 //! During type checking, prefer `WhnfEvaluator` from `crate::core::whnf`.
 
 use crate::core::pool::{SubstitutionContext, TermArena};
-use crate::core::syntax::{Name, Tactic, Term};
+use crate::core::syntax::{Name, Term};
 use crate::pretty::pretty;
 
 /// Strong evaluator — reduces terms to normal form using a bump arena
@@ -68,7 +69,7 @@ impl<'bump> Evaluator<'bump> {
                     // Standalone proof: mechanically expand tactics.
                     // Only `intro` + `exact` is supported here;
                     // `apply` requires type information not available in eval.
-                    let expanded = self.expand_proof_tactics(tactics)?;
+                    let expanded = self.arena.expand_proof_tactics(tactics)?;
                     self.eval(expanded)
                 }
             }
@@ -228,38 +229,6 @@ impl<'bump> Evaluator<'bump> {
         }
     }
 
-    /// Mechanically expand `intro*; exact t` tactics to a lambda term.
-    /// This is used for standalone `by` blocks at runtime.
-    fn expand_proof_tactics(
-        &self,
-        tactics: &'bump [Tactic<'bump>],
-    ) -> Result<&'bump Term<'bump>, String> {
-        let mut intro_count = 0usize;
-        let n = tactics.len();
-        for (i, tactic) in tactics.iter().enumerate() {
-            let is_last = i == n - 1;
-            match tactic {
-                Tactic::Intro(_) if !is_last => intro_count += 1,
-                Tactic::Exact(t) if is_last => {
-                    let mut result = *t;
-                    for _ in 0..intro_count {
-                        result = self.arena.lam(result);
-                    }
-                    return Ok(result);
-                }
-                Tactic::Exact(_) => {
-                    return Err("`exact` must be the last tactic".into());
-                }
-                _ => {
-                    return Err(
-                        "Only `intro`+`exact` tactics are supported in standalone proof eval"
-                            .into(),
-                    );
-                }
-            }
-        }
-        Err("Proof block must end with `exact`".into())
-    }
 }
 
 /// Convenience wrapper for backward-compatible free-function style.

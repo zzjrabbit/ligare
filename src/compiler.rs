@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use bumpalo::Bump;
@@ -10,6 +10,7 @@ use crate::checker::erase::Eraser;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
 use crate::core::syntax::{FuncDef, Name, Term};
+use crate::diagnostic::Diagnostic;
 use crate::front::parser::{TopLevel, parse_expr_top, parse_program};
 use crate::pretty::PrettyPrinter;
 
@@ -52,19 +53,21 @@ impl<'bump> Compiler<'bump> {
     }
 
     /// Process a source file: parse it and handle each top-level item.
-    pub fn process_file(&mut self, file: &str) -> Result<(), String> {
-        let content = fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
+    pub fn process_file(&mut self, file: &str) -> Result<(), Diagnostic> {
+        let content =
+            fs::read_to_string(file).map_err(|e| Diagnostic::new(format!("{}: {}", file, e)))?;
         self.process_str(&content, file)
     }
 
     /// Process source code from a string (for testing).
-    pub fn process_file_str(&mut self, source: &str) -> Result<(), String> {
+    pub fn process_file_str(&mut self, source: &str) -> Result<(), Diagnostic> {
         self.process_str(source, "<str>")
     }
 
-    fn process_str(&mut self, content: &str, file: &str) -> Result<(), String> {
-        let tops = parse_program(&content, self.bump, self.arena)
-            .map_err(|e| format!("{}: parse error: {}", file, e))?;
+    fn process_str(&mut self, content: &str, file: &str) -> Result<(), Diagnostic> {
+        let tops = parse_program(&content, self.bump, self.arena).map_err(|e| {
+            Diagnostic::with_span(format!("{}: parse error: {}", file, e.message), e.span)
+        })?;
         for top in tops {
             self.process_top_level(top, file)?;
         }
@@ -72,27 +75,38 @@ impl<'bump> Compiler<'bump> {
     }
 
     /// Process a source file, collect top-level items, and type-check.
-    pub fn collect_file(&mut self, file: &str) -> Result<(), String> {
+    pub fn collect_file(&mut self, file: &str) -> Result<(), Diagnostic> {
         self.quiet = true;
-        let content = fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
+        let content =
+            fs::read_to_string(file).map_err(|e| Diagnostic::new(format!("{}: {}", file, e)))?;
         self.collect_str(&content, file)
     }
 
     /// Process source code from a string (for testing).
-    pub fn collect_file_str(&mut self, source: &str) -> Result<(), String> {
+    pub fn collect_file_str(&mut self, source: &str) -> Result<(), Diagnostic> {
         self.quiet = true;
         self.collect_str(source, "<str>")
     }
 
-    fn collect_str(&mut self, content: &str, file: &str) -> Result<(), String> {
-        let tops = parse_program(&content, self.bump, self.arena)
-            .map_err(|e| format!("{}: parse error: {}", file, e))?;
+    fn collect_str(&mut self, content: &str, file: &str) -> Result<(), Diagnostic> {
+        let tops = parse_program(&content, self.bump, self.arena).map_err(|e| {
+            Diagnostic::with_span(format!("{}: parse error: {}", file, e.message), e.span)
+        })?;
         for top in &tops {
             self.process_top_level(*top, file)?;
         }
-        // Extract function signatures from the original (un-erased) FuncDef
-        // so the C backend can emit correct parameter and return types.
-        let union_names: std::collections::HashSet<String> = tops
+        let (union_names, struct_names) = self.build_name_sets(&tops);
+        self.collect_signatures(&tops, &union_names, &struct_names)?;
+        let eraser = Eraser::new(self.arena);
+        let evald_tops = self.erase_and_collect_tops(tops, &eraser);
+        self.tops.extend(evald_tops);
+        Ok(())
+    }
+
+    /// Build sets of union and struct type names from the top-level definitions.
+    /// These are used by the C backend to emit correct parameter and return types.
+    fn build_name_sets(&self, tops: &[TopLevel<'bump>]) -> (HashSet<String>, HashSet<String>) {
+        let union_names: HashSet<String> = tops
             .iter()
             .filter_map(|top| match top {
                 TopLevel::TLDef(name, fd)
@@ -103,7 +117,7 @@ impl<'bump> Compiler<'bump> {
                 _ => None,
             })
             .collect();
-        let struct_names: std::collections::HashSet<String> = tops
+        let struct_names: HashSet<String> = tops
             .iter()
             .filter_map(|top| match top {
                 TopLevel::TLDef(name, fd)
@@ -114,10 +128,20 @@ impl<'bump> Compiler<'bump> {
                 _ => None,
             })
             .collect();
-        for top in &tops {
+        (union_names, struct_names)
+    }
+
+    /// Collect function signatures, union types, and struct types from the
+    /// original (un-erased) top-level definitions before erasure.
+    fn collect_signatures(
+        &mut self,
+        tops: &[TopLevel<'bump>],
+        union_names: &HashSet<String>,
+        struct_names: &HashSet<String>,
+    ) -> Result<(), Diagnostic> {
+        for top in tops {
             match top {
                 TopLevel::TLDef(name, func_def) => {
-                    // Collect union types for C codegen
                     if func_def.params.is_empty() && matches!(func_def.body, Term::UnionDef(..)) {
                         self.union_types.push((name, func_def.body));
                     } else if func_def.params.is_empty()
@@ -129,29 +153,36 @@ impl<'bump> Compiler<'bump> {
                             func_def.params,
                             func_def.ret,
                             func_def.body,
-                            &union_names,
-                            &struct_names,
-                        )?;
+                            union_names,
+                            struct_names,
+                        )
+                        .map_err(|e| Diagnostic::new(e))?;
                         self.fun_sigs.push((name, sig));
                     }
                 }
                 _ => {}
             }
         }
-        let eraser = Eraser::new(self.arena);
-        let evald_tops: Vec<TopLevel<'bump>> = tops
-            .into_iter()
+        Ok(())
+    }
+
+    /// Erase, resolve, and filter top-level definitions. Skips union/struct
+    /// typedefs and drops zero-param type aliases after erasure.
+    fn erase_and_collect_tops(
+        &self,
+        tops: Vec<TopLevel<'bump>>,
+        eraser: &Eraser<'bump>,
+    ) -> Vec<TopLevel<'bump>> {
+        tops.into_iter()
             .filter_map(|top| match top {
                 TopLevel::TLDef(_name, func_def)
                     if func_def.params.is_empty()
                         && (matches!(func_def.body, Term::UnionDef(..))
                             || matches!(func_def.body, Term::StructDef(..))) =>
                 {
-                    None // Skip union/struct type definitions (emitted as typedefs)
+                    None
                 }
                 TopLevel::TLDef(name, _func_def) => {
-                    // Use the already-desugared term from env (set by process_top_level)
-                    // instead of re-desugaring from the original FuncDef.
                     let term = self
                         .env
                         .get(name)
@@ -187,8 +218,6 @@ impl<'bump> Compiler<'bump> {
                 }
                 TopLevel::TLCheck(_, _) => None,
             })
-            // Drop zero-param definitions that are type aliases
-            // (bare builtins or union/struct defs with empty body after erasure).
             .filter(|top| {
                 !matches!(
                     top,
@@ -197,15 +226,14 @@ impl<'bump> Compiler<'bump> {
                             && matches!(body, Term::Builtin(_) | Term::UnionDef(..) | Term::StructDef(..))
                 )
             })
-            .collect();
-        self.tops.extend(evald_tops);
-        Ok(())
+            .collect()
     }
 
     /// Evaluate an expression string (for `--eval`).
-    pub fn eval_expr(&self, expr: &str) -> Result<(), String> {
-        let term = parse_expr_top(expr, self.bump, self.arena)
-            .map_err(|err| format!("--eval parse error: {}", err))?;
+    pub fn eval_expr(&self, expr: &str) -> Result<(), Diagnostic> {
+        let term = parse_expr_top(expr, self.bump, self.arena).map_err(|err| {
+            Diagnostic::with_span(format!("--eval parse error: {}", err.message), err.span)
+        })?;
         let resolved = self.resolve_all(term);
         let self_name = self.extract_func_name(term);
         let mut ev = Evaluator::new(self.arena);
@@ -213,7 +241,7 @@ impl<'bump> Compiler<'bump> {
             ev.set_self_name(n);
         }
         match ev.eval(resolved) {
-            Err(err) => Err(format!("--eval error: {}", err)),
+            Err(err) => Err(Diagnostic::new(format!("--eval error: {}", err))),
             Ok(val) => {
                 println!("{}", PrettyPrinter::pretty(val));
                 Ok(())
@@ -234,7 +262,7 @@ impl<'bump> Compiler<'bump> {
     // ── private helpers ──
 
     /// Process a single top-level item.
-    fn process_top_level(&mut self, top: TopLevel<'bump>, file: &str) -> Result<(), String> {
+    fn process_top_level(&mut self, top: TopLevel<'bump>, file: &str) -> Result<(), Diagnostic> {
         match top {
             TopLevel::TLDef(name, func_def) => {
                 // parse_def always wraps the body in a FuncDef.
@@ -277,7 +305,9 @@ impl<'bump> Compiler<'bump> {
                     .checker
                     .check(&empty_ctx(), resolved, resolved_constraint)
                 {
-                    Err(err) => return Err(format!("{}: check failed: {}", file, err)),
+                    Err(err) => {
+                        return Err(Diagnostic::new(format!("{}: check failed: {}", file, err)));
+                    }
                     Ok(_) => {
                         if !self.quiet {
                             println!("[OK]");
@@ -292,7 +322,12 @@ impl<'bump> Compiler<'bump> {
                     .checker
                     .check(&empty_ctx(), resolved_body, resolved_prop)
                 {
-                    Err(err) => return Err(format!("{}: theorem check failed: {}", file, err)),
+                    Err(err) => {
+                        return Err(Diagnostic::new(format!(
+                            "{}: theorem check failed: {}",
+                            file, err
+                        )));
+                    }
                     Ok(_) => {
                         if !self.quiet {
                             println!("[theorem] {}", name);

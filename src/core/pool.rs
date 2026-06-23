@@ -272,6 +272,39 @@ impl<'bump> TermArena<'bump> {
         self.alloc(Term::ByProof(t, tactics))
     }
 
+    /// Mechanically expand `intro*; exact t` tactics to a lambda term.
+    /// This is used for standalone `by` blocks at runtime.
+    pub(crate) fn expand_proof_tactics(
+        &self,
+        tactics: &'bump [Tactic<'bump>],
+    ) -> Result<&'bump Term<'bump>, String> {
+        let mut intro_count = 0usize;
+        let n = tactics.len();
+        for (i, tactic) in tactics.iter().enumerate() {
+            let is_last = i == n - 1;
+            match tactic {
+                Tactic::Intro(_) if !is_last => intro_count += 1,
+                Tactic::Exact(t) if is_last => {
+                    let mut result = *t;
+                    for _ in 0..intro_count {
+                        result = self.lam(result);
+                    }
+                    return Ok(result);
+                }
+                Tactic::Exact(_) => {
+                    return Err("`exact` must be the last tactic".into());
+                }
+                _ => {
+                    return Err(
+                        "Only `intro`+`exact` tactics are supported in standalone proof eval"
+                            .into(),
+                    );
+                }
+            }
+        }
+        Err("Proof block must end with `exact`".into())
+    }
+
     pub fn union_def(
         &self,
         name: Name<'bump>,
