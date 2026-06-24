@@ -12,7 +12,8 @@
 //! - Argument terms in `App(f, a)` are never forced when `f` is not a
 //!   `Lam` or `PrimOp` application.
 
-use crate::core::pool::{SubstitutionContext, TermArena};
+use crate::core::debruijn::SubstitutionContext;
+use crate::core::pool::TermArena;
 use crate::core::syntax::Term;
 
 /// Weak Head Normal Form evaluator.
@@ -73,6 +74,8 @@ impl<'bump> WhnfEvaluator<'bump> {
             | Term::PrimOp(_)
             | Term::Universe(_)
             | Term::Builtin(_)
+            | Term::Named(_)
+            | Term::NamedLam(_, _)
             | Term::AutoProof
             | Term::RefParam => Ok(t),
             Term::UnionDef(..) => Ok(t),
@@ -166,6 +169,14 @@ impl<'bump> WhnfEvaluator<'bump> {
                 }
             }
             _ => {
+                // Normalize arrow type: App(App(->, A), B) → Pi("", A, B)
+                if let Term::App(builtin, dom) = f {
+                    if matches!(*builtin, Term::Builtin(n) | Term::Named(n) if *n == "->") {
+                        let dom_nf = self.whnf(dom)?;
+                        let cod_nf = self.whnf(a)?;
+                        return Ok(self.arena.pi(self.arena.alloc_str(""), dom_nf, cod_nf));
+                    }
+                }
                 let f_val = self.whnf(f)?;
                 if matches!(f_val, Term::Lam(_)) {
                     self.whnf(self.arena.app(f_val, a))
@@ -189,7 +200,6 @@ impl<'bump> WhnfEvaluator<'bump> {
             _ => Ok(self.arena.if_then_else(cond_val, tbranch, fbranch)),
         }
     }
-
 }
 
 /// Convenience wrapper for backward-compatible free-function style.

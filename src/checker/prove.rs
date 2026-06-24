@@ -78,7 +78,7 @@ impl<'bump> TypeChecker<'bump> {
                         }
                         _ => {
                             return Err(format!(
-                                "intro: goal {} is not a function type",
+                                "intro: goal {} is not Pi",
                                 PrettyPrinter::pretty(goal_nf)
                             ));
                         }
@@ -162,7 +162,7 @@ impl<'bump> TypeChecker<'bump> {
             }
         }
         // Named reference in context
-        if let Term::Builtin(name) = t
+        if let Term::Builtin(name) | Term::Named(name) = t
             && let Some(entry) = ctx.lookup_name(name)
         {
             let ty_nf = self.evaluator.whnf(entry.constraint)?;
@@ -171,7 +171,7 @@ impl<'bump> TypeChecker<'bump> {
             }
         }
         Err(format!(
-            "apply: cannot infer a function type for {}",
+            "apply: cannot infer Pi type for {}",
             PrettyPrinter::pretty(t)
         ))
     }
@@ -319,7 +319,7 @@ impl<'bump> TypeChecker<'bump> {
         let Term::App(builtin, a) = *and_app else {
             return None;
         };
-        let Term::Builtin(name) = *builtin else {
+        let (Term::Builtin(name) | Term::Named(name)) = *builtin else {
             return None;
         };
         if *name != BUILTIN_AND {
@@ -332,7 +332,7 @@ impl<'bump> TypeChecker<'bump> {
         let Term::App(builtin2, pa) = *and_intro else {
             return None;
         };
-        let Term::Builtin(n2) = *builtin2 else {
+        let (Term::Builtin(n2) | Term::Named(n2)) = *builtin2 else {
             return None;
         };
         if *n2 != AND_INTRO {
@@ -356,7 +356,7 @@ impl<'bump> TypeChecker<'bump> {
         }
 
         match proof {
-            Term::Builtin(name) if *name == AND_ELIM_LEFT => Ok(()),
+            Term::Builtin(name) | Term::Named(name) if *name == AND_ELIM_LEFT => Ok(()),
             Term::LitBool(true) => Ok(()),
             Term::AutoProof => self.prove_auto(ctx, subject, goal),
             _ => Err(

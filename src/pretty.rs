@@ -7,6 +7,9 @@ impl PrettyPrinter {
         match t {
             Term::Var(i) => format!("${}", i),
             Term::Lam(body) => format!("λ. {}", Self::pretty(body)),
+            Term::NamedLam(name, body) => {
+                format!("fun {} => {}", name, Self::pretty(body))
+            }
             Term::App(f, a) => Self::pretty_app(f, a),
             Term::LitInt(n) => n.to_string(),
             Term::Universe(u) => u.to_string(),
@@ -14,7 +17,7 @@ impl PrettyPrinter {
             Term::Pi(name, a, b) => {
                 format!("(Pi {} : {} => {})", name, Self::pretty(a), Self::pretty(b))
             }
-            Term::Builtin(s) => (*s).to_string(),
+            Term::Builtin(s) | Term::Named(s) => (*s).to_string(),
             Term::PrimOp(op) => op.to_string(),
             Term::LitBool(b) => b.to_string(),
             Term::LitStr(s) => format!("\"{}\"", s),
@@ -131,6 +134,8 @@ impl PrettyPrinter {
             Term::LitInt(_)
             | Term::LitBool(_)
             | Term::Builtin(_)
+            | Term::Named(_)
+            | Term::NamedLam(_, _)
             | Term::Var(_)
             | Term::RefParam
             | Term::AutoProof => format!("-{}", inner),

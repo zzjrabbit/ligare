@@ -2,7 +2,7 @@ use bumpalo::Bump;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::core::syntax::{FuncDef, Name, PrimOp, Tactic, Term, Universe};
+use crate::core::syntax::{Name, PrimOp, Tactic, Term, Universe};
 
 /// A bumpalo-backed string interner.
 ///
@@ -108,6 +108,7 @@ impl<'bump> TermArena<'bump> {
         match t {
             Term::App(fun, arg) => self.app(self.map(fun, f), self.map(arg, f)),
             Term::Lam(body) => self.lam(self.map(body, f)),
+            Term::NamedLam(n, body) => self.named_lam(n, self.map(body, f)),
             Term::Pi(n, a, b) => self.pi(n, self.map(a, f), self.map(b, f)),
             Term::Let(n, v, b, mc) => {
                 let mc2 = mc.map(|c| self.map(c, f));
@@ -205,6 +206,10 @@ impl<'bump> TermArena<'bump> {
         self.alloc(Term::Builtin(name))
     }
 
+    pub fn named(&self, name: Name<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::Named(name))
+    }
+
     pub fn auto_proof(&self) -> &'bump Term<'bump> {
         self.alloc(Term::AutoProof)
     }
@@ -221,6 +226,10 @@ impl<'bump> TermArena<'bump> {
 
     pub fn lam(&self, body: &'bump Term<'bump>) -> &'bump Term<'bump> {
         self.alloc(Term::Lam(body))
+    }
+
+    pub fn named_lam(&self, name: Name<'bump>, body: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::NamedLam(name, body))
     }
 
     pub fn pi(
@@ -356,217 +365,6 @@ impl<'bump> TermArena<'bump> {
         field_index: usize,
     ) -> &'bump Term<'bump> {
         self.alloc(Term::StructProj(subject, field_index))
-    }
-
-    /// Desugar a `FuncDef` into `Annot(Lam(body), Pi(params..., ret))`.
-    pub fn desugar_func_def(&self, func_def: &FuncDef<'bump>) -> &'bump Term<'bump> {
-        let FuncDef {
-            name: _name,
-            params,
-            ret: m_ret,
-            body,
-        } = *func_def;
-        let func_body = params.iter().fold(body, |b, _| self.lam(b));
-        let default = self.builtin(self.alloc_str(crate::config::BUILTIN_DATA));
-        let func_type = params
-            .iter()
-            .rfold(m_ret.unwrap_or(default), |b, (pn, mc)| {
-                self.pi(pn, mc.unwrap_or(default), b)
-            });
-        self.annot(func_body, func_type)
-    }
-}
-
-// ── SubstitutionContext: encapsulates debruijn operations ──
-
-/// Encapsulates de Bruijn index substitution and shifting operations.
-///
-/// These operations traverse the term tree and allocate new nodes in the
-/// arena as needed.  By bundling the arena reference, callers avoid
-/// passing it as a separate argument to every function.
-pub struct SubstitutionContext<'bump> {
-    arena: &'bump TermArena<'bump>,
-}
-
-impl<'bump> SubstitutionContext<'bump> {
-    pub fn new(arena: &'bump TermArena<'bump>) -> Self {
-        Self { arena }
-    }
-
-    pub fn arena(&self) -> &'bump TermArena<'bump> {
-        self.arena
-    }
-
-    /// Substitute: replace de Bruijn index `i` with `s` in term `t`.
-    pub fn subst(
-        &self,
-        s: &'bump Term<'bump>,
-        i: usize,
-        t: &'bump Term<'bump>,
-    ) -> &'bump Term<'bump> {
-        self.subst_cutoff(s, i, 0, t)
-    }
-
-    fn subst_cutoff(
-        &self,
-        s: &'bump Term<'bump>,
-        i: usize,
-        cutoff: usize,
-        t: &'bump Term<'bump>,
-    ) -> &'bump Term<'bump> {
-        if let Term::Var(j) = t
-            && *j == i + cutoff
-        {
-            return self.shift(cutoff as i32, 0, s);
-        }
-        self.traverse_children(t, cutoff as i32, |t, c| {
-            self.subst_cutoff(s, i, c as usize, t)
-        })
-    }
-
-    /// Shift: add `d` to all de Bruijn indices >= `cutoff`.
-    pub fn shift(&self, d: i32, cutoff: i32, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
-        if let Term::Var(j) = t
-            && (*j as i32) >= cutoff
-        {
-            return self.arena.var((*j as i32 + d) as usize);
-        }
-        self.traverse_children(t, cutoff, |t, c| self.shift(d, c, t))
-    }
-
-    /// Shared children-recursion for `shift` and `subst_cutoff`.
-    /// For nodes that bind variables (Lam, Pi, Let), `cutoff` is bumped.
-    fn traverse_children(
-        &self,
-        t: &'bump Term<'bump>,
-        cutoff: i32,
-        recurse: impl Fn(&'bump Term<'bump>, i32) -> &'bump Term<'bump>,
-    ) -> &'bump Term<'bump> {
-        match t {
-            Term::Lam(body) => self.arena.lam(recurse(body, cutoff + 1)),
-            Term::App(f, a) => self.arena.app(recurse(f, cutoff), recurse(a, cutoff)),
-            Term::Pi(n, a, b) => self.arena.pi(n, recurse(a, cutoff), recurse(b, cutoff + 1)),
-            Term::Let(n, v, b, mc) => {
-                let mc2 = mc.map(|c| recurse(c, cutoff));
-                self.arena
-                    .let_(n, recurse(v, cutoff), recurse(b, cutoff + 1), mc2)
-            }
-            Term::IfThenElse(c, th, el) => self.arena.if_then_else(
-                recurse(c, cutoff),
-                recurse(th, cutoff),
-                recurse(el, cutoff),
-            ),
-            Term::Annot(inner, ct) => self
-                .arena
-                .annot(recurse(inner, cutoff), recurse(ct, cutoff)),
-            Term::ByProof(inner, tactics) => {
-                let inner_mapped = inner.map(|t| recurse(t, cutoff));
-                let mapped: Vec<Tactic<'bump>> = tactics
-                    .iter()
-                    .map(|tac| match tac {
-                        Tactic::Exact(t) => Tactic::Exact(recurse(t, cutoff)),
-                        Tactic::Apply(t) => Tactic::Apply(recurse(t, cutoff)),
-                        Tactic::Intro(_) => *tac,
-                        Tactic::Have(n, t) => Tactic::Have(n, recurse(t, cutoff)),
-                    })
-                    .collect();
-                self.arena
-                    .by_proof(inner_mapped, self.arena.alloc_slice(&mapped))
-            }
-            Term::Refine(n, par, p) => {
-                self.arena
-                    .refine(n, recurse(par, cutoff), recurse(p, cutoff))
-            }
-            Term::UnionDef(name, variants) => {
-                let mapped: Vec<_> = variants
-                    .iter()
-                    .map(|(vname, fields)| {
-                        let mf: Vec<_> = fields
-                            .iter()
-                            .map(|(fnm, fc)| (*fnm, recurse(fc, cutoff)))
-                            .collect();
-                        (*vname, self.arena.alloc_slice(&mf))
-                    })
-                    .collect();
-                self.arena.union_def(name, self.arena.alloc_slice(&mapped))
-            }
-            Term::Variant(name, idx, payloads) => {
-                let mapped: Vec<_> = payloads.iter().map(|p| recurse(p, cutoff)).collect();
-                self.arena
-                    .variant(name, *idx, self.arena.alloc_slice(&mapped))
-            }
-            Term::Match(scrut, branches) => {
-                let s = recurse(scrut, cutoff);
-                let mapped: Vec<_> = branches
-                    .iter()
-                    .map(|(idx, binds, body)| {
-                        let mb: Vec<_> = binds
-                            .iter()
-                            .map(|(n, c)| (*n, recurse(c, cutoff)))
-                            .collect();
-                        // branch body binds payload variables → bump cutoff
-                        (
-                            *idx,
-                            self.arena.alloc_slice(&mb),
-                            recurse(body, cutoff + binds.len() as i32),
-                        )
-                    })
-                    .collect();
-                self.arena.match_(s, self.arena.alloc_slice(&mapped))
-            }
-            Term::StructDef(name, fields) => {
-                let mf: Vec<_> = fields
-                    .iter()
-                    .map(|(fnm, fc)| (*fnm, recurse(fc, cutoff)))
-                    .collect();
-                self.arena.struct_def(name, self.arena.alloc_slice(&mf))
-            }
-            Term::StructCons(name, field_values) => {
-                let mapped: Vec<_> = field_values.iter().map(|v| recurse(v, cutoff)).collect();
-                self.arena
-                    .struct_cons(name, self.arena.alloc_slice(&mapped))
-            }
-            Term::StructProj(subject, idx) => {
-                self.arena.struct_proj(recurse(subject, cutoff), *idx)
-            }
-            // Leaf nodes — returned unchanged (Var handled by callers)
-            _ => t,
-        }
-    }
-
-    /// Beta-reduction: substitute arg into the body of a lambda.
-    pub fn beta(
-        &self,
-        lam_body: &'bump Term<'bump>,
-        arg: &'bump Term<'bump>,
-    ) -> &'bump Term<'bump> {
-        let shifted_arg = self.shift(1, 0, arg);
-        let substituted = self.subst(shifted_arg, 0, lam_body);
-        self.shift(-1, 0, substituted)
-    }
-
-    /// Shift that preserves `RefParam` (leaves it untouched).
-    pub fn shift_preserve_refparam(&self, d: i32, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
-        self.shift_refparam_cutoff(d, 0, t)
-    }
-
-    fn shift_refparam_cutoff(
-        &self,
-        d: i32,
-        cutoff: i32,
-        t: &'bump Term<'bump>,
-    ) -> &'bump Term<'bump> {
-        match t {
-            Term::RefParam => t,
-            Term::Var(i) => {
-                if (*i as i32) >= cutoff {
-                    self.arena.var((*i as i32 + d) as usize)
-                } else {
-                    t
-                }
-            }
-            _ => self.shift(d, cutoff, t),
-        }
     }
 }
 

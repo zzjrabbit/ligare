@@ -11,19 +11,28 @@ impl Classifier {
             | Term::LitBool(_)
             | Term::LitStr(_)
             | Term::Lam(_)
+            | Term::NamedLam(_, _)
             | Term::PrimOp(_)
             | Term::RefParam => Some(Universe::UData),
             Term::App(f, _) => Self::classify(ctx, f),
             Term::Universe(u) => Some(*u),
             Term::AutoProof => Some(Universe::UProof),
             Term::Pi(_, _, _) | Term::Refine(_, _, _) => Some(Universe::UProp),
-            Term::Var(i) => ctx.lookup(*i).and_then(|ty| Self::classify(ctx, ty)),
+            // Variables in an empty or unknown context are conservatively
+            // assumed to be data-relevant (this handles function parameters
+            // during erasure, where the typing context is not available).
+            Term::Var(i) => ctx
+                .lookup(*i)
+                .and_then(|ty| Self::classify(ctx, ty))
+                .or(Some(Universe::UData)),
             Term::Annot(t, _) => Self::classify(ctx, t),
             Term::ByProof(Some(t), _) => Self::classify(ctx, t),
             Term::ByProof(None, _) => Some(Universe::UProof),
             Term::Let(_, _, body, _) => Self::classify(ctx, body),
             Term::IfThenElse(_, t, _) => Self::classify(ctx, t),
-            Term::Builtin(name) => classify_builtin(name).or(Some(Universe::UData)),
+            Term::Builtin(name) | Term::Named(name) => {
+                classify_builtin(name).or(Some(Universe::UData))
+            }
             Term::UnionDef(..) => Some(Universe::UProp),
             Term::Variant(..) => Some(Universe::UData),
             Term::StructDef(..) => Some(Universe::UProp),

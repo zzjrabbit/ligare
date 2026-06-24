@@ -2,7 +2,7 @@ mod common;
 
 use common::{bin, leak_bump, parse, s};
 use ligare::core::pool::TermArena;
-use ligare::core::syntax::{FuncDef, PrimOp, Tactic, Term};
+use ligare::core::syntax::{PrimOp, Tactic, Term};
 use ligare::core::whnf::whnf;
 
 fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
@@ -378,7 +378,7 @@ fn recursive_call_partial_reduction() {
 
     fn contains_self_ref(t: &Term<'_>) -> bool {
         match t {
-            Term::Builtin(n) if *n == "fib" => true,
+            Term::Builtin(n) | Term::Named(n) if *n == "fib" => true,
             Term::App(f, a) => contains_self_ref(f) || contains_self_ref(a),
             _ => false,
         }
@@ -425,16 +425,10 @@ fn arithmetic_on_bool_stops_not_errors() {
 #[test]
 fn func_desugars_to_lambda() {
     let (_b, arena) = a();
-    let param_type = Some(arena.builtin(s(&arena, "int")) as &Term<'_>);
-    let params: &[(&str, Option<&Term>)] = arena.alloc_slice(&[(s(&arena, "x"), param_type)]);
+    let dom = arena.builtin(s(&arena, "int"));
     let body = bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1));
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "f"),
-        params,
-        ret: Some(arena.builtin(s(&arena, "int"))),
-        body,
-    });
-    let desugared = arena.desugar_func_def(func_def);
+    // Directly build the desugared form: Annot(Lam(body), Pi("x", int, int))
+    let desugared = arena.annot(arena.lam(body), arena.pi(s(&arena, "x"), dom, dom));
     let result = whnf(&arena, desugared).unwrap();
     match *result {
         Term::Lam(_) => {} // correct: Annot(Lam, Pi) → WHNF strips Annot, leaves Lam

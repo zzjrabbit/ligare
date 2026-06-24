@@ -223,6 +223,7 @@ fn codegen_struct_typedef() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -247,6 +248,7 @@ fn codegen_struct_construction() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -266,6 +268,7 @@ fn codegen_struct_projection() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -285,6 +288,7 @@ fn codegen_struct_projection_uses_real_field_name() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -308,6 +312,7 @@ fn codegen_struct_function_param() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -330,6 +335,7 @@ fn codegen_struct_with_str_field() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -352,6 +358,7 @@ fn codegen_struct_single_field() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -396,6 +403,7 @@ fn codegen_union_with_struct_payload() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -471,6 +479,7 @@ fn codegen_struct_with_union_field() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,

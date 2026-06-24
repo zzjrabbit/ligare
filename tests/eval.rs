@@ -3,7 +3,7 @@ mod common;
 use common::{bin, leak_bump, parse, s};
 use ligare::core::eval::{eval, eval_with_self};
 use ligare::core::pool::TermArena;
-use ligare::core::syntax::{FuncDef, PrimOp, Tactic, Term};
+use ligare::core::syntax::{PrimOp, Tactic, Term};
 
 fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
     let b = leak_bump();
@@ -119,16 +119,16 @@ fn nested_if() {
 #[test]
 fn func_desugars_and_evaluates() {
     let (_b, arena) = a();
-    let params: &[(&str, Option<&Term>)] =
-        arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]);
-    let body = bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1));
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "f"),
-        params,
-        ret: Some(arena.builtin(s(&arena, "int"))),
-        body,
-    });
-    let desugared = arena.desugar_func_def(func_def);
+    // def f (x : int) : int := x + 1
+    // Desugared: Annot(Lam(Var(0) + 1), Pi("x", int, int))
+    let desugared = arena.annot(
+        arena.lam(bin(&arena, PrimOp::Add, arena.var(0), arena.lit_int(1))),
+        arena.pi(
+            s(&arena, "x"),
+            arena.builtin(s(&arena, "int")),
+            arena.builtin(s(&arena, "int")),
+        ),
+    );
     let app = arena.app(desugared, arena.lit_int(5));
     assert_eq!(*eval(&arena, app).unwrap(), Term::LitInt(6));
 }
@@ -261,6 +261,88 @@ fn multiple_beta_nested_lambdas() {
     assert_eq!(
         *eval(&arena, parse("(\\x. \\y. x + y) 3 4", b, &arena)).unwrap(),
         Term::LitInt(7)
+    );
+}
+
+#[test]
+fn multi_param_lambda_beta() {
+    let (b, arena) = a();
+    // (\\x y. x + y) 3 4 → 7
+    assert_eq!(
+        *eval(&arena, parse("(\\x y. x + y) 3 4", b, &arena)).unwrap(),
+        Term::LitInt(7)
+    );
+}
+
+#[test]
+fn multi_param_lambda_three_params() {
+    let (b, arena) = a();
+    // (\\x y z. x + y + z) 1 2 3 → 6
+    assert_eq!(
+        *eval(&arena, parse("(\\x y z. x + y + z) 1 2 3", b, &arena)).unwrap(),
+        Term::LitInt(6)
+    );
+}
+
+#[test]
+fn multi_param_lambda_identity_curried() {
+    let (b, arena) = a();
+    // (\\x y. x) 5 10 → 5
+    assert_eq!(
+        *eval(&arena, parse("(\\x y. x) 5 10", b, &arena)).unwrap(),
+        Term::LitInt(5)
+    );
+}
+
+// ── fun lambda eval ──
+
+#[test]
+fn fun_lam_beta() {
+    let (b, arena) = a();
+    // (fun x => x + 1) 5 → 6
+    assert_eq!(
+        *eval(&arena, parse("(fun x => x + 1) 5", b, &arena)).unwrap(),
+        Term::LitInt(6)
+    );
+}
+
+#[test]
+fn fun_lam_multi_param_beta() {
+    let (b, arena) = a();
+    // (fun x y => x + y) 3 4 → 7
+    assert_eq!(
+        *eval(&arena, parse("(fun x y => x + y) 3 4", b, &arena)).unwrap(),
+        Term::LitInt(7)
+    );
+}
+
+#[test]
+fn fun_lam_constrained_beta() {
+    let (b, arena) = a();
+    // (fun (x : int) => x) 42 → 42
+    assert_eq!(
+        *eval(&arena, parse("(fun (x : int) => x) 42", b, &arena)).unwrap(),
+        Term::LitInt(42)
+    );
+}
+
+#[test]
+fn fun_lam_mixed_params_beta() {
+    let (b, arena) = a();
+    // (fun x (y : int) => x + y) 10 20 → 30
+    assert_eq!(
+        *eval(&arena, parse("(fun x (y : int) => x + y) 10 20", b, &arena)).unwrap(),
+        Term::LitInt(30)
+    );
+}
+
+#[test]
+fn fun_lam_nested() {
+    let (b, arena) = a();
+    // (fun f => f 5) (fun x => x + 1) → 6
+    assert_eq!(
+        *eval(&arena, parse("(fun f => f 5) (fun x => x + 1)", b, &arena)).unwrap(),
+        Term::LitInt(6)
     );
 }
 

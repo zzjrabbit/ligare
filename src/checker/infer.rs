@@ -29,7 +29,7 @@ impl<'bump> TypeChecker<'bump> {
     ) -> Result<(), String> {
         // Check if f is a variant constructor
         let f_dsg = self.desugarer.desugar(f);
-        if let Term::Builtin(name) = f_dsg {
+        if let Term::Builtin(name) | Term::Named(name) = f_dsg {
             if let Some((uname, idx, field_specs)) = self.lookup_variant(name) {
                 if field_specs.len() != 1 {
                     return Err(format!(
@@ -39,7 +39,12 @@ impl<'bump> TypeChecker<'bump> {
                     ));
                 }
                 let field_constraint = field_specs[0].1;
-                self.check(ctx, a, field_constraint)?;
+                // If the field constraint is a type parameter of the union,
+                // skip the field check — the overall constraint check below
+                // will verify the variant belongs to the right union.
+                if !self.is_union_type_param(uname, field_constraint) {
+                    self.check(ctx, a, field_constraint)?;
+                }
                 let variant_term = self.arena.variant(uname, idx, self.arena.alloc_slice(&[a]));
                 return self.check_by_constraint(ctx, variant_term, constraint);
             }
@@ -53,7 +58,11 @@ impl<'bump> TypeChecker<'bump> {
                     ));
                 }
                 let field_constraint = field_specs[0].1;
-                self.check(ctx, a, field_constraint)?;
+                // If the field constraint is a type parameter of the struct,
+                // skip the field check.
+                if !self.is_struct_type_param(sname, field_constraint) {
+                    self.check(ctx, a, field_constraint)?;
+                }
                 let sc = self.arena.struct_cons(sname, self.arena.alloc_slice(&[a]));
                 return self.check_by_constraint(ctx, sc, constraint);
             }
@@ -66,13 +75,19 @@ impl<'bump> TypeChecker<'bump> {
         match self.infer_fun_type(ctx, f)? {
             Some(ty) => {
                 let ty_norm = self.evaluator.whnf(ty)?;
-                if let Term::Pi(_, a_dom, b_cod) = ty_norm {
+                if let Term::Pi(pname, a_dom, b_cod) = ty_norm {
                     self.check(ctx, a, a_dom)?;
-                    self.check_domain_match(b_cod, constraint)?;
+                    // Substitute the argument into the codomain to get the
+                    // actual result type (essential for generics / dependent
+                    // types where the return type references the parameter).
+                    let sub = crate::core::debruijn::SubstitutionContext::new(self.arena);
+                    let result_type = sub.instantiate_pi(a, b_cod);
+                    let result_type = self.subst_pi_binder_name(pname, a, result_type);
+                    self.check_domain_match(result_type, constraint)?;
                     Ok(())
                 } else {
                     Err(format!(
-                        "Cannot apply argument to a non-function: expression has type {}",
+                        "not a function: {}",
                         PrettyPrinter::pretty(ty_norm)
                     ))
                 }
@@ -80,11 +95,11 @@ impl<'bump> TypeChecker<'bump> {
             None => {
                 // No type information — check for undefined names first.
                 let f_dsg = self.desugarer.desugar(f);
-                if let Term::Builtin(name) = f_dsg
+                if let Term::Builtin(name) | Term::Named(name) = f_dsg
                     && check_builtin(name).is_none()
                     && lookup_refine(name, &self.table).is_none()
                 {
-                    return Err(format!("Undefined variable: {}", name));
+                    return Err(format!("unbound: {}", name));
                 }
                 let f_val = self.evaluator.whnf(f_dsg)?;
                 let evald = self.evaluator.whnf(self.arena.app(f_val, a))?;
@@ -114,9 +129,14 @@ impl<'bump> TypeChecker<'bump> {
                 };
                 let ty_norm = self.evaluator.whnf(f2_ty)?;
                 match ty_norm {
-                    Term::Pi(_, a_dom, b_cod) => {
+                    Term::Pi(pname, a_dom, b_cod) => {
                         self.check(ctx, a2, a_dom)?;
-                        Ok(Some(b_cod))
+                        // Substitute a2 for both de Bruijn Var(0) AND for
+                        // Builtin(pname) references (type variable names).
+                        let sub = crate::core::debruijn::SubstitutionContext::new(self.arena);
+                        let resolved = sub.instantiate_pi(a2, b_cod);
+                        let resolved = self.subst_pi_binder_name(pname, a2, resolved);
+                        Ok(Some(resolved))
                     }
                     _ => Ok(None),
                 }
@@ -139,14 +159,14 @@ impl<'bump> TypeChecker<'bump> {
     ) -> Result<(), String> {
         let expected = ctx
             .lookup(i)
-            .ok_or_else(|| format!("Unbound variable index: {}", i))?;
+            .ok_or_else(|| format!("unbound term index {}", i))?;
         let expected_val = self.evaluator.whnf(expected)?;
         let constraint_val = self.evaluator.whnf(constraint)?;
         if expected_val == constraint_val || self.is_refinement_of(expected_val, constraint_val) {
             Ok(())
         } else {
             Err(format!(
-                "Type mismatch: variable is declared as {}, but is used where {} is expected",
+                "constraint mismatch: declared {}, used {}",
                 PrettyPrinter::pretty(expected_val),
                 PrettyPrinter::pretty(constraint_val)
             ))
@@ -223,7 +243,7 @@ impl<'bump> TypeChecker<'bump> {
 
         let norm = self.evaluator.whnf(constraint)?;
         match norm {
-            Term::Builtin(name) => {
+            Term::Builtin(name) | Term::Named(name) => {
                 // Check if term is a Variant — verify union name matches constraint
                 if let Term::Variant(uname, _, _) = term {
                     if uname == name {
@@ -270,17 +290,58 @@ impl<'bump> TypeChecker<'bump> {
                         ))
                     }
                 } else {
-                    Err(format!("Unknown builtin type: {}", name))
+                    Err(format!("unknown constraint: {}", name))
                 }
             }
             Term::Pi("", a, b) => self.check_arrow(ctx, term, a, b),
             Term::Pi(name, a, b) => self.check_pi(ctx, term, name, a, b),
             Term::Universe(Universe::UData) => Ok(()),
-            Term::Var(j) => Err(format!(
-                "Variable {} is a value, not a type — cannot be used as a type constraint",
-                j
-            )),
+            Term::Var(j) => {
+                // A Var as a constraint means we have a type variable
+                // (e.g., from a generic/dependent type).  Look it up in
+                // the context to find the actual constraint.
+                if let Some(c) = ctx.lookup(*j) {
+                    self.check(ctx, term, c)
+                } else {
+                    Err(format!("unbound constraint param at index {}", *j))
+                }
+            }
             Term::App(app_and, a) => self.try_check_logical_op(ctx, term, app_and, a, norm),
+            // When a generic union/struct application is resolved via the env,
+            // the constraint normalizes to the raw UnionDef/StructDef term.
+            Term::UnionDef(uname, _) => {
+                if let Term::Variant(vname, _, _) = term {
+                    if vname == uname {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "Expected variant of {}, got variant of {}",
+                            uname, vname
+                        ))
+                    }
+                } else {
+                    Err(format!(
+                        "Expected a variant of {}, got {}",
+                        uname,
+                        PrettyPrinter::pretty(term)
+                    ))
+                }
+            }
+            Term::StructDef(sname, _) => {
+                if let Term::StructCons(cname, _) = term {
+                    if cname == sname {
+                        Ok(())
+                    } else {
+                        Err(format!("Expected struct {}, got struct {}", sname, cname))
+                    }
+                } else {
+                    Err(format!(
+                        "Expected a struct {}, got {}",
+                        sname,
+                        PrettyPrinter::pretty(term)
+                    ))
+                }
+            }
             _ => {
                 if let Some(result) = self.try_bool_constraint(term, norm) {
                     return result;
@@ -292,7 +353,7 @@ impl<'bump> TypeChecker<'bump> {
                     self.prove_auto(ctx, term, pred)
                 } else {
                     Err(format!(
-                        "{} cannot be used as a type constraint",
+                        "cannot use {} as a constraint",
                         PrettyPrinter::pretty(norm)
                     ))
                 }
@@ -309,9 +370,13 @@ impl<'bump> TypeChecker<'bump> {
         norm: &'bump Term<'bump>,
     ) -> Result<(), String> {
         // Single-arg case: (not A) — vacuous operators always succeed.
-        if let Term::Builtin(name) = head {
+        if let Term::Builtin(name) | Term::Named(name) = head {
             if logic_kind(name) == Some(LogicKind::Vacuous) {
                 return Ok(());
+            }
+            // Check if this is a union/struct type application like `Option int`
+            if let Some(result) = self.try_check_named_type_app(ctx, term, name, norm) {
+                return result;
             }
             return self.check_app_constraint(ctx, term, norm);
         }
@@ -319,7 +384,7 @@ impl<'bump> TypeChecker<'bump> {
         let Term::App(builtin, b) = head else {
             return self.check_app_constraint(ctx, term, norm);
         };
-        let Term::Builtin(name) = *builtin else {
+        let (Term::Builtin(name) | Term::Named(name)) = *builtin else {
             return self.check_app_constraint(ctx, term, norm);
         };
         match logic_kind(name) {
@@ -331,8 +396,84 @@ impl<'bump> TypeChecker<'bump> {
                 .check(ctx, term, arg)
                 .or_else(|_| self.check(ctx, term, b)),
             Some(LogicKind::Vacuous) => Ok(()),
-            None => self.check_app_constraint(ctx, term, norm),
+            None => {
+                // Check if this is a multi-arg union/struct application
+                if let Some(result) = self.try_check_named_type_app(ctx, term, name, norm) {
+                    return result;
+                }
+                self.check_app_constraint(ctx, term, norm)
+            }
         }
+    }
+
+    /// Check a term against a named type application like `Option int` or `Pair int bool`.
+    /// Returns `Some(result)` if `name` is a union or struct, `None` otherwise.
+    fn try_check_named_type_app(
+        &self,
+        _ctx: &Context<'bump>,
+        term: &'bump Term<'bump>,
+        name: &str,
+        _norm: &'bump Term<'bump>,
+    ) -> Option<Result<(), String>> {
+        if self.lookup_union(name).is_some() {
+            // Union type application — check if term is a Variant of this union
+            if let Term::Variant(uname, _, _) = term {
+                if *uname == name {
+                    Some(Ok(()))
+                } else {
+                    Some(Err(format!(
+                        "Expected variant of {}, got variant of {}",
+                        name, uname
+                    )))
+                }
+            } else {
+                Some(Err(format!(
+                    "Expected a variant of {}, got {}",
+                    name,
+                    PrettyPrinter::pretty(term)
+                )))
+            }
+        } else if self.lookup_struct(name).is_some() {
+            // Struct type application — check if term is a StructCons of this struct
+            if let Term::StructCons(sname, _) = term {
+                if *sname == name {
+                    Some(Ok(()))
+                } else {
+                    Some(Err(format!(
+                        "Expected struct {}, got struct {}",
+                        name, sname
+                    )))
+                }
+            } else {
+                Some(Err(format!(
+                    "Expected a struct {}, got {}",
+                    name,
+                    PrettyPrinter::pretty(term)
+                )))
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Returns true if a field constraint is a type parameter of the given union.
+    fn is_union_type_param(&self, union_name: &str, constraint: &Term<'bump>) -> bool {
+        if let Term::Builtin(name) | Term::Named(name) = constraint {
+            if let Some((_, type_params)) = self.lookup_union(union_name) {
+                return type_params.iter().any(|p| **p == **name);
+            }
+        }
+        false
+    }
+
+    /// Returns true if a field constraint is a type parameter of the given struct.
+    fn is_struct_type_param(&self, struct_name: &str, constraint: &Term<'bump>) -> bool {
+        if let Term::Builtin(name) | Term::Named(name) = constraint {
+            if let Some((_, type_params)) = self.lookup_struct(struct_name) {
+                return type_params.iter().any(|p| **p == **name);
+            }
+        }
+        false
     }
 
     pub(crate) fn check_arrow(
@@ -424,7 +565,7 @@ impl<'bump> TypeChecker<'bump> {
         }
 
         Err(format!(
-            "{} cannot be used as a type constraint",
+            "cannot use {} as a constraint",
             PrettyPrinter::pretty(constraint)
         ))
     }
@@ -445,11 +586,15 @@ impl<'bump> TypeChecker<'bump> {
             (Term::Refine(_, parent, _), other) | (other, Term::Refine(_, parent, _)) => {
                 self.check_pi_match(parent, other)
             }
-            (Term::Builtin(n1), Term::Builtin(n2)) if n1 == n2 => Ok(()),
+            (Term::Builtin(n1) | Term::Named(n1), Term::Builtin(n2) | Term::Named(n2))
+                if n1 == n2 =>
+            {
+                Ok(())
+            }
             _ if Self::is_data_like(a) || Self::is_data_like(c) => Ok(()),
             _ if a == c => Ok(()),
             _ => Err(format!(
-                "Type mismatch: expected {}, got {}",
+                "constraint mismatch: expected {}, got {}",
                 PrettyPrinter::pretty(constraint),
                 PrettyPrinter::pretty(annot)
             )),
@@ -465,24 +610,62 @@ impl<'bump> TypeChecker<'bump> {
     ) -> Result<(), String> {
         let a_val = self.evaluator.whnf(annot)?;
         let c_val = self.evaluator.whnf(constraint)?;
+        // Compare Pi types ignoring parameter names (e.g. `Pi("x",A,B)` ≡ `Pi("",A,B)`)
         let ok = a_val == c_val
+            || Self::pi_equiv(a_val, c_val)
             || self.is_refinement_of(c_val, a_val)
             || Self::is_data_like(c_val)
-            || Self::is_data_like(a_val);
+            || Self::is_data_like(a_val)
+            || self.named_type_equiv(a_val, c_val);
         if ok {
             Ok(())
         } else {
             Err(format!(
-                "Argument type mismatch: expected {}, but argument has type {}",
+                "argument constraint: expected {}, got {}",
                 PrettyPrinter::pretty(a_val),
                 PrettyPrinter::pretty(c_val)
             ))
         }
     }
 
+    /// Check if two terms represent the same union/struct type application,
+    /// even if one side is a resolved `UnionDef`/`StructDef` and the other is
+    /// an unresolved `App(Builtin(name), …)`.
+    fn named_type_equiv(&self, a: &'bump Term<'bump>, b: &'bump Term<'bump>) -> bool {
+        let extract = |t: &'bump Term<'bump>| -> Option<&str> {
+            match t {
+                Term::UnionDef(name, _) | Term::StructDef(name, _) => Some(name),
+                Term::App(head, _) => {
+                    if let Term::Builtin(n) | Term::Named(n) = *head
+                        && (self.lookup_union(n).is_some() || self.lookup_struct(n).is_some())
+                    {
+                        Some(n)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+        match (extract(a), extract(b)) {
+            (Some(n1), Some(n2)) => n1 == n2,
+            _ => false,
+        }
+    }
+
+    /// Check if two Pi types are equivalent ignoring parameter names.
+    fn pi_equiv(a: &'bump Term<'bump>, b: &'bump Term<'bump>) -> bool {
+        match (a, b) {
+            (Term::Pi(_, a_dom, a_cod), Term::Pi(_, b_dom, b_cod)) => {
+                a_dom == b_dom && a_cod == b_cod
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn constraint_name<'a>(&self, t: &Term<'a>) -> &'a str {
         match t {
-            Term::Builtin(n) => n,
+            Term::Builtin(n) | Term::Named(n) => n,
             Term::Refine(n, _, _) => n,
             _ => "?",
         }
@@ -498,7 +681,7 @@ impl<'bump> TypeChecker<'bump> {
         }
         match t1 {
             Term::Refine(_, parent, _) => self.is_refinement_of(parent, t2),
-            Term::Builtin(n) => lookup_refine(n, &self.table)
+            Term::Builtin(n) | Term::Named(n) => lookup_refine(n, &self.table)
                 .map(|(parent, _)| self.is_refinement_of(parent, t2))
                 .unwrap_or(false),
             _ => false,
@@ -524,15 +707,15 @@ impl<'bump> TypeChecker<'bump> {
         constraint: &'bump Term<'bump>,
     ) -> Result<(), String> {
         // Look up the struct definition
-        let sdef = self
+        let (sdef, _) = self
             .lookup_struct(sname)
-            .ok_or_else(|| format!("Unknown struct type: {}", sname))?;
+            .ok_or_else(|| format!("unknown struct: {}", sname))?;
         let Term::StructDef(_, fields) = sdef else {
-            return Err(format!("{} is not a struct type", sname));
+            return Err(format!("{} is not a struct", sname));
         };
         if field_values.len() != fields.len() {
             return Err(format!(
-                "Struct {} expects {} field(s), got {}",
+                "{} expects {} field(s), got {}",
                 sname,
                 fields.len(),
                 field_values.len()
@@ -541,7 +724,7 @@ impl<'bump> TypeChecker<'bump> {
         // Check each field value against its constraint
         for (i, (fname, fconstraint)) in fields.iter().enumerate() {
             self.check(ctx, field_values[i], fconstraint)
-                .map_err(|e| format!("In field '{}' of struct {}: {}", fname, sname, e))?;
+                .map_err(|e| format!("struct {} field '{}': {}", sname, fname, e))?;
         }
         // Now check the constructed struct against the target constraint
         self.check_by_constraint(ctx, self.arena.struct_cons(sname, field_values), constraint)
@@ -562,37 +745,60 @@ impl<'bump> TypeChecker<'bump> {
             if let Some(field_val) = field_values.get(idx) {
                 return self.check(ctx, field_val, constraint);
             } else {
-                return Err(format!("Struct {} has no field at index {}", sname, idx));
+                return Err(format!("struct {}: no field at index {}", sname, idx));
             }
         }
-        // For variables, look up the type in the context
+        // For variables, look up the constraint in the context
         if let Term::Var(i) = subject_val {
             if let Some(ty) = ctx.lookup(*i) {
                 let ty_nf = self.evaluator.whnf(ty)?;
-                if let Term::Builtin(sname) = ty_nf {
-                    if let Some(sdef) = self.lookup_struct(sname) {
+                if let Term::Builtin(sname) | Term::Named(sname) = ty_nf {
+                    if let Some((sdef, _)) = self.lookup_struct(sname) {
                         if let Term::StructDef(_, fields) = sdef {
                             if let Some((_, field_constraint)) = fields.get(idx) {
-                                // The projection type is the field's constraint
+                                // The projection constraint is the field's constraint
                                 return self.check_domain_match(field_constraint, constraint);
                             }
                         }
                     }
                 }
             }
-            return Err(format!("Variable has no struct type in context"));
+            return Err(format!("term has no struct constraint"));
         }
-        // Subject is a literal or non-struct type — reject
+        // Subject is a literal — reject
         if matches!(
             subject_val,
             Term::LitInt(_) | Term::LitBool(_) | Term::LitStr(_) | Term::Lam(_)
         ) {
             return Err(format!(
-                "Cannot project field from {}: expected a struct",
+                "cannot project from {}: not a struct",
                 PrettyPrinter::pretty(subject_val)
             ));
         }
         // Subject is not yet concretely known — accept (conservative)
         Ok(())
+    }
+
+    /// After peeling a Pi binder via `instantiate_pi`, also substitute
+    /// any remaining `Builtin`/`Named` references to the binder's name.
+    /// This handles the common case where the parser keeps type-parameter
+    /// names as `Builtin` nodes (rather than de Bruijn `Var` indices).
+    fn subst_pi_binder_name(
+        &self,
+        pname: crate::core::syntax::Name<'bump>,
+        arg: &'bump Term<'bump>,
+        t: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        if pname.is_empty() {
+            return t;
+        }
+        self.arena.map(t, &|node| {
+            if let Term::Builtin(n) | Term::Named(n) = node {
+                if *n == pname {
+                    return Some(arg);
+                }
+            }
+            None
+        })
     }
 }

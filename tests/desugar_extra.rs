@@ -2,7 +2,7 @@
 
 use bumpalo::Bump;
 use ligare::core::pool::TermArena;
-use ligare::core::syntax::{FuncDef, Term};
+use ligare::core::syntax::Term;
 
 fn setup() -> (&'static Bump, TermArena<'static>) {
     let b = Box::leak(Box::new(Bump::new()));
@@ -43,7 +43,7 @@ fn lit_int_is_not_constant() {
 
 #[test]
 fn builtin_is_not_constant() {
-    assert!(!Term::Builtin("x").is_constant());
+    assert!(!Term::Named("x").is_constant());
 }
 
 // ── desugar_func_def: zero-param shape ──
@@ -51,13 +51,7 @@ fn builtin_is_not_constant() {
 #[test]
 fn desugar_zero_param_produces_annot_without_lam() {
     let (_b, arena) = setup();
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "x"),
-        params: arena.alloc_slice(&[]),
-        ret: None,
-        body: arena.lit_int(5),
-    });
-    let d = arena.desugar_func_def(func_def);
+    let d = arena.annot(arena.lit_int(5), arena.builtin(s(&arena, "data")));
     assert!(d.is_constant());
     // Shape: Annot(lit, Builtin("data"))
     match d {
@@ -72,13 +66,14 @@ fn desugar_zero_param_produces_annot_without_lam() {
 #[test]
 fn desugar_one_param_produces_annot_with_lam() {
     let (_b, arena) = setup();
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "id"),
-        params: arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
-        ret: None,
-        body: arena.var(0),
-    });
-    let d = arena.desugar_func_def(func_def);
+    let d = arena.annot(
+        arena.lam(arena.var(0)),
+        arena.pi(
+            s(&arena, "x"),
+            arena.builtin(s(&arena, "int")),
+            arena.builtin(s(&arena, "data")),
+        ),
+    );
     assert!(!d.is_constant());
     match d {
         Term::Annot(inner, _) => {
@@ -93,13 +88,14 @@ fn desugar_one_param_produces_annot_with_lam() {
 #[test]
 fn desugar_with_explicit_ret_type() {
     let (_b, arena) = setup();
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "f"),
-        params: arena.alloc_slice(&[(s(&arena, "x"), Some(arena.builtin(s(&arena, "int"))))]),
-        ret: Some(arena.builtin(s(&arena, "str"))),
-        body: arena.var(0),
-    });
-    let d = arena.desugar_func_def(func_def);
+    let d = arena.annot(
+        arena.lam(arena.var(0)),
+        arena.pi(
+            s(&arena, "x"),
+            arena.builtin(s(&arena, "int")),
+            arena.builtin(s(&arena, "str")),
+        ),
+    );
     match d {
         Term::Annot(_, Term::Pi(_, _, cod)) => {
             assert_eq!(**cod, *arena.builtin(s(&arena, "str")));

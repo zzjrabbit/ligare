@@ -24,7 +24,7 @@ The constraint relationship replaces the "type ascription" found in traditional 
 **Example**  
 ```ligare
 3 : int       -- 3 is constrained by int
-int : data    -- int is constrained by data
+int : prop    -- int is constrained by data
 ```
 
 ### 2.3 Levels
@@ -167,8 +167,15 @@ Available tactics:
 
 ### Lambda expressions
 ```ligare
+-- Legacy syntax (still supported)
 \x. x + 1
 \a. \b. a + b
+
+-- New `fun` syntax (preferred)
+fun x => x + 1
+fun x y => x + y
+fun (x : int) => x + 1
+fun a (b : int) => a + b
 ```
 
 ### Let expressions
@@ -235,9 +242,7 @@ typedef struct Point {
 } Point;
 ```
 
-## 10. Union Types *(planned)*
-
-> ⚠️ This feature is not yet implemented. The syntax below represents the intended design.
+## 10. Union Types
 
 A union definition is a **constraint** — it lives in the `prop` universe and is erased after type checking.  Union *values* (variant instances) live in `data` and are retained at runtime.
 

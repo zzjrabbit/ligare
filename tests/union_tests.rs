@@ -127,6 +127,7 @@ fn codegen_recursive_union_typedef() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -150,6 +151,7 @@ fn codegen_recursive_variant_address_of() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -264,6 +266,7 @@ fn codegen_match_with_binding_emits_decl() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -287,6 +290,7 @@ fn codegen_multiple_matches_unique_vars() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -309,6 +313,7 @@ fn codegen_function_returning_union() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -332,6 +337,7 @@ fn codegen_tagged_union_typedef() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -355,6 +361,7 @@ fn codegen_empty_main_with_no_output() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,

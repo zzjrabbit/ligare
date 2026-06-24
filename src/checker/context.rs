@@ -1,4 +1,5 @@
-use crate::core::pool::{SubstitutionContext, TermArena};
+use crate::core::debruijn::SubstitutionContext;
+use crate::core::pool::TermArena;
 use crate::core::syntax::{Name, Term, Universe};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,7 +134,7 @@ pub fn expand_constraint<'bump>(
     let Term::App(builtin, arg) = constraint else {
         return None;
     };
-    let Term::Builtin(name) = *builtin else {
+    let (Term::Builtin(name) | Term::Named(name)) = *builtin else {
         return None;
     };
     let (parent, body) = lookup_refine(name, table)?;

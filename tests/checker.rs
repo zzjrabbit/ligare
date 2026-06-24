@@ -4,7 +4,7 @@ use common::{bin, leak_bump, parse, parse_constraint, s};
 use ligare::checker::check;
 use ligare::checker::context::{add_refine, empty_ctx, empty_table};
 use ligare::core::pool::TermArena;
-use ligare::core::syntax::{FuncDef, PrimOp, Tactic, Term};
+use ligare::core::syntax::{PrimOp, Tactic, Term};
 
 fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
     let b = leak_bump();
@@ -130,24 +130,21 @@ fn refinement_auto_proof() {
 
 // ── Multi-parameter application tests (regression: Pi order bug) ──
 
-/// Build a two-param FuncDef for testing applications, then desugar it.
+/// Build a two-param function as a desugared term: Annot(Lam(Lam(body)), Pi(a, t1, Pi(b, t2, int)))
 fn make_two_param_func<'bump>(
     arena: &'bump TermArena<'bump>,
     param1_type: &'bump Term<'bump>,
     param2_type: &'bump Term<'bump>,
     body: &'bump Term<'bump>,
 ) -> &'bump Term<'bump> {
-    let params = &[
-        (s(arena, "a"), Some(param1_type)),
-        (s(arena, "b"), Some(param2_type)),
-    ];
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(arena, "f"),
-        params: arena.alloc_slice(params),
-        ret: Some(arena.builtin(s(arena, "int"))),
-        body,
-    });
-    arena.desugar_func_def(func_def)
+    arena.annot(
+        arena.lam(arena.lam(body)),
+        arena.pi(
+            s(arena, "a"),
+            param1_type,
+            arena.pi(s(arena, "b"), param2_type, arena.builtin(s(arena, "int"))),
+        ),
+    )
 }
 
 /// Build a curried application: f a1 a2
@@ -319,18 +316,24 @@ fn app_two_params_refinement_ge_zero_rejects_negative() {
 #[test]
 fn app_three_params_order_check() {
     let (_b, arena) = a();
-    let params = &[
-        (s(&arena, "x"), Some(arena.builtin(s(&arena, "int")))),
-        (s(&arena, "y"), Some(arena.builtin(s(&arena, "bool")))),
-        (s(&arena, "z"), Some(arena.builtin(s(&arena, "int")))),
-    ];
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "f"),
-        params: arena.alloc_slice(params),
-        ret: Some(arena.builtin(s(&arena, "int"))),
-        body: bin(&arena, PrimOp::Add, arena.var(2), arena.var(0)),
-    });
-    let func = arena.desugar_func_def(func_def);
+    // def f (x : int) (y : bool) (z : int) : int := x + z
+    // Desugared: Annot(Lam(Lam(Lam(x+z))), Pi(x, int, Pi(y, bool, Pi(z, int, int))))
+    let func = arena.annot(
+        arena.lam(arena.lam(arena.lam(bin(&arena, PrimOp::Add, arena.var(2), arena.var(0))))),
+        arena.pi(
+            s(&arena, "x"),
+            arena.builtin(s(&arena, "int")),
+            arena.pi(
+                s(&arena, "y"),
+                arena.builtin(s(&arena, "bool")),
+                arena.pi(
+                    s(&arena, "z"),
+                    arena.builtin(s(&arena, "int")),
+                    arena.builtin(s(&arena, "int")),
+                ),
+            ),
+        ),
+    );
     // Correct: int, bool, int
     let term = arena.app(
         arena.app(arena.app(func, arena.lit_int(1)), arena.lit_bool(true)),
@@ -345,18 +348,24 @@ fn app_three_params_order_check() {
 #[test]
 fn app_three_params_wrong_middle() {
     let (_b, arena) = a();
-    let params = &[
-        (s(&arena, "x"), Some(arena.builtin(s(&arena, "int")))),
-        (s(&arena, "y"), Some(arena.builtin(s(&arena, "bool")))),
-        (s(&arena, "z"), Some(arena.builtin(s(&arena, "int")))),
-    ];
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "f"),
-        params: arena.alloc_slice(params),
-        ret: Some(arena.builtin(s(&arena, "int"))),
-        body: bin(&arena, PrimOp::Add, arena.var(2), arena.var(0)),
-    });
-    let func = arena.desugar_func_def(func_def);
+    // def f (x : int) (y : bool) (z : int) : int := x + z
+    // Desugared: Annot(Lam(Lam(Lam(x+z))), Pi(x, int, Pi(y, bool, Pi(z, int, int))))
+    let func = arena.annot(
+        arena.lam(arena.lam(arena.lam(bin(&arena, PrimOp::Add, arena.var(2), arena.var(0))))),
+        arena.pi(
+            s(&arena, "x"),
+            arena.builtin(s(&arena, "int")),
+            arena.pi(
+                s(&arena, "y"),
+                arena.builtin(s(&arena, "bool")),
+                arena.pi(
+                    s(&arena, "z"),
+                    arena.builtin(s(&arena, "int")),
+                    arena.builtin(s(&arena, "int")),
+                ),
+            ),
+        ),
+    );
     // Wrong: second arg should be bool, but we pass int
     let term = arena.app(
         arena.app(arena.app(func, arena.lit_int(1)), arena.lit_int(42)),
@@ -562,14 +571,8 @@ fn constraint_not_always_passes() {
 #[test]
 fn zero_param_func_constant() {
     let (_b, arena) = a();
-    // def x : int := 5 → FuncDef with no params, type int, body 5
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "x"),
-        params: arena.alloc_slice(&[]),
-        ret: Some(arena.builtin(s(&arena, "int"))),
-        body: arena.lit_int(5),
-    });
-    let func = arena.desugar_func_def(func_def);
+    // def x : int := 5 → Annot(body, ret) for zero-param definitions
+    let func = arena.annot(arena.lit_int(5), arena.builtin(s(&arena, "int")));
     assert_eq!(
         check_empty(&arena, func, arena.builtin(s(&arena, "int"))),
         Ok(())
@@ -579,13 +582,8 @@ fn zero_param_func_constant() {
 #[test]
 fn zero_param_func_wrong_type_fails() {
     let (_b, arena) = a();
-    let func_def = arena.bump().alloc(FuncDef {
-        name: s(&arena, "x"),
-        params: arena.alloc_slice(&[]),
-        ret: Some(arena.builtin(s(&arena, "int"))),
-        body: arena.lit_int(5),
-    });
-    let func = arena.desugar_func_def(func_def);
+    // def x : int := 5 → Annot(body, ret) for zero-param definitions
+    let func = arena.annot(arena.lit_int(5), arena.builtin(s(&arena, "int")));
     assert!(check_empty(&arena, func, arena.builtin(s(&arena, "bool"))).is_err());
 }
 

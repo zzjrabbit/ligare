@@ -1,0 +1,68 @@
+-- Generic type definitions and functions
+-- Tests for parametric polymorphism in Ligare
+
+-- Generic identity function
+def id (A : prop) (x : A) : A := x
+
+#check id int 5 : int
+#check id bool true : bool
+#check id str "hello" : str
+
+-- Show evaluation
+#show id int 42
+
+-- Generic constant function (K combinator)
+def konst (A : prop) (B : prop) (x : A) (y : B) : A := x
+
+#check konst int bool 5 true : int
+
+-- Generic function with type param used only in domain
+def to_int (A : prop) (x : A) : int := 0
+
+#check to_int str "hello" : int
+#check to_int bool false : int
+
+-- Multiple type params with prop params
+def triple (A : prop) (B : prop) (C : prop) (a : A) (b : B) (c : C) : A := a
+
+#check triple int bool str 1 true "one" : int
+
+-- Generic with prop universe constraint
+def id_type (A : prop) (x : A) : A := x
+
+#check id_type int 5 : int
+
+-- Only type params, no data params
+def unit (A : prop) : int := 0
+
+#check unit int : int
+
+-- Nested generic applications
+#check id int (id int 7) : int
+#show id int 100
+
+-- ── Generic Option type ──
+
+def Option (A : prop) : prop := union
+  | None
+  | Some of (val : A)
+
+#check None : Option int
+#check Some 42 : Option int
+#check Some true : Option bool
+#check Some "hi" : Option str
+
+-- Use Option with a generic function
+def map_option (A : prop) (B : prop) (f : A -> B) (opt : Option A) : Option B :=
+  match opt with
+  | None => None
+  | Some x => Some (f x)
+
+#check map_option int int (id int) (Some 5) : Option int
+
+def unwrap (A : prop) (opt : Option A) (default : A) : A :=
+  match opt with
+  | None => default
+  | Some x => x
+
+#show unwrap int (Some 42) 0

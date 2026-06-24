@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use crate::config::{
     BUILTIN_AND, BUILTIN_BOOL, BUILTIN_DATA, BUILTIN_IMPLIES, BUILTIN_INT, BUILTIN_NOT, BUILTIN_OR,
-    BUILTIN_PROOF, BUILTIN_STR, BUILTIN_THEOREM,
+    BUILTIN_PROOF, BUILTIN_PROP, BUILTIN_STR, BUILTIN_THEOREM,
 };
 use crate::core::syntax::{Term, Universe};
 use crate::pretty::PrettyPrinter;
@@ -27,10 +27,7 @@ fn check_int(t: &Term<'_>) -> Result<(), String> {
     if matches!(t, Term::LitInt(_)) {
         Ok(())
     } else {
-        Err(format!(
-            "Expected an integer, but got {}",
-            PrettyPrinter::pretty(t)
-        ))
+        Err(format!("expected int, got {}", PrettyPrinter::pretty(t)))
     }
 }
 
@@ -38,17 +35,14 @@ fn check_bool(t: &Term<'_>) -> Result<(), String> {
     if matches!(t, Term::LitBool(_)) {
         Ok(())
     } else {
-        Err(format!(
-            "Expected a boolean, but got {}",
-            PrettyPrinter::pretty(t)
-        ))
+        Err(format!("expected bool, got {}", PrettyPrinter::pretty(t)))
     }
 }
 
 fn check_str(t: &Term<'_>) -> Result<(), String> {
     match t {
         Term::LitStr(_) => Ok(()),
-        _ => Err(format!("Expected string, got: {:?}", t)),
+        _ => Err(format!("expected str, got {}", PrettyPrinter::pretty(t))),
     }
 }
 
@@ -70,6 +64,7 @@ static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|
         (BUILTIN_BOOL, entry(Universe::UProp, check_bool, None)),
         (BUILTIN_STR, entry(Universe::UProp, check_str, None)),
         (BUILTIN_DATA, entry(Universe::UProp, check_any, None)),
+        (BUILTIN_PROP, entry(Universe::UProp, check_any, None)),
         (BUILTIN_THEOREM, entry(Universe::UTheorem, check_any, None)),
         (BUILTIN_PROOF, entry(Universe::UProof, check_any, None)),
         (

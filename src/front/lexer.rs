@@ -25,6 +25,8 @@ pub enum Token {
     False,
     #[token("by")]
     KwBy,
+    #[token("fun")]
+    KwFun,
     #[token("func")]
     KwFunc,
     #[token("where")]

@@ -50,7 +50,7 @@ impl<'bump> Eraser<'bump> {
             Term::Refine(_, parent, _pred) => parent,
             Term::Universe(Universe::UData) => t,
             Term::Universe(_) => self.unit(),
-            Term::Builtin(_) => {
+            Term::Builtin(_) | Term::Named(_) => {
                 if classify(&Context::empty(), t) == Some(Universe::UData) {
                     t
                 } else {
@@ -61,6 +61,7 @@ impl<'bump> Eraser<'bump> {
             | Term::LitBool(_)
             | Term::LitStr(_)
             | Term::Lam(_)
+            | Term::NamedLam(_, _)
             | Term::PrimOp(_)
             | Term::RefParam
             | Term::Var(_) => t,

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use bumpalo::Bump;
+use ligare::core::debruijn::desugar;
 use ligare::core::pool::TermArena;
 use ligare::core::syntax::{Name, PrimOp, Term};
 use ligare::front::parser::parse_expr_top;
@@ -27,14 +28,16 @@ pub fn s<'bump>(arena: &TermArena<'bump>, s: &str) -> Name<'bump> {
     arena.alloc_str(s)
 }
 
-/// Parse an expression using the given bump + arena.
+/// Parse an expression and desugar it (NamedLam → Lam, Named → Var).
 #[track_caller]
 pub fn parse<'bump>(
     input: &str,
     _bump: &'bump Bump,
     arena: &'bump TermArena<'bump>,
 ) -> &'bump Term<'bump> {
-    parse_expr_top(input, _bump, arena).unwrap_or_else(|e| panic!("parse error in test: {}", e))
+    let raw = parse_expr_top(input, _bump, arena)
+        .unwrap_or_else(|e| panic!("parse error in test: {}", e));
+    desugar(arena, raw)
 }
 
 /// Parse a constraint expression.

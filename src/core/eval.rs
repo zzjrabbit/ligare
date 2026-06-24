@@ -8,7 +8,8 @@
 //!
 //! During type checking, prefer `WhnfEvaluator` from `crate::core::whnf`.
 
-use crate::core::pool::{SubstitutionContext, TermArena};
+use crate::core::debruijn::SubstitutionContext;
+use crate::core::pool::TermArena;
 use crate::core::syntax::{Name, Term};
 use crate::pretty::pretty;
 
@@ -88,7 +89,9 @@ impl<'bump> Evaluator<'bump> {
             | Term::LitStr(_)
             | Term::PrimOp(_)
             | Term::Universe(_)
-            | Term::Builtin(_) => Ok(t),
+            | Term::Builtin(_)
+            | Term::Named(_)
+            | Term::NamedLam(_, _) => Ok(t),
             Term::UnionDef(..) => Ok(t),
             Term::StructDef(..) => Ok(t),
             Term::StructCons(name, field_values) => {
@@ -181,7 +184,7 @@ impl<'bump> Evaluator<'bump> {
     ) -> &'bump Term<'bump> {
         if let Some(name) = self.self_name {
             self.arena.map(t, &|node| {
-                if let Term::Builtin(n) = node
+                if let Term::Builtin(n) | Term::Named(n) = node
                     && *n == name
                 {
                     Some(self_term)
@@ -228,7 +231,6 @@ impl<'bump> Evaluator<'bump> {
             )),
         }
     }
-
 }
 
 /// Convenience wrapper for backward-compatible free-function style.

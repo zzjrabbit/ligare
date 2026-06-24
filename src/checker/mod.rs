@@ -6,7 +6,7 @@ pub mod prove;
 
 use crate::checker::builtin::check_builtin;
 use crate::checker::context::{ConstraintTable, Context, add_refine, empty_table, lookup_refine};
-use crate::core::desugar::Desugarer;
+use crate::core::debruijn::Desugarer;
 use crate::core::pool::TermArena;
 use crate::core::syntax::{Name, Tactic, Term};
 use crate::core::whnf::WhnfEvaluator;
@@ -21,10 +21,10 @@ pub struct TypeChecker<'bump> {
     pub(crate) evaluator: WhnfEvaluator<'bump>,
     pub(crate) desugarer: Desugarer<'bump>,
     table: ConstraintTable<'bump>,
-    /// Registry of union definitions: maps union name → UnionDef term
-    pub(crate) union_table: Vec<(Name<'bump>, &'bump Term<'bump>)>,
-    /// Registry of struct definitions: maps struct name → StructDef term
-    pub(crate) struct_table: Vec<(Name<'bump>, &'bump Term<'bump>)>,
+    /// Registry of union definitions: maps union name → (UnionDef term, type_param_names)
+    pub(crate) union_table: Vec<(Name<'bump>, &'bump Term<'bump>, &'bump [Name<'bump>])>,
+    /// Registry of struct definitions: maps struct name → (StructDef term, type_param_names)
+    pub(crate) struct_table: Vec<(Name<'bump>, &'bump Term<'bump>, &'bump [Name<'bump>])>,
 }
 
 impl<'bump> TypeChecker<'bump> {
@@ -54,13 +54,23 @@ impl<'bump> TypeChecker<'bump> {
     }
 
     /// Add a union definition to the persistent union table.
-    pub fn add_union(&mut self, name: Name<'bump>, def: &'bump Term<'bump>) {
-        self.union_table.insert(0, (name, def));
+    pub fn add_union(
+        &mut self,
+        name: Name<'bump>,
+        def: &'bump Term<'bump>,
+        type_params: &'bump [Name<'bump>],
+    ) {
+        self.union_table.insert(0, (name, def, type_params));
     }
 
     /// Add a struct definition to the persistent struct table.
-    pub fn add_struct(&mut self, name: Name<'bump>, def: &'bump Term<'bump>) {
-        self.struct_table.insert(0, (name, def));
+    pub fn add_struct(
+        &mut self,
+        name: Name<'bump>,
+        def: &'bump Term<'bump>,
+        type_params: &'bump [Name<'bump>],
+    ) {
+        self.struct_table.insert(0, (name, def, type_params));
     }
 
     /// Look up a variant constructor name → (union_name, variant_index, field_specs).
@@ -72,7 +82,7 @@ impl<'bump> TypeChecker<'bump> {
         usize,
         &'bump [(Name<'bump>, &'bump Term<'bump>)],
     )> {
-        for (uname, udef) in &self.union_table {
+        for (uname, udef, _) in &self.union_table {
             if let Term::UnionDef(_, variants) = udef {
                 for (idx, (vname, fields)) in variants.iter().enumerate() {
                     if *vname == ctor_name {
@@ -85,19 +95,19 @@ impl<'bump> TypeChecker<'bump> {
     }
 
     /// Look up a union definition by name.
-    pub fn lookup_union(&self, name: &str) -> Option<&'bump Term<'bump>> {
+    pub fn lookup_union(&self, name: &str) -> Option<(&'bump Term<'bump>, &'bump [Name<'bump>])> {
         self.union_table
             .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, def)| *def)
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, def, params)| (*def, *params))
     }
 
     /// Look up a struct definition by name.
-    pub fn lookup_struct(&self, name: &str) -> Option<&'bump Term<'bump>> {
+    pub fn lookup_struct(&self, name: &str) -> Option<(&'bump Term<'bump>, &'bump [Name<'bump>])> {
         self.struct_table
             .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, def)| *def)
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, def, params)| (*def, *params))
     }
 
     /// Look up a struct constructor name: `Foo.mk` → (struct_name, field_specs).
@@ -108,7 +118,7 @@ impl<'bump> TypeChecker<'bump> {
     ) -> Option<(Name<'bump>, &'bump [(Name<'bump>, &'bump Term<'bump>)])> {
         // Check if name ends with ".mk"
         if let Some(struct_name) = ctor_name.strip_suffix(".mk") {
-            for (sname, sdef) in &self.struct_table {
+            for (sname, sdef, _) in &self.struct_table {
                 if *sname == struct_name {
                     if let Term::StructDef(_, fields) = sdef {
                         return Some((*sname, *fields));
@@ -125,7 +135,7 @@ impl<'bump> TypeChecker<'bump> {
         if let Some(dot_pos) = proj_name.rfind('.') {
             let struct_name = &proj_name[..dot_pos];
             let field_name = &proj_name[dot_pos + 1..];
-            for (sname, sdef) in &self.struct_table {
+            for (sname, sdef, _) in &self.struct_table {
                 if *sname == struct_name {
                     if let Term::StructDef(_, fields) = sdef {
                         return fields.iter().position(|(fnm, _)| *fnm == field_name);
@@ -163,7 +173,7 @@ impl<'bump> TypeChecker<'bump> {
                 // Expand Builtin constraints (like `nat`) that are
                 // actually refinement constraints in the table.
                 let expanded = match c_nf {
-                    Term::Builtin(name) => lookup_refine(name, &self.table)
+                    Term::Builtin(name) | Term::Named(name) => lookup_refine(name, &self.table)
                         .map(|(p, pr)| self.arena.refine(name, p, pr)),
                     _ => None,
                 };
@@ -228,10 +238,10 @@ impl<'bump> TypeChecker<'bump> {
             // Application: use the function's type rather than forcing
             // full evaluation (which would compute recursive calls).
             Term::App(f, a) => self.check_app(ctx, f, a, constraint),
-            // A bare Builtin name may be a type (int, str, etc.) or a
+            // A bare Builtin/Named name may be a type (int, str, etc.) or a
             // refinement (nat).  If neither, check if it's a variant constructor
             // or a struct constructor / projector.
-            Term::Builtin(name) => {
+            Term::Builtin(name) | Term::Named(name) => {
                 if check_builtin(name).is_some() || lookup_refine(name, &self.table).is_some() {
                     self.check_by_constraint(ctx, desugared, constraint)
                 } else if let Some((uname, idx, _)) = self.lookup_variant(name) {
@@ -246,12 +256,9 @@ impl<'bump> TypeChecker<'bump> {
                 } else if self.lookup_struct_proj(name).is_some() {
                     // Struct projector used as a standalone function — we can't
                     // check it without a subject.  It's a data-level function.
-                    Err(format!(
-                        "Struct projector {} cannot be used as a value — apply it to a struct",
-                        name
-                    ))
+                    Err(format!("{} must be applied to a struct", name))
                 } else {
-                    Err(format!("Undefined variable: {}", name))
+                    Err(format!("unbound: {}", name))
                 }
             }
             _ => self.check_by_constraint(ctx, desugared, constraint),

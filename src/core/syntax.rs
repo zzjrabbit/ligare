@@ -58,9 +58,9 @@ impl fmt::Display for PrimOp {
 
 impl<'bump> Term<'bump> {
     /// Returns true if this is a desugared zero-parameter definition
-    /// (a constant), i.e. `Annot(body, _)` where body is NOT a `Lam`.
+    /// (a constant), i.e. `Annot(body, _)` where body is NOT a `Lam` or `NamedLam`.
     pub fn is_constant(&self) -> bool {
-        matches!(self, Term::Annot(body, _) if !matches!(body, Term::Lam(_)))
+        matches!(self, Term::Annot(body, _) if !matches!(body, Term::Lam(_) | Term::NamedLam(_, _)))
     }
 }
 
@@ -97,28 +97,22 @@ pub enum Tactic<'bump> {
     Have(Name<'bump>, &'bump Term<'bump>),
 }
 
-/// Named function definition — syntax sugar produced by the parser.
-/// Desugared into `Annot(Lam(body), Pi(params..., ret))` before any
-/// analysis, so this type never appears in core `Term` nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FuncDef<'bump> {
-    pub name: Name<'bump>,
-    pub params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
-    pub ret: Option<&'bump Term<'bump>>,
-    pub body: &'bump Term<'bump>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Term<'bump> {
     Var(usize),
     App(&'bump Term<'bump>, &'bump Term<'bump>),
     Lam(&'bump Term<'bump>),
+    /// Named lambda (parser artifact): stores param name, resolved to Lam+Var by desugar.
+    NamedLam(Name<'bump>, &'bump Term<'bump>),
     LitInt(i64),
     LitBool(bool),
     LitStr(Name<'bump>),
     PrimOp(PrimOp),
     Universe(Universe),
+    /// Language builtins (int, bool, str, data, prop, theorem, proof, and, or, not, implies).
     Builtin(Name<'bump>),
+    /// User-defined identifier (functions, types, constructors) — resolved away by the compiler.
+    Named(Name<'bump>),
     Pi(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>),
     Let(
         Name<'bump>,

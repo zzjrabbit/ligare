@@ -4,8 +4,8 @@
 //! inference happens directly during emission via a `var_types` stack
 //! that mirrors De Bruijn binding structure.
 
-use crate::backend::ir::{CType, FunSig, constraint_to_ctype};
-use crate::core::syntax::{FuncDef, PrimOp, Term};
+use crate::backend::ir::{CType, FunSig, constraint_to_ctype, is_type_universe};
+use crate::core::syntax::{Name, PrimOp, Term};
 use crate::front::parser::TopLevel;
 use std::collections::{HashMap, HashSet};
 
@@ -169,7 +169,7 @@ fn collect_type_refs(
     deps: &mut HashSet<String>,
 ) {
     match t {
-        Term::Builtin(name) => {
+        Term::Builtin(name) | Term::Named(name) => {
             let s = name.to_string();
             if union_names.contains(&s) || struct_names.contains(&s) {
                 deps.insert(s);
@@ -212,8 +212,12 @@ fn emit_struct_typedef_ptr(
 }
 
 /// Emit a complete C source file from a list of top-level items.
+///
+/// On-demand codegen: only functions actually called from `#show` / `#expr`
+/// are emitted.  Type parameters are erased at emission time.
 pub fn emit_c(
     tops: &[TopLevel<'_>],
+    raw_defs: &[TopLevel<'_>],
     fun_sigs: &[(&str, FunSig)],
     union_types: &[(&str, &Term<'_>)],
     struct_types: &[(&str, &Term<'_>)],
@@ -295,28 +299,74 @@ pub fn emit_c(
     let union_map = build_union_map(union_types, &union_names, &struct_names)?;
     let struct_map = build_struct_map(struct_types, &union_names, &struct_names)?;
 
-    let mut defs: Vec<(&str, &FuncDef<'_>)> = Vec::new();
+    // Collect output expressions (TLShow / TLExpr).
     let mut outputs: Vec<&Term<'_>> = Vec::new();
-
     for top in tops {
         match top {
-            TopLevel::TLDef(name, func_def) => {
-                defs.push((name, func_def));
-            }
-            TopLevel::TLShow(term) | TopLevel::TLExpr(term) => outputs.push(term),
+            TopLevel::TLShow(term, _) | TopLevel::TLExpr(term, _) => outputs.push(term),
             _ => {}
         }
     }
 
-    for (name, func_def) in &defs {
-        out.push_str(&emit_def(
-            name,
-            func_def,
-            fun_sigs,
-            &union_map,
-            &struct_map,
-        )?);
-        out.push('\n');
+    // Emit constants (zero-param, zero-lambda definitions) unconditionally.
+    // These have no type params to erase and are pure data.
+    for top in tops {
+        if let TopLevel::TLDef(name, params, m_ret, body, _) = top {
+            if params.is_empty() && count_lams(body) == 0 {
+                out.push_str(&emit_def(
+                    name,
+                    params,
+                    *m_ret,
+                    body,
+                    fun_sigs,
+                    &union_map,
+                    &struct_map,
+                )?);
+                out.push('\n');
+            }
+        }
+    }
+
+    // On-demand codegen for functions: walk output expressions to find called
+    // function names, then emit only those definitions from raw_defs.
+    // When there are no outputs (library mode), emit ALL functions.
+    // Type params are erased at emission time via emit_def.
+    // Constants are skipped here — already emitted unconditionally above.
+    let called_names: HashSet<String> = if outputs.is_empty() {
+        // Library mode: emit all function definitions.
+        raw_defs
+            .iter()
+            .filter_map(|top| {
+                if let TopLevel::TLDef(name, _, _, _, _) = top {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        // On-demand mode: only emit functions called from output expressions.
+        collect_called_names(&outputs, raw_defs)
+    };
+    for raw_def in raw_defs {
+        if let TopLevel::TLDef(name, params, m_ret, body, _) = raw_def {
+            // Skip constants — already emitted unconditionally above.
+            if params.is_empty() && count_lams(body) == 0 {
+                continue;
+            }
+            if called_names.contains(*name) {
+                out.push_str(&emit_def(
+                    name,
+                    params,
+                    *m_ret,
+                    body,
+                    fun_sigs,
+                    &union_map,
+                    &struct_map,
+                )?);
+                out.push('\n');
+            }
+        }
     }
 
     if !outputs.is_empty() {
@@ -395,7 +445,7 @@ fn emit_union_typedef(
             out.push_str("        struct { ");
             for (fname, fty) in fields.iter() {
                 // Recursive reference if: Builtin(name)
-                let is_self_ref = matches!(fty, Term::Builtin(tn) if *tn == name);
+                let is_self_ref = matches!(fty, Term::Builtin(tn) | Term::Named(tn) if *tn == name);
                 if is_self_ref {
                     out.push_str(&format!("struct {}* {}; ", name, fname));
                 } else {
@@ -431,16 +481,151 @@ fn emit_struct_typedef(
     Ok(out)
 }
 
+/// Walk a set of Term trees and collect the names of all user-defined
+/// functions that are called (including transitive dependencies).
+/// Only returns names that appear in `raw_defs`.
+fn collect_called_names<'bump>(
+    outputs: &[&'bump Term<'bump>],
+    raw_defs: &[TopLevel<'bump>],
+) -> HashSet<String> {
+    let def_names: HashSet<&str> = raw_defs
+        .iter()
+        .filter_map(|top| {
+            if let TopLevel::TLDef(name, _, _, _, _) = top {
+                Some(*name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut called = HashSet::new();
+    // Seed with names found in output expressions.
+    for term in outputs {
+        collect_names_in_term(*term, &def_names, &mut called);
+    }
+    // Transitive closure: also walk bodies of already-called functions
+    // to discover indirect dependencies.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let prev_len = called.len();
+        for raw_def in raw_defs {
+            if let TopLevel::TLDef(name, _, _, body, _) = raw_def {
+                if called.contains(*name) {
+                    collect_names_in_term(body, &def_names, &mut called);
+                }
+            }
+        }
+        if called.len() > prev_len {
+            changed = true;
+        }
+    }
+    called
+}
+
+/// Recursively walk a term looking for `Builtin(name)` / `Named(name)`
+/// nodes that match known function definitions.
+fn collect_names_in_term(term: &Term<'_>, def_names: &HashSet<&str>, called: &mut HashSet<String>) {
+    match term {
+        Term::Builtin(name) | Term::Named(name) => {
+            if def_names.contains(name) {
+                called.insert(name.to_string());
+            }
+        }
+        Term::App(f, a) => {
+            collect_names_in_term(f, def_names, called);
+            collect_names_in_term(a, def_names, called);
+        }
+        Term::Lam(body) | Term::NamedLam(_, body) => {
+            collect_names_in_term(body, def_names, called);
+        }
+        Term::Pi(_, a, b) => {
+            collect_names_in_term(a, def_names, called);
+            collect_names_in_term(b, def_names, called);
+        }
+        Term::Let(_, val, body, mconstr) => {
+            collect_names_in_term(val, def_names, called);
+            collect_names_in_term(body, def_names, called);
+            if let Some(c) = mconstr {
+                collect_names_in_term(c, def_names, called);
+            }
+        }
+        Term::Annot(t, c) => {
+            collect_names_in_term(t, def_names, called);
+            collect_names_in_term(c, def_names, called);
+        }
+        Term::IfThenElse(c, t, f) => {
+            collect_names_in_term(c, def_names, called);
+            collect_names_in_term(t, def_names, called);
+            collect_names_in_term(f, def_names, called);
+        }
+        Term::Match(scrut, branches) => {
+            collect_names_in_term(scrut, def_names, called);
+            for (_, binds, body) in *branches {
+                for (_, bt) in *binds {
+                    collect_names_in_term(bt, def_names, called);
+                }
+                collect_names_in_term(body, def_names, called);
+            }
+        }
+        Term::StructCons(_, field_values) => {
+            for v in *field_values {
+                collect_names_in_term(v, def_names, called);
+            }
+        }
+        Term::StructProj(subj, _) => {
+            collect_names_in_term(subj, def_names, called);
+        }
+        Term::Variant(_, _, payloads) => {
+            for p in *payloads {
+                collect_names_in_term(p, def_names, called);
+            }
+        }
+        Term::Refine(_, p, pred) => {
+            collect_names_in_term(p, def_names, called);
+            collect_names_in_term(pred, def_names, called);
+        }
+        Term::ByProof(subj_opt, tactics) => {
+            if let Some(s) = subj_opt {
+                collect_names_in_term(s, def_names, called);
+            }
+            for tac in *tactics {
+                match tac {
+                    crate::core::syntax::Tactic::Exact(t)
+                    | crate::core::syntax::Tactic::Apply(t) => {
+                        collect_names_in_term(t, def_names, called);
+                    }
+                    crate::core::syntax::Tactic::Have(_, t) => {
+                        collect_names_in_term(t, def_names, called);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Leaf nodes: no children to recurse into.
+        Term::Var(_)
+        | Term::LitInt(_)
+        | Term::LitBool(_)
+        | Term::LitStr(_)
+        | Term::PrimOp(_)
+        | Term::Universe(_)
+        | Term::AutoProof
+        | Term::RefParam
+        | Term::UnionDef(..)
+        | Term::StructDef(..) => {}
+    }
+}
+
 /// Emit a top-level definition as a C function or constant.
 fn emit_def(
     name: &str,
-    func_def: &FuncDef<'_>,
+    params: &[(Name<'_>, Option<&Term<'_>>)],
+    _m_ret: Option<&Term<'_>>,
+    body: &Term<'_>,
     fun_sigs: &[(&str, FunSig)],
     union_map: &HashMap<String, UnionInfo>,
     struct_map: &HashMap<String, StructInfo>,
 ) -> Result<String, String> {
-    let params = func_def.params;
-    let body = func_def.body;
     if params.is_empty() {
         let arity = count_lams(body);
         if arity == 0 {
@@ -474,12 +659,18 @@ fn emit_def(
             )
         }
     } else {
-        let pns: Vec<String> = params.iter().map(|(n, _)| n.to_string()).collect();
+        // Filter out type-level (generic) params to match FunSig.
+        let data_params: Vec<_> = params
+            .iter()
+            .filter(|(_, mc)| !mc.map_or(false, |c| is_type_universe(c)))
+            .collect();
+        let pns: Vec<String> = data_params.iter().map(|(n, _)| n.to_string()).collect();
         let param_types: Vec<CType> = fun_sigs
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, sig)| sig.param_types.clone())
-            .unwrap_or_else(|| vec![CType::Int64; params.len()]);
+            .unwrap_or_else(|| vec![CType::Int64; data_params.len()]);
+        // Peel all lambdas (type params + data params).
         let peeled = peel_lams(body, params.len());
         emit_fun(
             name,
@@ -632,15 +823,24 @@ fn emit_match_block(
 fn count_lams(term: &Term<'_>) -> usize {
     match term {
         Term::Lam(body) => 1 + count_lams(body),
+        Term::Annot(inner, _) => count_lams(inner),
         _ => 0,
     }
 }
 
 fn peel_lams<'a>(term: &'a Term<'a>, n: usize) -> &'a Term<'a> {
     let mut t = term;
-    for _ in 0..n {
-        if let Term::Lam(body) = t {
-            t = body;
+    let mut remaining = n;
+    while remaining > 0 {
+        match t {
+            Term::Lam(body) => {
+                t = body;
+                remaining -= 1;
+            }
+            Term::Annot(inner, _) => {
+                t = inner;
+            }
+            _ => break,
         }
     }
     t
@@ -668,6 +868,9 @@ fn emit_expr(
 
         Term::Var(i) => {
             let ty = var_types.get(*i).cloned().unwrap_or(CType::Int64);
+            /*if bound.len() <= *i {
+                println!("{:?} {:?}", bound, var_types);
+            }*/
             Ok((bound[*i].clone(), ty))
         }
 
@@ -721,7 +924,7 @@ fn emit_expr(
         Term::Annot(inner, _) => emit_expr(
             inner, bound, var_types, self_name, fun_sigs, union_map, struct_map,
         ),
-        Term::Builtin(name) => {
+        Term::Builtin(name) | Term::Named(name) => {
             let ty = fun_sigs
                 .iter()
                 .find(|(n, _)| *n == *name)
@@ -890,12 +1093,24 @@ fn emit_app(
     let func = collect_call_args(
         term, bound, var_types, self_name, fun_sigs, union_map, struct_map, &mut args,
     )?;
+    let param_count = fun_sigs
+        .iter()
+        .find(|(n, _)| *n == func)
+        .map(|(_, sig)| sig.param_types.len())
+        .unwrap_or(0);
+    // Strip excess arguments (type-level args come first, before data args).
+    // Keep only the last `param_count` arguments.
+    let trimmed: Vec<String> = if args.len() > param_count {
+        args[args.len() - param_count..].to_vec()
+    } else {
+        args
+    };
     let ret_ty = fun_sigs
         .iter()
         .find(|(n, _)| *n == func)
         .map(|(_, sig)| sig.ret_type.clone())
         .unwrap_or(CType::Int64);
-    Ok((format!("{}({})", func, args.join(", ")), ret_ty))
+    Ok((format!("{}({})", func, trimmed.join(", ")), ret_ty))
 }
 
 fn collect_call_args(
@@ -969,7 +1184,7 @@ mod tests {
     }
 
     fn emit(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
-        emit_c(tops, fun_sigs, &[], &[]).unwrap()
+        emit_c(tops, tops, fun_sigs, &[], &[]).unwrap()
     }
 
     // ── Literals ──
@@ -977,7 +1192,7 @@ mod tests {
     #[test]
     fn int_literal_uses_ld() {
         let (_b, arena) = setup();
-        let c = emit(&[TopLevel::TLShow(arena.lit_int(42))], &[]);
+        let c = emit(&[TopLevel::TLShow(arena.lit_int(42), 0..0)], &[]);
         assert!(c.contains("42"));
         assert!(c.contains("%ld"));
     }
@@ -986,7 +1201,7 @@ mod tests {
     fn str_literal_uses_s() {
         let (_b, arena) = setup();
         let c = emit(
-            &[TopLevel::TLShow(arena.lit_str(arena.alloc_str("hi")))],
+            &[TopLevel::TLShow(arena.lit_str(arena.alloc_str("hi")), 0..0)],
             &[],
         );
         assert!(c.contains("\"hi\""));
@@ -996,7 +1211,7 @@ mod tests {
     #[test]
     fn bool_literal_emits_0_or_1() {
         let (_b, arena) = setup();
-        let c = emit(&[TopLevel::TLShow(arena.lit_bool(true))], &[]);
+        let c = emit(&[TopLevel::TLShow(arena.lit_bool(true), 0..0)], &[]);
         assert!(c.contains("(int64_t)(1)"));
     }
 
@@ -1005,26 +1220,28 @@ mod tests {
     #[test]
     fn int_const_def() {
         let (_b, arena) = setup();
-        let func_def = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("x"),
-            params: &[],
-            ret: None,
-            body: arena.lit_int(5),
-        });
-        let c = emit(&[TopLevel::TLDef(arena.alloc_str("x"), func_def)], &[]);
+        let name = arena.alloc_str("x");
+        let c = emit(
+            &[TopLevel::TLDef(name, &[], None, arena.lit_int(5), 0..0)],
+            &[],
+        );
         assert!(c.contains("const int64_t x = 5;"));
     }
 
     #[test]
     fn str_const_def() {
         let (_b, arena) = setup();
-        let func_def = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("g"),
-            params: &[],
-            ret: None,
-            body: arena.lit_str(arena.alloc_str("hi")),
-        });
-        let c = emit(&[TopLevel::TLDef(arena.alloc_str("g"), func_def)], &[]);
+        let name = arena.alloc_str("g");
+        let c = emit(
+            &[TopLevel::TLDef(
+                name,
+                &[],
+                None,
+                arena.lit_str(arena.alloc_str("hi")),
+                0..0,
+            )],
+            &[],
+        );
         assert!(c.contains("const char* g"));
         assert!(c.contains("\"hi\""));
     }
@@ -1039,13 +1256,8 @@ mod tests {
             arena.var(0),
         );
         let lam = arena.lam(arena.lam(body));
-        let func_def = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("add"),
-            params: &[],
-            ret: None,
-            body: lam,
-        });
-        let c = emit(&[TopLevel::TLDef(arena.alloc_str("add"), func_def)], &[]);
+        let name = arena.alloc_str("add");
+        let c = emit(&[TopLevel::TLDef(name, &[], None, lam, 0..0)], &[]);
         assert!(c.contains("int64_t add(int64_t arg_0, int64_t arg_1)"));
     }
 
@@ -1053,13 +1265,8 @@ mod tests {
     fn lam_returning_str_infers_str_return_type() {
         let (_b, arena) = setup();
         let lam = arena.lam(arena.lit_str(arena.alloc_str("hi")));
-        let func_def = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("greet"),
-            params: &[],
-            ret: None,
-            body: lam,
-        });
-        let c = emit(&[TopLevel::TLDef(arena.alloc_str("greet"), func_def)], &[]);
+        let name = arena.alloc_str("greet");
+        let c = emit(&[TopLevel::TLDef(name, &[], None, lam, 0..0)], &[]);
         assert!(c.contains("const char* greet(int64_t arg_0)"));
         assert!(c.contains("\"hi\""));
     }
@@ -1069,40 +1276,70 @@ mod tests {
     #[test]
     fn func_with_str_param_uses_const_char_ptr() {
         let (_b, arena) = setup();
-        let func_def = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("echo"),
-            params: arena.alloc_slice(&[(
+        let name = arena.alloc_str("echo");
+        let params: &[(Name, Option<&Term>)] = arena.alloc_slice(&[(
+            arena.alloc_str("s"),
+            Some(arena.builtin(arena.alloc_str("str"))),
+        )]);
+        let desugared = arena.annot(
+            arena.lam(arena.var(0)),
+            arena.pi(
                 arena.alloc_str("s"),
-                Some(arena.builtin(arena.alloc_str("str"))),
-            )]),
-            ret: Some(arena.builtin(arena.alloc_str("str"))),
-            body: arena.var(0),
-        });
+                arena.builtin(arena.alloc_str("str")),
+                arena.builtin(arena.alloc_str("str")),
+            ),
+        );
         let sigs = &[sig("echo", vec![CType::Str], CType::Str)];
-        let c = emit(&[TopLevel::TLDef(arena.alloc_str("echo"), func_def)], sigs);
+        let c = emit(
+            &[TopLevel::TLDef(
+                name,
+                params,
+                Some(arena.builtin(arena.alloc_str("str"))),
+                desugared,
+                0..0,
+            )],
+            sigs,
+        );
         assert!(c.contains("const char* echo(const char* s)"));
     }
 
     #[test]
     fn func_with_mixed_params() {
         let (_b, arena) = setup();
-        let func_def = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("f"),
-            params: arena.alloc_slice(&[
-                (
-                    arena.alloc_str("a"),
-                    Some(arena.builtin(arena.alloc_str("int"))),
-                ),
-                (
+        let name = arena.alloc_str("f");
+        let params: &[(Name, Option<&Term>)] = arena.alloc_slice(&[
+            (
+                arena.alloc_str("a"),
+                Some(arena.builtin(arena.alloc_str("int"))),
+            ),
+            (
+                arena.alloc_str("b"),
+                Some(arena.builtin(arena.alloc_str("str"))),
+            ),
+        ]);
+        let desugared = arena.annot(
+            arena.lam(arena.lam(arena.var(1))),
+            arena.pi(
+                arena.alloc_str("a"),
+                arena.builtin(arena.alloc_str("int")),
+                arena.pi(
                     arena.alloc_str("b"),
-                    Some(arena.builtin(arena.alloc_str("str"))),
+                    arena.builtin(arena.alloc_str("str")),
+                    arena.builtin(arena.alloc_str("int")),
                 ),
-            ]),
-            ret: Some(arena.builtin(arena.alloc_str("int"))),
-            body: arena.var(1),
-        });
+            ),
+        );
         let sigs = &[sig("f", vec![CType::Int64, CType::Str], CType::Int64)];
-        let c = emit(&[TopLevel::TLDef(arena.alloc_str("f"), func_def)], sigs);
+        let c = emit(
+            &[TopLevel::TLDef(
+                name,
+                params,
+                Some(arena.builtin(arena.alloc_str("int"))),
+                desugared,
+                0..0,
+            )],
+            sigs,
+        );
         assert!(c.contains("int64_t f(int64_t a, const char* b)"));
     }
 
@@ -1112,18 +1349,21 @@ mod tests {
     fn call_to_function_uses_fun_sig_return_type() {
         let (_b, arena) = setup();
         let fn_name = arena.alloc_str("greet");
-        let func_def = arena.bump().alloc(FuncDef {
-            name: fn_name,
-            params: &[],
-            ret: Some(arena.builtin(arena.alloc_str("str"))),
-            body: arena.lit_str(arena.alloc_str("hi")),
-        });
-        let def = TopLevel::TLDef(fn_name, func_def);
+        let def = TopLevel::TLDef(
+            fn_name,
+            &[],
+            Some(arena.builtin(arena.alloc_str("str"))),
+            arena.annot(
+                arena.lit_str(arena.alloc_str("hi")),
+                arena.builtin(arena.alloc_str("str")),
+            ),
+            0..0,
+        );
         let sig = FunSig {
             param_types: vec![],
             ret_type: CType::Str,
         };
-        let show = TopLevel::TLShow(arena.builtin(fn_name));
+        let show = TopLevel::TLShow(arena.builtin(fn_name), 0..0);
         let tops = &[def, show];
         let c = emit(tops, &[(fn_name, sig)]);
         assert!(c.contains("%s"));
@@ -1135,7 +1375,7 @@ mod tests {
         let (_b, arena) = setup();
         let n = arena.alloc_str("s");
         let call = arena.app(arena.builtin(n), arena.lit_str(arena.alloc_str("hi")));
-        let tops = &[TopLevel::TLShow(call)];
+        let tops = &[TopLevel::TLShow(call, 0..0)];
         let c = emit(tops, &[]);
         assert!(c.contains("s("));
     }
@@ -1149,7 +1389,7 @@ mod tests {
             arena.var(0),
             None,
         );
-        let c = emit(&[TopLevel::TLShow(term)], &[]);
+        let c = emit(&[TopLevel::TLShow(term, 0..0)], &[]);
         assert!(c.contains("%s"));
         assert!(c.contains("const char* s"));
     }
@@ -1157,23 +1397,17 @@ mod tests {
     #[test]
     fn emit_multiple_defs_and_outputs() {
         let (_b, arena) = setup();
-        let func_def_a = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("a"),
-            params: &[],
-            ret: None,
-            body: arena.lit_int(1),
-        });
-        let func_def_b = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("b"),
-            params: &[],
-            ret: None,
-            body: arena.lit_str(arena.alloc_str("two")),
-        });
         let tops = &[
-            TopLevel::TLDef(arena.alloc_str("a"), func_def_a),
-            TopLevel::TLDef(arena.alloc_str("b"), func_def_b),
-            TopLevel::TLShow(arena.lit_int(3)),
-            TopLevel::TLShow(arena.lit_str(arena.alloc_str("four"))),
+            TopLevel::TLDef(arena.alloc_str("a"), &[], None, arena.lit_int(1), 0..0),
+            TopLevel::TLDef(
+                arena.alloc_str("b"),
+                &[],
+                None,
+                arena.lit_str(arena.alloc_str("two")),
+                0..0,
+            ),
+            TopLevel::TLShow(arena.lit_int(3), 0..0),
+            TopLevel::TLShow(arena.lit_str(arena.alloc_str("four")), 0..0),
         ];
         let c = emit(tops, &[]);
         assert!(c.contains("const int64_t a = 1;"));
@@ -1201,15 +1435,15 @@ mod tests {
 
         let top_name = arena.alloc_str("zero");
         let zero_v = arena.variant(nat_name, 0, arena.alloc_slice(&[]));
-        let func_def = arena.bump().alloc(FuncDef {
-            name: top_name,
-            params: &[],
-            ret: Some(arena.builtin(nat_name)),
-            body: zero_v,
-        });
-        let tops = &[TopLevel::TLDef(top_name, func_def)];
+        let tops = &[TopLevel::TLDef(
+            top_name,
+            &[],
+            Some(arena.builtin(nat_name)),
+            zero_v,
+            0..0,
+        )];
 
-        let c = emit_c(tops, &[], union_types, &[]).unwrap();
+        let c = emit_c(tops, &[], &[], union_types, &[]).unwrap();
         // Typedef uses struct pointer for recursive field
         assert!(
             c.contains("struct Nat* pred;"),
@@ -1242,15 +1476,15 @@ mod tests {
         // Build: Succ(Zero)
         let zero_v = arena.variant(nat_name, 0, arena.alloc_slice(&[]));
         let one_v = arena.variant(nat_name, 1, arena.alloc_slice(&[zero_v]));
-        let func_def = arena.bump().alloc(FuncDef {
-            name: arena.alloc_str("one"),
-            params: &[],
-            ret: Some(arena.builtin(nat_name)),
-            body: one_v,
-        });
-        let tops = &[TopLevel::TLDef(arena.alloc_str("one"), func_def)];
+        let tops = &[TopLevel::TLDef(
+            arena.alloc_str("one"),
+            &[],
+            Some(arena.builtin(nat_name)),
+            one_v,
+            0..0,
+        )];
 
-        let c = emit_c(tops, &[], union_types, &[]).unwrap();
+        let c = emit_c(tops, &[], &[], union_types, &[]).unwrap();
         // Recursive reference must emit & (address-of) for the pointer field
         assert!(
             c.contains("&((Nat)"),

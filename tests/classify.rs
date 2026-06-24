@@ -113,12 +113,15 @@ fn func_is_data() {
 
 #[test]
 fn let_is_body_universe() {
+    // Let classifies as its body.  Var(0) in an empty context defaults
+    // to UData (variables in unknown contexts are conservatively assumed
+    // to be data-relevant).
     assert_eq!(
         classify(
             &empty_ctx(),
             &Term::Let("x", &Term::LitInt(5), &Term::Var(0), None)
         ),
-        None
+        Some(Universe::UData)
     );
 }
 

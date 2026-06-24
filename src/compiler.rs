@@ -9,7 +9,7 @@ use crate::checker::context::empty_ctx;
 use crate::checker::erase::Eraser;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
-use crate::core::syntax::{FuncDef, Name, Term};
+use crate::core::syntax::{Name, Term};
 use crate::diagnostic::Diagnostic;
 use crate::front::parser::{TopLevel, parse_expr_top, parse_program};
 use crate::pretty::PrettyPrinter;
@@ -27,6 +27,9 @@ pub struct Compiler<'bump> {
     env: HashMap<&'bump str, &'bump Term<'bump>>,
     /// Accumulated top-level items (for code generation).
     pub tops: Vec<TopLevel<'bump>>,
+    /// Raw (un-erased) function definitions for on-demand codegen.
+    /// Bodies are resolved & desugared, but type params are NOT erased yet.
+    raw_defs: Vec<TopLevel<'bump>>,
     /// Function signatures extracted before erasure (for C codegen).
     fun_sigs: Vec<(&'bump str, FunSig)>,
     /// Union type definitions collected before erasure (for C codegen).
@@ -45,6 +48,7 @@ impl<'bump> Compiler<'bump> {
             checker: TypeChecker::new(arena),
             env: HashMap::new(),
             tops: vec![],
+            raw_defs: vec![],
             fun_sigs: vec![],
             union_types: vec![],
             struct_types: vec![],
@@ -93,10 +97,33 @@ impl<'bump> Compiler<'bump> {
             Diagnostic::with_span(format!("{}: parse error: {}", file, e.message), e.span)
         })?;
         for top in &tops {
-            self.process_top_level(*top, file)?;
+            self.process_top_level(top.clone(), file)?;
         }
         let (union_names, struct_names) = self.build_name_sets(&tops);
         self.collect_signatures(&tops, &union_names, &struct_names)?;
+
+        // Build raw (un-erased) definitions for on-demand codegen.
+        // Bodies are resolved from env and desugared, but type params remain.
+        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
+        for top in &tops {
+            if let TopLevel::TLDef(name, params, m_ret, body_term, span) = top {
+                // Skip union/struct typedefs — they are emitted by type-emission pass
+                if matches!(body_term, Term::UnionDef(..) | Term::StructDef(..)) {
+                    continue;
+                }
+                let term = self.env.get(name).copied().unwrap_or(*body_term);
+                let resolved = self.subst_top_level(term);
+                let desugared = desugarer.desugar(resolved);
+                self.raw_defs.push(TopLevel::TLDef(
+                    *name,
+                    *params,
+                    *m_ret,
+                    desugared,
+                    span.clone(),
+                ));
+            }
+        }
+
         let eraser = Eraser::new(self.arena);
         let evald_tops = self.erase_and_collect_tops(tops, &eraser);
         self.tops.extend(evald_tops);
@@ -109,9 +136,7 @@ impl<'bump> Compiler<'bump> {
         let union_names: HashSet<String> = tops
             .iter()
             .filter_map(|top| match top {
-                TopLevel::TLDef(name, fd)
-                    if fd.params.is_empty() && matches!(fd.body, Term::UnionDef(..)) =>
-                {
+                TopLevel::TLDef(name, _, _, body, _) if matches!(body, Term::UnionDef(..)) => {
                     Some(name.to_string())
                 }
                 _ => None,
@@ -120,9 +145,7 @@ impl<'bump> Compiler<'bump> {
         let struct_names: HashSet<String> = tops
             .iter()
             .filter_map(|top| match top {
-                TopLevel::TLDef(name, fd)
-                    if fd.params.is_empty() && matches!(fd.body, Term::StructDef(..)) =>
-                {
+                TopLevel::TLDef(name, _, _, body, _) if matches!(body, Term::StructDef(..)) => {
                     Some(name.to_string())
                 }
                 _ => None,
@@ -141,22 +164,19 @@ impl<'bump> Compiler<'bump> {
     ) -> Result<(), Diagnostic> {
         for top in tops {
             match top {
-                TopLevel::TLDef(name, func_def) => {
-                    if func_def.params.is_empty() && matches!(func_def.body, Term::UnionDef(..)) {
-                        self.union_types.push((name, func_def.body));
-                    } else if func_def.params.is_empty()
-                        && matches!(func_def.body, Term::StructDef(..))
-                    {
-                        self.struct_types.push((name, func_def.body));
-                    } else {
-                        let sig = FunSig::from_func(
-                            func_def.params,
-                            func_def.ret,
-                            func_def.body,
-                            union_names,
-                            struct_names,
-                        )
-                        .map_err(|e| Diagnostic::new(e))?;
+                TopLevel::TLDef(name, params, m_ret, body, _) => {
+                    if matches!(body, Term::UnionDef(..)) {
+                        self.union_types.push((name, body));
+                    } else if matches!(body, Term::StructDef(..)) {
+                        self.struct_types.push((name, body));
+                    }
+                    // Collect FunSig for non-type definitions (functions, constants).
+                    // Generic type constructors (params + UnionDef/StructDef) are
+                    // compile-time entities — skip FunSig for them.
+                    if !matches!(body, Term::UnionDef(..) | Term::StructDef(..)) {
+                        let sig =
+                            FunSig::from_func(params, *m_ret, body, union_names, struct_names)
+                                .map_err(|e| Diagnostic::new(e))?;
                         self.fun_sigs.push((name, sig));
                     }
                 }
@@ -167,7 +187,7 @@ impl<'bump> Compiler<'bump> {
     }
 
     /// Erase, resolve, and filter top-level definitions. Skips union/struct
-    /// typedefs and drops zero-param type aliases after erasure.
+    /// typedefs (including generic ones) and drops zero-param type aliases after erasure.
     fn erase_and_collect_tops(
         &self,
         tops: Vec<TopLevel<'bump>>,
@@ -175,55 +195,37 @@ impl<'bump> Compiler<'bump> {
     ) -> Vec<TopLevel<'bump>> {
         tops.into_iter()
             .filter_map(|top| match top {
-                TopLevel::TLDef(_name, func_def)
-                    if func_def.params.is_empty()
-                        && (matches!(func_def.body, Term::UnionDef(..))
-                            || matches!(func_def.body, Term::StructDef(..))) =>
+                TopLevel::TLDef(_name, _params, _m_ret, body, _)
+                    if matches!(body, Term::UnionDef(..) | Term::StructDef(..)) =>
                 {
                     None
                 }
-                TopLevel::TLDef(name, _func_def) => {
-                    let term = self
-                        .env
-                        .get(name)
-                        .copied()
-                        .unwrap_or_else(|| self.arena.desugar_func_def(_func_def));
+                TopLevel::TLDef(name, params, m_ret, body_term, span) => {
+                    let term = self.env.get(name).copied().unwrap_or(body_term);
                     let resolved = self.subst_top_level(term);
-                    let erased = eraser.erase(resolved);
-                    let erased_func_def = FuncDef {
-                        name,
-                        params: _func_def.params,
-                        ret: _func_def.ret,
-                        body: erased,
-                    };
-                    Some(TopLevel::TLDef(
-                        name,
-                        self.arena.bump().alloc(erased_func_def),
-                    ))
+                    let desugared = self.checker.desugarer.desugar(resolved);
+                    let erased = eraser.erase(desugared);
+                    Some(TopLevel::TLDef(name, params, m_ret, erased, span))
                 }
-                TopLevel::TLShow(term) | TopLevel::TLExpr(term) => {
+                TopLevel::TLShow(term, span) | TopLevel::TLExpr(term, span) => {
                     let resolved = self.subst_top_level(term);
-                    Some(TopLevel::TLShow(eraser.erase(resolved)))
+                    let desugared = self.checker.desugarer.desugar(resolved);
+                    Some(TopLevel::TLShow(eraser.erase(desugared), span))
                 }
-                TopLevel::TLTheorem(name, _, body) => {
+                TopLevel::TLTheorem(name, _, body, span) => {
                     let resolved_body = self.subst_top_level(body);
-                    let erased = eraser.erase(resolved_body);
-                    let func_def = FuncDef {
-                        name,
-                        params: &[],
-                        ret: None,
-                        body: erased,
-                    };
-                    Some(TopLevel::TLDef(name, self.arena.bump().alloc(func_def)))
+                    let desugared = self.checker.desugarer.desugar(resolved_body);
+                    let erased = eraser.erase(desugared);
+                    Some(TopLevel::TLDef(name, &[], None, erased, span))
                 }
-                TopLevel::TLCheck(_, _) => None,
+                TopLevel::TLCheck(_, _, _) => None,
             })
             .filter(|top| {
                 !matches!(
                     top,
-                    TopLevel::TLDef(_, FuncDef { params, body, .. })
+                    TopLevel::TLDef(_, params, _, body, _)
                         if params.is_empty()
-                            && matches!(body, Term::Builtin(_) | Term::UnionDef(..) | Term::StructDef(..))
+                            && matches!(body, Term::Builtin(_) | Term::Named(_) | Term::UnionDef(..) | Term::StructDef(..))
                 )
             })
             .collect()
@@ -254,6 +256,11 @@ impl<'bump> Compiler<'bump> {
         &self.tops
     }
 
+    /// Get un-erased function definitions (for on-demand codegen).
+    pub fn raw_defs(&self) -> &[TopLevel<'bump>] {
+        &self.raw_defs
+    }
+
     /// Get the function signatures extracted before erasure (for C codegen).
     pub fn fun_sigs(&self) -> &[(&'bump str, FunSig)] {
         &self.fun_sigs
@@ -261,29 +268,55 @@ impl<'bump> Compiler<'bump> {
 
     // ── private helpers ──
 
+    /// Desugar a generic union/struct definition (one with type parameters)
+    /// into `Annot(Lam(...), Pi(...))` for env storage.
+    fn desugar_top_def(
+        &self,
+        _name: Name<'bump>,
+        params: &[(Name<'bump>, Option<&'bump Term<'bump>>)],
+        m_ret: Option<&'bump Term<'bump>>,
+        body: &'bump Term<'bump>,
+    ) -> &'bump Term<'bump> {
+        let func_body = params.iter().rfold(body, |b, &(_pn, _)| self.arena.lam(b));
+        let default = self.arena.builtin(self.arena.alloc_str("data"));
+        let func_type = params
+            .iter()
+            .rfold(m_ret.unwrap_or(default), |b, &(pn, mc)| {
+                self.arena.pi(pn, mc.unwrap_or(default), b)
+            });
+        self.arena.annot(func_body, func_type)
+    }
+
     /// Process a single top-level item.
     fn process_top_level(&mut self, top: TopLevel<'bump>, file: &str) -> Result<(), Diagnostic> {
         match top {
-            TopLevel::TLDef(name, func_def) => {
-                // parse_def always wraps the body in a FuncDef.
-                // For zero-parameter definitions whose body is a
-                // refinement, extract the Refine so it is properly
-                // registered in the constraint table.
-                if func_def.params.is_empty() && matches!(func_def.body, Term::UnionDef(..)) {
+            TopLevel::TLDef(name, params, _m_ret, body, _span) => {
+                if matches!(body, Term::UnionDef(..)) {
                     if !self.quiet {
                         println!("[union] {}", name);
                     }
-                    self.checker.add_union(name, func_def.body);
-                } else if func_def.params.is_empty() && matches!(func_def.body, Term::StructDef(..))
-                {
+                    let type_param_names: Vec<_> = params.iter().map(|(n, _)| *n).collect();
+                    let type_params = self.arena.alloc_slice(&type_param_names);
+                    self.checker.add_union(name, body, type_params);
+                    if !params.is_empty() {
+                        // Generic union: desugar and add to env
+                        let term = self.desugar_top_def(name, params, _m_ret, body);
+                        self.env.insert(name, term);
+                    }
+                } else if matches!(body, Term::StructDef(..)) {
                     if !self.quiet {
                         println!("[struct] {}", name);
                     }
-                    self.checker.add_struct(name, func_def.body);
-                } else if func_def.params.is_empty()
-                    && matches!(func_def.body, Term::Refine(_, _, _))
-                {
-                    let Term::Refine(_, parent, predicate) = func_def.body else {
+                    let type_param_names: Vec<_> = params.iter().map(|(n, _)| *n).collect();
+                    let type_params = self.arena.alloc_slice(&type_param_names);
+                    self.checker.add_struct(name, body, type_params);
+                    if !params.is_empty() {
+                        // Generic struct: desugar and add to env
+                        let term = self.desugar_top_def(name, params, _m_ret, body);
+                        self.env.insert(name, term);
+                    }
+                } else if params.is_empty() && matches!(body, Term::Refine(_, _, _)) {
+                    let Term::Refine(_, parent, predicate) = body else {
                         unreachable!()
                     };
                     if !self.quiet {
@@ -291,14 +324,14 @@ impl<'bump> Compiler<'bump> {
                     }
                     self.checker.add_refinement(name, parent, predicate);
                 } else {
-                    let term = self.arena.desugar_func_def(func_def);
+                    // Body is already desugared (Annot(Lam(...), Pi(...)))
                     if !self.quiet {
                         println!("[defined] {}", name);
                     }
-                    self.env.insert(name, term);
+                    self.env.insert(name, body);
                 }
             }
-            TopLevel::TLCheck(term, constraint) => {
+            TopLevel::TLCheck(term, constraint, span) => {
                 let resolved = self.resolve_all(term);
                 let resolved_constraint = self.resolve_all(constraint);
                 match self
@@ -306,7 +339,10 @@ impl<'bump> Compiler<'bump> {
                     .check(&empty_ctx(), resolved, resolved_constraint)
                 {
                     Err(err) => {
-                        return Err(Diagnostic::new(format!("{}: check failed: {}", file, err)));
+                        return Err(Diagnostic::with_span(
+                            format!("{}: check failed: {}", file, err),
+                            span,
+                        ));
                     }
                     Ok(_) => {
                         if !self.quiet {
@@ -315,7 +351,7 @@ impl<'bump> Compiler<'bump> {
                     }
                 }
             }
-            TopLevel::TLTheorem(name, prop, body) => {
+            TopLevel::TLTheorem(name, prop, body, span) => {
                 let resolved_body = self.resolve_all(body);
                 let resolved_prop = self.resolve_all(prop);
                 match self
@@ -323,20 +359,22 @@ impl<'bump> Compiler<'bump> {
                     .check(&empty_ctx(), resolved_body, resolved_prop)
                 {
                     Err(err) => {
-                        return Err(Diagnostic::new(format!(
-                            "{}: theorem check failed: {}",
-                            file, err
-                        )));
+                        return Err(Diagnostic::with_span(
+                            format!("{}: theorem check failed: {}", file, err),
+                            span,
+                        ));
                     }
                     Ok(_) => {
                         if !self.quiet {
                             println!("[theorem] {}", name);
                         }
-                        self.env.insert(name, body);
+                        // Desugar NamedLam → Lam before storing in env
+                        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
+                        self.env.insert(name, desugarer.desugar(body));
                     }
                 }
             }
-            TopLevel::TLShow(_term) => {
+            TopLevel::TLShow(_term, _span) => {
                 if self.quiet {
                     return Ok(()); // codegen handles #show separately
                 }
@@ -351,7 +389,7 @@ impl<'bump> Compiler<'bump> {
                     Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
                 }
             }
-            TopLevel::TLExpr(_term) => {
+            TopLevel::TLExpr(_term, _span) => {
                 if self.quiet {
                     return Ok(()); // codegen handles #expr separately
                 }
@@ -372,9 +410,10 @@ impl<'bump> Compiler<'bump> {
 
     /// Resolve ALL `Builtin(name)` references from the env (constants AND functions).
     /// Used for eval paths where function bodies need to be available.
+    /// Also runs the desugar pass to convert `NamedLam` → `Lam` and `Named` → `Var`.
     fn resolve_all(&self, term: &'bump Term<'bump>) -> &'bump Term<'bump> {
         let t = self.arena.map(term, &|t| {
-            if let Term::Builtin(name) = t {
+            if let Term::Builtin(name) | Term::Named(name) = t {
                 if let Some(def) = self.env.get(name) {
                     return Some(def);
                 }
@@ -385,8 +424,8 @@ impl<'bump> Compiler<'bump> {
         let t = self.resolve_variant_apps(t);
         let t = self.resolve_struct_ctors(t);
         let t = self.resolve_struct_projs(t);
-        self.arena.map(t, &|t| {
-            if let Term::Builtin(name) = t {
+        let t = self.arena.map(t, &|t| {
+            if let Term::Builtin(name) | Term::Named(name) = t {
                 if let Some((uname, idx, field_specs)) = self.checker.lookup_variant(name) {
                     if field_specs.is_empty() {
                         return Some(self.arena.variant(uname, idx, &[]));
@@ -404,7 +443,10 @@ impl<'bump> Compiler<'bump> {
                 }
             }
             None
-        })
+        });
+        // Desugar: convert NamedLam → Lam, resolve Named → Var
+        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
+        desugarer.desugar(t)
     }
 
     /// Extract the function name from a term if it's a recursive call.
@@ -415,7 +457,7 @@ impl<'bump> Compiler<'bump> {
         while let Term::App(f, _) = head {
             head = f;
         }
-        if let Term::Builtin(name) = head {
+        if let Term::Builtin(name) | Term::Named(name) = head {
             if let Some(def) = self.env.get(name) {
                 if def.is_constant() {
                     return None; // constants don't need self-reference
@@ -432,7 +474,7 @@ impl<'bump> Compiler<'bump> {
     fn subst_top_level(&self, term: &'bump Term<'bump>) -> &'bump Term<'bump> {
         // First pass: resolve env lookups for constants only
         let t = self.arena.map(term, &|t| {
-            if let Term::Builtin(name) = t {
+            if let Term::Builtin(name) | Term::Named(name) = t {
                 if let Some(def) = self.env.get(name) {
                     if def.is_constant() {
                         return Some(def);
@@ -447,7 +489,7 @@ impl<'bump> Compiler<'bump> {
         let t = self.resolve_struct_projs(t);
         // Third pass: resolve remaining zero-arg variant/struct constructors
         self.arena.map(t, &|t| {
-            if let Term::Builtin(name) = t {
+            if let Term::Builtin(name) | Term::Named(name) = t {
                 if let Some((uname, idx, field_specs)) = self.checker.lookup_variant(name) {
                     if field_specs.is_empty() {
                         return Some(self.arena.variant(uname, idx, &[]));
@@ -509,7 +551,7 @@ impl<'bump> Compiler<'bump> {
             }
         }
         args.reverse();
-        if let Term::Builtin(name) = current {
+        if let Term::Builtin(name) | Term::Named(name) = current {
             if let Some((uname, idx, field_specs)) = self.checker.lookup_variant(name) {
                 return Some((uname, idx, field_specs, args));
             }
@@ -517,7 +559,7 @@ impl<'bump> Compiler<'bump> {
         None
     }
 
-    /// Convert `App*(Builtin("name.mk"), args...)` to `StructCons(name, args)`.
+    /// Convert `App*(Named("name.mk"), args...)` to `StructCons(name, args)`.
     fn resolve_struct_ctors(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
         if let Some((sname, field_specs, args)) = self.collect_struct_args(t) {
             if args.len() == field_specs.len() {
@@ -556,7 +598,7 @@ impl<'bump> Compiler<'bump> {
             }
         }
         args.reverse();
-        if let Term::Builtin(name) = current {
+        if let Term::Builtin(name) | Term::Named(name) = current {
             if let Some((sname, field_specs)) = self.checker.lookup_struct_ctor(name) {
                 return Some((sname, field_specs, args));
             }
@@ -568,7 +610,7 @@ impl<'bump> Compiler<'bump> {
     fn resolve_struct_projs(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
         self.arena.map(t, &|node| {
             if let Term::App(f, arg) = node {
-                if let Term::Builtin(name) = f {
+                if let Term::Builtin(name) | Term::Named(name) = f {
                     if let Some(idx) = self.checker.lookup_struct_proj(name) {
                         return Some(self.arena.struct_proj(arg, idx));
                     }

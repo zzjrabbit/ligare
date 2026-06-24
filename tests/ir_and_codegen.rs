@@ -42,7 +42,7 @@ fn constraint_union_name_returns_union() {
     let names: HashSet<String> = ["MyUnion".into()].into();
     let empty = HashSet::new();
     assert_eq!(
-        constraint_to_ctype(&Term::Builtin("MyUnion"), &names, &empty).unwrap(),
+        constraint_to_ctype(&Term::Named("MyUnion"), &names, &empty).unwrap(),
         CType::Union("MyUnion".into())
     );
 }
@@ -52,7 +52,7 @@ fn constraint_struct_name_returns_struct() {
     let names: HashSet<String> = ["Point".into()].into();
     let empty = HashSet::new();
     assert_eq!(
-        constraint_to_ctype(&Term::Builtin("Point"), &empty, &names).unwrap(),
+        constraint_to_ctype(&Term::Named("Point"), &empty, &names).unwrap(),
         CType::Struct("Point".into())
     );
 }
@@ -125,6 +125,7 @@ fn codegen_match_with_str_payload() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -146,6 +147,7 @@ fn codegen_multiple_unions() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -170,6 +172,7 @@ fn codegen_function_with_match_body() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -192,6 +195,7 @@ fn codegen_wildcard_match_no_decl() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
@@ -217,6 +221,7 @@ fn codegen_constant_constructed_from_match() {
         .unwrap();
     let c = emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,

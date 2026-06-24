@@ -32,8 +32,11 @@ def fib (n : int) : int := if n < 2 then n else fib (n-1) + fib (n-2)
 theorem zero_is_nat : nat := 0 by
   exact true
 
--- Theorem with function type
+-- Theorem with function type (legacy \ syntax)
 theorem identity : int -> int := \x. x
+
+-- Theorem with fun syntax
+theorem add_one : int -> int := fun x => x + 1
 
 -- Theorem referencing a previously defined theorem
 #check zero_is_nat : nat

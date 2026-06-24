@@ -50,7 +50,13 @@ impl FunSig {
         union_names: &HashSet<String>,
         struct_names: &HashSet<String>,
     ) -> Result<Self, String> {
-        let param_types: Vec<CType> = params
+        // Filter out type-level (generic) parameters — those constrained
+        // by universe-level constraints (data, prop, theorem, proof).
+        let data_params: Vec<_> = params
+            .iter()
+            .filter(|(_, mc)| !mc.map_or(false, |c| is_type_universe(c)))
+            .collect();
+        let param_types: Vec<CType> = data_params
             .iter()
             .map(|(_, mc)| {
                 mc.map_or(Ok(CType::Int64), |c| {
@@ -59,8 +65,8 @@ impl FunSig {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ret_type = match m_ret {
-            Some(t) => constraint_to_ctype(t, union_names, struct_names)?,
-            None => infer_ret_ctype(body, &param_types),
+            Some(t) if !is_type_universe(t) => constraint_to_ctype(t, union_names, struct_names)?,
+            _ => infer_ret_ctype(body, &param_types),
         };
         Ok(FunSig {
             param_types,
@@ -87,6 +93,19 @@ fn infer_ret_ctype(body: &crate::core::syntax::Term<'_>, param_types: &[CType]) 
     }
 }
 
+/// Returns true if the constraint represents a type-level universe
+/// (data, prop, theorem, proof) — parameters with these constraints
+/// should be stripped from C function signatures.
+pub fn is_type_universe(t: &crate::core::syntax::Term<'_>) -> bool {
+    match t {
+        crate::core::syntax::Term::Builtin(name) | crate::core::syntax::Term::Named(name) => {
+            matches!(*name, "data" | "prop" | "theorem" | "proof")
+        }
+        crate::core::syntax::Term::Universe(_) => true,
+        _ => false,
+    }
+}
+
 /// Map a constraint Term to its C type.  Recognizes builtin type names,
 /// user-defined struct types, and union types;
 /// returns an error for unrecognized types.
@@ -97,13 +116,18 @@ pub fn constraint_to_ctype(
 ) -> Result<CType, String> {
     match t {
         crate::core::syntax::Term::Builtin(name) if *name == "str" => Ok(CType::Str),
-        crate::core::syntax::Term::Builtin(name) if struct_names.contains(&name.to_string()) => {
+        crate::core::syntax::Term::Builtin(name) | crate::core::syntax::Term::Named(name)
+            if struct_names.contains(&name.to_string()) =>
+        {
             Ok(CType::Struct(name.to_string()))
         }
-        crate::core::syntax::Term::Builtin(name) if union_names.contains(&name.to_string()) => {
+        crate::core::syntax::Term::Builtin(name) | crate::core::syntax::Term::Named(name)
+            if union_names.contains(&name.to_string()) =>
+        {
             Ok(CType::Union(name.to_string()))
         }
         crate::core::syntax::Term::Builtin(_)
+        | crate::core::syntax::Term::Named(_)
         | crate::core::syntax::Term::LitInt(_)
         | crate::core::syntax::Term::LitBool(_)
         | crate::core::syntax::Term::Var(_)
@@ -112,9 +136,22 @@ pub fn constraint_to_ctype(
             constraint_to_ctype(parent, union_names, struct_names)
         }
         crate::core::syntax::Term::Annot(_, c) => constraint_to_ctype(c, union_names, struct_names),
+        // Handle union type applications like `Option int` → Union("Option")
+        crate::core::syntax::Term::App(head, _) => {
+            if let crate::core::syntax::Term::Builtin(name)
+            | crate::core::syntax::Term::Named(name) = *head
+            {
+                if union_names.contains(&name.to_string()) {
+                    return Ok(CType::Union(name.to_string()));
+                }
+                if struct_names.contains(&name.to_string()) {
+                    return Ok(CType::Struct(name.to_string()));
+                }
+            }
+            Ok(CType::Int64)
+        }
         crate::core::syntax::Term::Pi(_, _, _)
         | crate::core::syntax::Term::Lam(_)
-        | crate::core::syntax::Term::App(..)
         | crate::core::syntax::Term::Let(..)
         | crate::core::syntax::Term::IfThenElse(..)
         | crate::core::syntax::Term::ByProof(..)

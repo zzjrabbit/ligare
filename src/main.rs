@@ -63,6 +63,7 @@ fn run_codegen(cli: &Cli, bump: &Bump, arena: &TermArena<'_>) {
 
     let c_source = match emit_c(
         compiler.tops(),
+        compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
