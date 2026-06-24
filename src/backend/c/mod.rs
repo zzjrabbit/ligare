@@ -39,6 +39,7 @@ pub use types::{StructInfo, TypeAnalyzer, TypeMapper, UnionInfo, VariantInfo};
 
 use crate::backend::ir::FunSig;
 use crate::core::syntax::Term;
+use crate::diagnostic::Diagnostic;
 use crate::front::parser::TopLevel;
 
 /// Convenience wrapper: produce a complete C source file.
@@ -51,7 +52,7 @@ pub fn emit_c(
     fun_sigs: &[(&str, FunSig)],
     union_types: &[(&str, &Term<'_>)],
     struct_types: &[(&str, &Term<'_>)],
-) -> Result<String, String> {
+) -> Result<String, Diagnostic> {
     let emitter = CEmitter::new(struct_types, union_types, fun_sigs)?;
     emitter.generate(tops, raw_defs, struct_types, union_types)
 }

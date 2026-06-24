@@ -3,6 +3,7 @@
 //! After type-checking, all terms classified as `prop`, `theorem`, or
 //! `proof` are erased, leaving only `data` terms for code generation.
 
+use crate::checker::builtin::BuiltinRegistry;
 use crate::checker::context::Context;
 use crate::core::classify::classify;
 use crate::core::pool::TermArena;
@@ -11,11 +12,12 @@ use crate::core::syntax::{Term, Universe};
 /// Erases proof-irrelevant subterms from a term tree.
 pub struct Eraser<'bump> {
     arena: &'bump TermArena<'bump>,
+    builtins: BuiltinRegistry,
 }
 
 impl<'bump> Eraser<'bump> {
-    pub fn new(arena: &'bump TermArena<'bump>) -> Self {
-        Self { arena }
+    pub fn new(arena: &'bump TermArena<'bump>, builtins: BuiltinRegistry) -> Self {
+        Self { arena, builtins }
     }
 
     fn unit(&self) -> &'bump Term<'bump> {
@@ -40,7 +42,7 @@ impl<'bump> Eraser<'bump> {
             Term::ByProof(Some(inner), _) => self.erase(inner),
             Term::ByProof(None, _) | Term::AutoProof => self.unit(),
             Term::App(f, a) => {
-                if classify(&Context::empty(), f) == Some(Universe::UData) {
+                if classify(&self.builtins, &Context::empty(), f) == Some(Universe::UData) {
                     self.arena.app(self.erase(f), self.erase(a))
                 } else {
                     self.unit()
@@ -51,7 +53,7 @@ impl<'bump> Eraser<'bump> {
             Term::Universe(Universe::UData) => t,
             Term::Universe(_) => self.unit(),
             Term::Builtin(_) | Term::Named(_) => {
-                if classify(&Context::empty(), t) == Some(Universe::UData) {
+                if classify(&self.builtins, &Context::empty(), t) == Some(Universe::UData) {
                     t
                 } else {
                     self.unit()
@@ -96,9 +98,9 @@ mod tests {
     use super::*;
     use bumpalo::Bump;
 
-    fn setup() -> (&'static Bump, TermArena<'static>) {
+    fn setup() -> (&'static Bump, TermArena<'static>, BuiltinRegistry) {
         let b = Box::leak(Box::new(Bump::new()));
-        (b, TermArena::new(b))
+        (b, TermArena::new(b), BuiltinRegistry::new())
     }
 
     fn s<'bump>(arena: &TermArena<'bump>, s: &str) -> &'bump str {
@@ -107,48 +109,48 @@ mod tests {
 
     #[test]
     fn lit_int_survives() {
-        let (_b, arena) = setup();
-        let eraser = Eraser::new(&arena);
+        let (_b, arena, builtins) = setup();
+        let eraser = Eraser::new(&arena, builtins.clone());
         let t = eraser.erase(arena.lit_int(42));
         assert_eq!(*t, *arena.lit_int(42));
     }
 
     #[test]
     fn lit_bool_survives() {
-        let (_b, arena) = setup();
-        let eraser = Eraser::new(&arena);
+        let (_b, arena, builtins) = setup();
+        let eraser = Eraser::new(&arena, builtins.clone());
         let t = eraser.erase(arena.lit_bool(true));
         assert_eq!(*t, *arena.lit_bool(true));
     }
 
     #[test]
     fn lit_str_survives() {
-        let (_b, arena) = setup();
-        let eraser = Eraser::new(&arena);
+        let (_b, arena, builtins) = setup();
+        let eraser = Eraser::new(&arena, builtins.clone());
         let t = eraser.erase(arena.lit_str(s(&arena, "hi")));
         assert_eq!(*t, *arena.lit_str(s(&arena, "hi")));
     }
 
     #[test]
     fn lam_survives() {
-        let (_b, arena) = setup();
-        let eraser = Eraser::new(&arena);
+        let (_b, arena, builtins) = setup();
+        let eraser = Eraser::new(&arena, builtins.clone());
         let t = eraser.erase(arena.lam(arena.lit_int(1)));
         assert_eq!(*t, *arena.lam(arena.lit_int(1)));
     }
 
     #[test]
     fn auto_proof_vanishes() {
-        let (_b, arena) = setup();
-        let eraser = Eraser::new(&arena);
+        let (_b, arena, builtins) = setup();
+        let eraser = Eraser::new(&arena, builtins.clone());
         let t = eraser.erase(arena.auto_proof());
         assert_eq!(*t, *arena.lit_int(0));
     }
 
     #[test]
     fn pi_vanishes() {
-        let (_b, arena) = setup();
-        let eraser = Eraser::new(&arena);
+        let (_b, arena, builtins) = setup();
+        let eraser = Eraser::new(&arena, builtins.clone());
         let pi = arena.pi(
             s(&arena, "x"),
             arena.builtin(s(&arena, "int")),
@@ -160,8 +162,8 @@ mod tests {
 
     #[test]
     fn annot_erases_constraint() {
-        let (_b, arena) = setup();
-        let eraser = Eraser::new(&arena);
+        let (_b, arena, builtins) = setup();
+        let eraser = Eraser::new(&arena, builtins.clone());
         let annot = arena.annot(arena.lit_int(5), arena.builtin(s(&arena, "int")));
         let t = eraser.erase(annot);
         assert_eq!(*t, *arena.lit_int(5));
@@ -169,8 +171,8 @@ mod tests {
 
     #[test]
     fn let_keeps_binding() {
-        let (_b, arena) = setup();
-        let eraser = Eraser::new(&arena);
+        let (_b, arena, builtins) = setup();
+        let eraser = Eraser::new(&arena, builtins.clone());
         let term = arena.let_(
             s(&arena, "x"),
             arena.lit_int(5),

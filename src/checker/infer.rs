@@ -1,7 +1,7 @@
 //! Type-inference / constraint-checking subroutines for `TypeChecker`.
 
 use crate::checker::TypeChecker;
-use crate::checker::builtin::{LogicKind, check_builtin, logic_kind};
+use crate::checker::builtin::LogicKind;
 use crate::checker::context::{
     Context, add_refine, add_theorem, expand_constraint, extend_ctx, extend_ctx_term, lookup_refine,
 };
@@ -96,7 +96,7 @@ impl<'bump> TypeChecker<'bump> {
                 // No type information — check for undefined names first.
                 let f_dsg = self.desugarer.desugar(f);
                 if let Term::Builtin(name) | Term::Named(name) = f_dsg
-                    && check_builtin(name).is_none()
+                    && self.builtins.checker(name).is_none()
                     && lookup_refine(name, &self.table).is_none()
                 {
                     return Err(format!("unbound: {}", name));
@@ -246,7 +246,7 @@ impl<'bump> TypeChecker<'bump> {
                 {
                     return Ok(());
                 }
-                if let Some(builtin_checker) = check_builtin(name) {
+                if let Some(builtin_checker) = self.builtins.checker(name) {
                     let evald = self.evaluator.whnf(term)?;
                     builtin_checker(evald)
                 } else if let Some((parent, pred)) = lookup_refine(name, &self.table) {
@@ -367,7 +367,7 @@ impl<'bump> TypeChecker<'bump> {
     ) -> Result<(), String> {
         // Single-arg case: (not A) — vacuous operators always succeed.
         if let Term::Builtin(name) | Term::Named(name) = head {
-            if logic_kind(name) == Some(LogicKind::Vacuous) {
+            if self.builtins.logic_kind(name) == Some(LogicKind::Vacuous) {
                 return Ok(());
             }
             // Check if this is a union/struct type application like `Option int`
@@ -383,7 +383,7 @@ impl<'bump> TypeChecker<'bump> {
         let (Term::Builtin(name) | Term::Named(name)) = *builtin else {
             return self.check_app_constraint(ctx, term, norm);
         };
-        match logic_kind(name) {
+        match self.builtins.logic_kind(name) {
             Some(LogicKind::Conj) => {
                 self.check(ctx, term, arg)?;
                 self.check(ctx, term, b)

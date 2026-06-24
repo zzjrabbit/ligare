@@ -1,3 +1,4 @@
+use ligare::checker::builtin::BuiltinRegistry;
 use ligare::checker::context::empty_ctx;
 use ligare::core::classify::classify;
 use ligare::core::pool::TermArena;
@@ -6,7 +7,7 @@ use ligare::core::syntax::{Tactic, Term, Universe};
 #[test]
 fn lit_int_is_data() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::LitInt(42)),
+        classify(&BuiltinRegistry::new(), &empty_ctx(), &Term::LitInt(42)),
         Some(Universe::UData)
     );
 }
@@ -14,7 +15,7 @@ fn lit_int_is_data() {
 #[test]
 fn lit_bool_is_data() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::LitBool(true)),
+        classify(&BuiltinRegistry::new(), &empty_ctx(), &Term::LitBool(true)),
         Some(Universe::UData)
     );
 }
@@ -22,7 +23,11 @@ fn lit_bool_is_data() {
 #[test]
 fn lam_is_data() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::Lam(&Term::Var(0))),
+        classify(
+            &BuiltinRegistry::new(),
+            &empty_ctx(),
+            &Term::Lam(&Term::Var(0))
+        ),
         Some(Universe::UData)
     );
 }
@@ -31,6 +36,7 @@ fn lam_is_data() {
 fn pi_is_prop() {
     assert_eq!(
         classify(
+            &BuiltinRegistry::new(),
             &empty_ctx(),
             &Term::Pi("", &Term::Builtin("int"), &Term::Builtin("bool"))
         ),
@@ -41,7 +47,7 @@ fn pi_is_prop() {
 #[test]
 fn auto_proof_is_proof() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::AutoProof),
+        classify(&BuiltinRegistry::new(), &empty_ctx(), &Term::AutoProof),
         Some(Universe::UProof)
     );
 }
@@ -49,7 +55,11 @@ fn auto_proof_is_proof() {
 #[test]
 fn universe_uprop_is_prop() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::Universe(Universe::UProp)),
+        classify(
+            &BuiltinRegistry::new(),
+            &empty_ctx(),
+            &Term::Universe(Universe::UProp)
+        ),
         Some(Universe::UProp)
     );
 }
@@ -57,7 +67,7 @@ fn universe_uprop_is_prop() {
 #[test]
 fn int_builtin_is_prop() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::Builtin("int")),
+        classify(&BuiltinRegistry::new(), &empty_ctx(), &Term::Builtin("int")),
         Some(Universe::UProp)
     );
 }
@@ -65,7 +75,7 @@ fn int_builtin_is_prop() {
 #[test]
 fn and_is_prop() {
     assert_eq!(
-        classify(&empty_ctx(), &Term::Builtin("and")),
+        classify(&BuiltinRegistry::new(), &empty_ctx(), &Term::Builtin("and")),
         Some(Universe::UProp)
     );
 }
@@ -74,6 +84,7 @@ fn and_is_prop() {
 fn annot_keeps_inner_universe() {
     assert_eq!(
         classify(
+            &BuiltinRegistry::new(),
             &empty_ctx(),
             &Term::Annot(&Term::LitInt(5), &Term::Builtin("int"))
         ),
@@ -87,13 +98,17 @@ fn by_proof_keeps_inner_universe() {
     let arena = TermArena::new(&bump);
     let tactics = arena.alloc_slice(&[Tactic::Exact(arena.auto_proof())]);
     let term = arena.by_proof(Some(arena.lit_int(5)), tactics);
-    assert_eq!(classify(&empty_ctx(), term), Some(Universe::UData));
+    assert_eq!(
+        classify(&BuiltinRegistry::new(), &empty_ctx(), term),
+        Some(Universe::UData)
+    );
 }
 
 #[test]
 fn if_then_else_is_data() {
     assert_eq!(
         classify(
+            &BuiltinRegistry::new(),
             &empty_ctx(),
             &Term::IfThenElse(&Term::LitBool(true), &Term::LitInt(1), &Term::LitInt(0))
         ),
@@ -106,7 +121,11 @@ fn func_is_data() {
     // After desugaring, Func becomes Annot(Lam(...), Pi(...)).
     // Lam is classified as UData, and Annot delegates to the inner term.
     assert_eq!(
-        classify(&empty_ctx(), &Term::Lam(&Term::Var(0))),
+        classify(
+            &BuiltinRegistry::new(),
+            &empty_ctx(),
+            &Term::Lam(&Term::Var(0))
+        ),
         Some(Universe::UData)
     );
 }
@@ -118,6 +137,7 @@ fn let_is_body_universe() {
     // to be data-relevant).
     assert_eq!(
         classify(
+            &BuiltinRegistry::new(),
             &empty_ctx(),
             &Term::Let("x", &Term::LitInt(5), &Term::Var(0), None)
         ),
@@ -130,7 +150,11 @@ fn unknown_builtin_is_nothing() {
     // Unknown builtins fall back to UData (classify delegates to builtin table
     // and uses UData as the default for unrecognized names).
     assert_eq!(
-        classify(&empty_ctx(), &Term::Builtin("unknown")),
+        classify(
+            &BuiltinRegistry::new(),
+            &empty_ctx(),
+            &Term::Builtin("unknown")
+        ),
         Some(Universe::UData)
     );
 }

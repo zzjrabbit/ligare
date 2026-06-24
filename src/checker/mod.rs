@@ -4,7 +4,7 @@ pub mod erase;
 pub mod infer;
 pub mod prove;
 
-use crate::checker::builtin::check_builtin;
+use crate::checker::builtin::BuiltinRegistry;
 use crate::checker::context::{ConstraintTable, Context, add_refine, empty_table, lookup_refine};
 use crate::core::debruijn::Desugarer;
 use crate::core::pool::TermArena;
@@ -27,6 +27,7 @@ pub struct TypeChecker<'bump> {
     pub(crate) arena: &'bump TermArena<'bump>,
     pub(crate) evaluator: WhnfEvaluator<'bump>,
     pub(crate) desugarer: Desugarer<'bump>,
+    pub(crate) builtins: BuiltinRegistry,
     table: ConstraintTable<'bump>,
     /// Registry of union definitions: maps union name → (UnionDef term, type_param_names)
     pub(crate) union_table: Vec<(Name<'bump>, &'bump Term<'bump>, &'bump [Name<'bump>])>,
@@ -40,6 +41,7 @@ impl<'bump> TypeChecker<'bump> {
             arena,
             evaluator: WhnfEvaluator::new(arena),
             desugarer: Desugarer::new(arena),
+            builtins: BuiltinRegistry::new(),
             table: empty_table(),
             union_table: Vec::new(),
             struct_table: Vec::new(),
@@ -242,7 +244,9 @@ impl<'bump> TypeChecker<'bump> {
             // refinement (nat).  If neither, check if it's a variant constructor
             // or a struct constructor / projector.
             Term::Builtin(name) | Term::Named(name) => {
-                if check_builtin(name).is_some() || lookup_refine(name, &self.table).is_some() {
+                if self.builtins.checker(name).is_some()
+                    || lookup_refine(name, &self.table).is_some()
+                {
                     self.check_by_constraint(ctx, desugared, constraint)
                 } else if let Some((uname, idx, _)) = self.lookup_variant(name) {
                     // Zero-arg variant constructor → wrap as Variant
@@ -274,6 +278,7 @@ impl<'bump> TypeChecker<'bump> {
             arena,
             evaluator: WhnfEvaluator::new(arena),
             desugarer: Desugarer::new(arena),
+            builtins: BuiltinRegistry::new(),
             table: table.clone(),
             union_table: Vec::new(),
             struct_table: Vec::new(),
@@ -293,9 +298,98 @@ pub fn check<'bump>(
         arena,
         evaluator: WhnfEvaluator::new(arena),
         desugarer: Desugarer::new(arena),
+        builtins: BuiltinRegistry::new(),
         table: table.clone(),
         union_table: Vec::new(),
         struct_table: Vec::new(),
     };
     checker.check(ctx, term, constraint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checker::context::empty_ctx;
+    use crate::core::syntax::Universe;
+    use bumpalo::Bump;
+
+    fn a() -> (&'static Bump, &'static TermArena<'static>) {
+        let b = Box::leak(Box::new(Bump::new()));
+        let arena = Box::leak(Box::new(TermArena::new(b)));
+        (b, arena)
+    }
+
+    fn checker(arena: &'static TermArena<'static>) -> TypeChecker<'static> {
+        TypeChecker::new(arena)
+    }
+
+    // ── basic checks ──
+
+    #[test]
+    fn int_literal_checks_as_int() {
+        let (_b, arena) = a();
+        let chk = checker(arena);
+        let t = arena.lit_int(42);
+        let c = arena.builtin(arena.alloc_str("int"));
+        assert!(chk.check(&empty_ctx(), t, c).is_ok());
+    }
+
+    #[test]
+    fn int_literal_fails_against_bool() {
+        let (_b, arena) = a();
+        let chk = checker(arena);
+        let t = arena.lit_int(42);
+        let c = arena.builtin(arena.alloc_str("bool"));
+        assert!(chk.check(&empty_ctx(), t, c).is_err());
+    }
+
+    #[test]
+    fn bool_literal_checks_as_bool() {
+        let (_b, arena) = a();
+        let chk = checker(arena);
+        let t = arena.lit_bool(true);
+        let c = arena.builtin(arena.alloc_str("bool"));
+        assert!(chk.check(&empty_ctx(), t, c).is_ok());
+    }
+
+    #[test]
+    fn literal_checks_as_data_universe() {
+        let (_b, arena) = a();
+        let chk = checker(arena);
+        let t = arena.lit_int(5);
+        let c = arena.universe(Universe::UData);
+        assert!(chk.check(&empty_ctx(), t, c).is_ok());
+    }
+
+    #[test]
+    fn lam_checks_as_pi() {
+        let (_b, arena) = a();
+        let chk = checker(arena);
+        let lam = arena.lam(arena.lit_int(5));
+        let pi = arena.pi(
+            arena.alloc_str(""),
+            arena.builtin(arena.alloc_str("int")),
+            arena.builtin(arena.alloc_str("int")),
+        );
+        assert!(chk.check(&empty_ctx(), lam, pi).is_ok());
+    }
+
+    #[test]
+    fn app_of_lam_checks() {
+        let (_b, arena) = a();
+        let chk = checker(arena);
+        // id = λx. x : int → int
+        let body = arena.annot(
+            arena.lam(arena.var(0)),
+            arena.pi(
+                arena.alloc_str(""),
+                arena.builtin(arena.alloc_str("int")),
+                arena.builtin(arena.alloc_str("int")),
+            ),
+        );
+        // id 5 should be int
+        let app = arena.app(body, arena.lit_int(5));
+        let c = arena.builtin(arena.alloc_str("int"));
+        assert!(chk.check(&empty_ctx(), app, c).is_ok());
+    }
 }

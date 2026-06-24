@@ -9,6 +9,7 @@ use crate::backend::c::names::NameResolver;
 use crate::backend::c::types::{StructInfo, UnionInfo};
 use crate::backend::ir::{CType, FunSig};
 use crate::core::syntax::{PrimOp, Term};
+use crate::diagnostic::Diagnostic;
 use std::collections::{HashMap, HashSet};
 
 /// Translates Ligare `Term` nodes into C expressions.
@@ -40,7 +41,7 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), String> {
+    ) -> Result<(String, CType), Diagnostic> {
         match term {
             Term::LitInt(n) => Ok((n.to_string(), CType::Int64)),
             Term::LitBool(b) => Ok((if *b { "1" } else { "0" }.into(), CType::Int64)),
@@ -105,7 +106,10 @@ impl<'a> ExpressionEmitter<'a> {
                 self.emit_match(_scrut, branches, ctx, union_map, struct_map)
             }
 
-            _ => Err(format!("emit_expr: unrecognized term {:?}", term)),
+            _ => Err(Diagnostic::new(format!(
+                "emit_expr: unrecognized term {:?}",
+                term
+            ))),
         }
     }
 
@@ -118,7 +122,7 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), String> {
+    ) -> Result<(String, CType), Diagnostic> {
         let type_name: String = sname.to_string();
         let field_codes: Vec<String> = field_values
             .iter()
@@ -126,7 +130,7 @@ impl<'a> ExpressionEmitter<'a> {
                 let (code, _) = self.emit_expr(v, ctx, union_map, struct_map)?;
                 Ok(code)
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, Diagnostic>>()?;
         Ok((
             format!("(({}){{ {} }})", type_name, field_codes.join(", ")),
             CType::Struct(type_name),
@@ -140,7 +144,7 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), String> {
+    ) -> Result<(String, CType), Diagnostic> {
         let (scode, sty) = self.emit_expr(subject, ctx, union_map, struct_map)?;
         if let CType::Struct(ref sname) = sty
             && let Some(info) = struct_map.get(sname)
@@ -159,7 +163,7 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), String> {
+    ) -> Result<(String, CType), Diagnostic> {
         let type_name: String = uname.to_string();
         let data_init =
             self.variant_data_init(&type_name, idx, payloads, ctx, union_map, struct_map)?;
@@ -180,7 +184,7 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<String, String> {
+    ) -> Result<String, Diagnostic> {
         if let Some(info) = union_map.get(type_name) {
             if let Some(vi) = info.variants.get(idx) {
                 if vi.fields.is_empty() {
@@ -205,7 +209,7 @@ impl<'a> ExpressionEmitter<'a> {
                             format!(".{} = {}", fnm, code)
                         })
                     })
-                    .collect::<Result<Vec<_>, String>>()?;
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
                 return Ok(format!(
                     "{{ .{} = {{ {} }} }}",
                     vi.name,
@@ -227,7 +231,7 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), String> {
+    ) -> Result<(String, CType), Diagnostic> {
         let (sc, sc_ty) = self.emit_expr(scrut, ctx, union_map, struct_map)?;
         let mut parts = vec!["match".to_string(), sc_ty.c_name(), sc];
         let mut ret_ty = CType::Int64;
@@ -263,7 +267,7 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), String> {
+    ) -> Result<(String, CType), Diagnostic> {
         let Term::App(f, a) = term else {
             unreachable!()
         };
@@ -305,7 +309,7 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, Vec<String>), String> {
+    ) -> Result<(String, Vec<String>), Diagnostic> {
         match term {
             Term::App(f, a) => {
                 let (func, mut args) = self.collect_call_args(f, ctx, union_map, struct_map)?;

@@ -6,6 +6,7 @@
 
 use crate::backend::ir::CType;
 use crate::core::syntax::{Name, Term};
+use crate::diagnostic::Diagnostic;
 use std::collections::{HashMap, HashSet};
 
 // ── Type info structs ──
@@ -37,7 +38,7 @@ pub struct StructInfo {
 /// backends or testing scenarios to plug in custom mappings.
 pub trait TypeMapper {
     /// Map a constraint Term to its C type.
-    fn constraint_to_ctype(&self, t: &Term<'_>) -> Result<CType, String>;
+    fn constraint_to_ctype(&self, t: &Term<'_>) -> Result<CType, Diagnostic>;
 
     /// Returns true if the constraint represents a type-level universe
     /// (data, prop, theorem, proof).
@@ -52,13 +53,13 @@ pub trait TypeMapper {
 /// are methods on this struct (OOP encapsulation).
 pub struct TypeAnalyzer {
     /// Set of union type names.
-    pub union_names: HashSet<String>,
+    union_names: HashSet<String>,
     /// Set of struct type names.
-    pub struct_names: HashSet<String>,
+    struct_names: HashSet<String>,
     /// Union type info keyed by name.
-    pub union_map: HashMap<String, UnionInfo>,
+    union_map: HashMap<String, UnionInfo>,
     /// Struct type info keyed by name.
-    pub struct_map: HashMap<String, StructInfo>,
+    struct_map: HashMap<String, StructInfo>,
 }
 
 impl TypeAnalyzer {
@@ -66,7 +67,7 @@ impl TypeAnalyzer {
     pub fn new(
         struct_types: &[(&str, &Term<'_>)],
         union_types: &[(&str, &Term<'_>)],
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Diagnostic> {
         let union_names: HashSet<String> = union_types.iter().map(|(n, _)| n.to_string()).collect();
         let struct_names: HashSet<String> =
             struct_types.iter().map(|(n, _)| n.to_string()).collect();
@@ -86,7 +87,7 @@ impl TypeAnalyzer {
         struct_types: &[(&str, &Term<'_>)],
         union_names: &HashSet<String>,
         struct_names: &HashSet<String>,
-    ) -> Result<HashMap<String, StructInfo>, String> {
+    ) -> Result<HashMap<String, StructInfo>, Diagnostic> {
         let mut map = HashMap::new();
         for (name, sdef) in struct_types {
             if let Term::StructDef(_, fields) = sdef {
@@ -107,7 +108,7 @@ impl TypeAnalyzer {
         union_types: &[(&str, &Term<'_>)],
         union_names: &HashSet<String>,
         struct_names: &HashSet<String>,
-    ) -> Result<HashMap<String, UnionInfo>, String> {
+    ) -> Result<HashMap<String, UnionInfo>, Diagnostic> {
         let mut map = HashMap::new();
         for (name, udef) in union_types {
             if let Term::UnionDef(_, variants) = udef {
@@ -185,7 +186,7 @@ impl TypeAnalyzer {
     // ── Typedef emission ──
 
     /// Emit a C typedef for a union type (tagged union).
-    pub fn emit_union_typedef(&self, name: &str, udef: &Term<'_>) -> Result<String, String> {
+    pub fn emit_union_typedef(&self, name: &str, udef: &Term<'_>) -> Result<String, Diagnostic> {
         let Term::UnionDef(_, variants) = udef else {
             return Ok(String::new());
         };
@@ -217,7 +218,7 @@ impl TypeAnalyzer {
     }
 
     /// Emit a C typedef for a struct type (product type with named fields).
-    pub fn emit_struct_typedef(&self, name: &str, sdef: &Term<'_>) -> Result<String, String> {
+    pub fn emit_struct_typedef(&self, name: &str, sdef: &Term<'_>) -> Result<String, Diagnostic> {
         let Term::StructDef(_, fields) = sdef else {
             return Ok(String::new());
         };
@@ -232,7 +233,11 @@ impl TypeAnalyzer {
     }
 
     /// Emit a struct typedef using pointers for union-typed fields (for cyclic deps).
-    pub fn emit_struct_typedef_ptr(&self, name: &str, sdef: &Term<'_>) -> Result<String, String> {
+    pub fn emit_struct_typedef_ptr(
+        &self,
+        name: &str,
+        sdef: &Term<'_>,
+    ) -> Result<String, Diagnostic> {
         let Term::StructDef(_, fields) = sdef else {
             return Ok(String::new());
         };
@@ -256,7 +261,7 @@ impl TypeAnalyzer {
         out: &mut String,
         struct_types: &[(&str, &Term<'_>)],
         union_types: &[(&str, &Term<'_>)],
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         // Forward declarations
         for (name, _) in struct_types {
             out.push_str(&format!("typedef struct {name} {name};\n"));
@@ -319,15 +324,27 @@ impl TypeAnalyzer {
         t: &Term<'_>,
         union_names: &HashSet<String>,
         struct_names: &HashSet<String>,
-    ) -> Result<CType, String> {
+    ) -> Result<CType, Diagnostic> {
         crate::backend::ir::constraint_to_ctype(t, union_names, struct_names)
+    }
+
+    // ── Public accessors ──
+
+    /// Access the union type map.
+    pub fn union_map(&self) -> &HashMap<String, UnionInfo> {
+        &self.union_map
+    }
+
+    /// Access the struct type map.
+    pub fn struct_map(&self) -> &HashMap<String, StructInfo> {
+        &self.struct_map
     }
 }
 
 // ── TypeMapper implementation ──
 
 impl TypeMapper for TypeAnalyzer {
-    fn constraint_to_ctype(&self, t: &Term<'_>) -> Result<CType, String> {
+    fn constraint_to_ctype(&self, t: &Term<'_>) -> Result<CType, Diagnostic> {
         crate::backend::ir::constraint_to_ctype(t, &self.union_names, &self.struct_names)
     }
 

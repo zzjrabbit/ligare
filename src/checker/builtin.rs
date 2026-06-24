@@ -1,5 +1,10 @@
+//! Builtin type registry.
+//!
+//! `BuiltinRegistry` maps builtin names (int, bool, str, data, prop, etc.)
+//! to their universes, checkers, and logic kinds.  It is constructed at
+//! startup and injected into `TypeChecker` — no global state.
+
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use crate::config::{
     BUILTIN_AND, BUILTIN_BOOL, BUILTIN_DATA, BUILTIN_IMPLIES, BUILTIN_INT, BUILTIN_NOT, BUILTIN_OR,
@@ -17,6 +22,7 @@ pub enum LogicKind {
     Vacuous,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct BuiltinEntry {
     pub universe: Universe,
     pub checker: BuiltinChecker,
@@ -58,39 +64,62 @@ fn entry(u: Universe, c: BuiltinChecker, lk: Option<LogicKind>) -> BuiltinEntry 
     }
 }
 
-static BUILTINS: LazyLock<HashMap<&'static str, BuiltinEntry>> = LazyLock::new(|| {
-    HashMap::from([
-        (BUILTIN_INT, entry(Universe::UProp, check_int, None)),
-        (BUILTIN_BOOL, entry(Universe::UProp, check_bool, None)),
-        (BUILTIN_STR, entry(Universe::UProp, check_str, None)),
-        (BUILTIN_DATA, entry(Universe::UProp, check_any, None)),
-        (BUILTIN_PROP, entry(Universe::UProp, check_any, None)),
-        (BUILTIN_THEOREM, entry(Universe::UTheorem, check_any, None)),
-        (BUILTIN_PROOF, entry(Universe::UProof, check_any, None)),
-        (
-            BUILTIN_AND,
-            entry(Universe::UProp, check_any, Some(LogicKind::Conj)),
-        ),
-        (
-            BUILTIN_OR,
-            entry(Universe::UProp, check_any, Some(LogicKind::Disj)),
-        ),
-        (
-            BUILTIN_NOT,
-            entry(Universe::UProp, check_any, Some(LogicKind::Vacuous)),
-        ),
-        (BUILTIN_IMPLIES, entry(Universe::UProp, check_any, None)),
-    ])
-});
-
-pub fn classify_builtin(name: &str) -> Option<Universe> {
-    BUILTINS.get(name).map(|e| e.universe)
+/// Registry of builtin types and logic operators.
+///
+/// Owned by `TypeChecker`; constructed once at startup.  `Classifier` can
+/// access a shared reference for universe classification.
+#[derive(Debug, Clone)]
+pub struct BuiltinRegistry {
+    table: HashMap<&'static str, BuiltinEntry>,
 }
 
-pub fn check_builtin(name: &str) -> Option<BuiltinChecker> {
-    BUILTINS.get(name).map(|e| e.checker)
+impl BuiltinRegistry {
+    /// Create the standard builtin registry.
+    pub fn new() -> Self {
+        Self {
+            table: HashMap::from([
+                (BUILTIN_INT, entry(Universe::UProp, check_int, None)),
+                (BUILTIN_BOOL, entry(Universe::UProp, check_bool, None)),
+                (BUILTIN_STR, entry(Universe::UProp, check_str, None)),
+                (BUILTIN_DATA, entry(Universe::UProp, check_any, None)),
+                (BUILTIN_PROP, entry(Universe::UProp, check_any, None)),
+                (BUILTIN_THEOREM, entry(Universe::UTheorem, check_any, None)),
+                (BUILTIN_PROOF, entry(Universe::UProof, check_any, None)),
+                (
+                    BUILTIN_AND,
+                    entry(Universe::UProp, check_any, Some(LogicKind::Conj)),
+                ),
+                (
+                    BUILTIN_OR,
+                    entry(Universe::UProp, check_any, Some(LogicKind::Disj)),
+                ),
+                (
+                    BUILTIN_NOT,
+                    entry(Universe::UProp, check_any, Some(LogicKind::Vacuous)),
+                ),
+                (BUILTIN_IMPLIES, entry(Universe::UProp, check_any, None)),
+            ]),
+        }
+    }
+
+    /// Classify a builtin name to its universe.
+    pub fn classify(&self, name: &str) -> Option<Universe> {
+        self.table.get(name).map(|e| e.universe)
+    }
+
+    /// Get the checker function for a builtin name.
+    pub fn checker(&self, name: &str) -> Option<BuiltinChecker> {
+        self.table.get(name).map(|e| e.checker)
+    }
+
+    /// Get the logic kind for a builtin name.
+    pub fn logic_kind(&self, name: &str) -> Option<LogicKind> {
+        self.table.get(name).and_then(|e| e.logic_kind)
+    }
 }
 
-pub fn logic_kind(name: &str) -> Option<LogicKind> {
-    BUILTINS.get(name).and_then(|e| e.logic_kind)
+impl Default for BuiltinRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }

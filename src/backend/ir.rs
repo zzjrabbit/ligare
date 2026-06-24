@@ -49,7 +49,7 @@ impl FunSig {
         body: &crate::core::syntax::Term<'_>,
         union_names: &HashSet<String>,
         struct_names: &HashSet<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::diagnostic::Diagnostic> {
         // Filter out type-level (generic) parameters — those constrained
         // by universe-level constraints (data, prop, theorem, proof).
         let data_params: Vec<_> = params
@@ -66,7 +66,7 @@ impl FunSig {
             .collect::<Result<Vec<_>, _>>()?;
         let ret_type = match m_ret {
             Some(t) if !is_type_universe(t) => constraint_to_ctype(t, union_names, struct_names)?,
-            _ => infer_ret_ctype(body, &param_types),
+            _ => infer_ret_ctype(body, &param_types)?,
         };
         Ok(FunSig {
             param_types,
@@ -78,10 +78,15 @@ impl FunSig {
 /// Infer the C return type from a term body, given the parameter C types
 /// (in declaration order, i.e. left-to-right).  This mirrors the type
 /// inference that `emit_fun` does during code generation.
-fn infer_ret_ctype(body: &crate::core::syntax::Term<'_>, param_types: &[CType]) -> CType {
+fn infer_ret_ctype(
+    body: &crate::core::syntax::Term<'_>,
+    param_types: &[CType],
+) -> Result<CType, crate::diagnostic::Diagnostic> {
     match body {
-        crate::core::syntax::Term::Var(i) => param_types.get(*i).cloned().unwrap_or(CType::Int64),
-        crate::core::syntax::Term::LitStr(_) => CType::Str,
+        crate::core::syntax::Term::Var(i) => {
+            Ok(param_types.get(*i).cloned().unwrap_or(CType::Int64))
+        }
+        crate::core::syntax::Term::LitStr(_) => Ok(CType::Str),
         crate::core::syntax::Term::Lam(inner) => {
             // Lambda wrapping: the inner body determines the return type.
             // Push a dummy Int64 for the lambda parameter and recurse.
@@ -89,7 +94,7 @@ fn infer_ret_ctype(body: &crate::core::syntax::Term<'_>, param_types: &[CType]) 
             extended.extend_from_slice(param_types);
             infer_ret_ctype(inner, &extended)
         }
-        _ => CType::Int64,
+        _ => Ok(CType::Int64),
     }
 }
 
@@ -113,7 +118,7 @@ pub fn constraint_to_ctype(
     t: &crate::core::syntax::Term<'_>,
     union_names: &HashSet<String>,
     struct_names: &HashSet<String>,
-) -> Result<CType, String> {
+) -> Result<CType, crate::diagnostic::Diagnostic> {
     match t {
         crate::core::syntax::Term::Builtin(name) if *name == "str" => Ok(CType::Str),
         crate::core::syntax::Term::Builtin(name) | crate::core::syntax::Term::Named(name)
@@ -164,6 +169,9 @@ pub fn constraint_to_ctype(
         | crate::core::syntax::Term::StructDef(..)
         | crate::core::syntax::Term::StructCons(..)
         | crate::core::syntax::Term::StructProj(..) => Ok(CType::Int64),
-        _ => Err(format!("Cannot map constraint {:?} to C type", t)),
+        _ => Err(crate::diagnostic::Diagnostic::new(format!(
+            "Cannot map constraint {:?} to C type",
+            t
+        ))),
     }
 }

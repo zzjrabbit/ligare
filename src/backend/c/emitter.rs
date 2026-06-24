@@ -12,6 +12,7 @@ use crate::backend::c::names::NameResolver;
 use crate::backend::c::types::{TypeAnalyzer, TypeMapper};
 use crate::backend::ir::{CType, FunSig};
 use crate::core::syntax::{Name, Term};
+use crate::diagnostic::Diagnostic;
 use crate::front::parser::TopLevel;
 use std::collections::HashSet;
 
@@ -27,7 +28,7 @@ pub trait CodeGenerator {
         raw_defs: &[TopLevel<'_>],
         struct_types: &[(&str, &Term<'_>)],
         union_types: &[(&str, &Term<'_>)],
-    ) -> Result<String, String>;
+    ) -> Result<String, Diagnostic>;
 }
 
 /// The C code emitter — orchestrates all sub-components.
@@ -59,7 +60,7 @@ impl<'a> CEmitter<'a> {
         struct_types: &[(&str, &Term<'_>)],
         union_types: &[(&str, &Term<'_>)],
         fun_sigs: &'a [(&'a str, FunSig)],
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Diagnostic> {
         let type_analyzer = TypeAnalyzer::new(struct_types, union_types)?;
         let expr_emitter = ExpressionEmitter::new(fun_sigs);
         Ok(Self {
@@ -71,18 +72,6 @@ impl<'a> CEmitter<'a> {
         })
     }
 
-    // ── Helpers for map access ──
-
-    fn union_map(&self) -> &std::collections::HashMap<String, crate::backend::c::types::UnionInfo> {
-        &self.type_analyzer.union_map
-    }
-
-    fn struct_map(
-        &self,
-    ) -> &std::collections::HashMap<String, crate::backend::c::types::StructInfo> {
-        &self.type_analyzer.struct_map
-    }
-
     // ── Definition emission ──
 
     /// Emit a top-level definition as a C function or constant.
@@ -91,7 +80,7 @@ impl<'a> CEmitter<'a> {
         name: &str,
         params: &[(Name<'_>, Option<&Term<'_>>)],
         body: &Term<'_>,
-    ) -> Result<String, String> {
+    ) -> Result<String, Diagnostic> {
         if params.is_empty() {
             let arity = self.name_resolver.count_lams(body);
             if arity == 0 {
@@ -99,8 +88,8 @@ impl<'a> CEmitter<'a> {
                 let (code, ctype) = self.expr_emitter.emit_expr(
                     body,
                     &mut ctx,
-                    self.union_map(),
-                    self.struct_map(),
+                    self.type_analyzer.union_map(),
+                    self.type_analyzer.struct_map(),
                 )?;
                 Ok(format!(
                     "const {} {} = {};\n",
@@ -144,7 +133,7 @@ impl<'a> CEmitter<'a> {
         params: &[String],
         param_types: &[CType],
         body: &Term<'_>,
-    ) -> Result<String, String> {
+    ) -> Result<String, Diagnostic> {
         let cps: Vec<String> = params
             .iter()
             .zip(param_types.iter())
@@ -152,13 +141,16 @@ impl<'a> CEmitter<'a> {
             .collect();
         let mut ctx = EmitCtx::from_params(params, param_types);
         ctx.self_name = Some(name.to_string());
-        let (body_code, ret_ty) =
-            self.expr_emitter
-                .emit_expr(body, &mut ctx, self.union_map(), self.struct_map())?;
+        let (body_code, ret_ty) = self.expr_emitter.emit_expr(
+            body,
+            &mut ctx,
+            self.type_analyzer.union_map(),
+            self.type_analyzer.struct_map(),
+        )?;
         let return_stmt = if body_code.starts_with("match__") {
             let block =
                 self.match_emitter
-                    .emit(&body_code, &ret_ty, 0, &self.type_analyzer.union_map);
+                    .emit(&body_code, &ret_ty, 0, self.type_analyzer.union_map());
             format!("{block}    return {};\n", self.name_resolver.result_temp(0))
         } else {
             format!("    return {};\n", body_code)
@@ -192,7 +184,7 @@ impl<'a> CodeGenerator for CEmitter<'a> {
         raw_defs: &[TopLevel<'_>],
         struct_types: &[(&str, &Term<'_>)],
         union_types: &[(&str, &Term<'_>)],
-    ) -> Result<String, String> {
+    ) -> Result<String, Diagnostic> {
         let mut out =
             String::from("#include <stdio.h>\n#include <stdint.h>\n#include <stddef.h>\n\n");
 
@@ -248,15 +240,15 @@ impl<'a> CodeGenerator for CEmitter<'a> {
                 let (expr, ctype) = self.expr_emitter.emit_expr(
                     term,
                     &mut ctx,
-                    self.union_map(),
-                    self.struct_map(),
+                    self.type_analyzer.union_map(),
+                    self.type_analyzer.struct_map(),
                 )?;
                 if expr.starts_with("match__") {
                     let block = self.match_emitter.emit(
                         &expr,
                         &ctype,
                         match_counter,
-                        &self.type_analyzer.union_map,
+                        self.type_analyzer.union_map(),
                     );
                     match_counter += 1;
                     out.push_str(&block);

@@ -1,11 +1,15 @@
-use crate::checker::builtin::classify_builtin;
+use crate::checker::builtin::BuiltinRegistry;
 use crate::checker::context::Context;
 use crate::core::syntax::{Term, Universe};
 
 pub struct Classifier;
 
 impl Classifier {
-    pub fn classify(ctx: &Context<'_>, t: &Term<'_>) -> Option<Universe> {
+    pub fn classify(
+        builtins: &BuiltinRegistry,
+        ctx: &Context<'_>,
+        t: &Term<'_>,
+    ) -> Option<Universe> {
         match t {
             Term::LitInt(_)
             | Term::LitBool(_)
@@ -14,40 +18,37 @@ impl Classifier {
             | Term::NamedLam(_, _)
             | Term::PrimOp(_)
             | Term::RefParam => Some(Universe::UData),
-            Term::App(f, _) => Self::classify(ctx, f),
+            Term::App(f, _) => Self::classify(builtins, ctx, f),
             Term::Universe(u) => Some(*u),
             Term::AutoProof => Some(Universe::UProof),
             Term::Pi(_, _, _) | Term::Refine(_, _, _) => Some(Universe::UProp),
-            // Variables in an empty or unknown context are conservatively
-            // assumed to be data-relevant (this handles function parameters
-            // during erasure, where the typing context is not available).
             Term::Var(i) => ctx
                 .lookup(*i)
-                .and_then(|ty| Self::classify(ctx, ty))
+                .and_then(|ty| Self::classify(builtins, ctx, ty))
                 .or(Some(Universe::UData)),
-            Term::Annot(t, _) => Self::classify(ctx, t),
-            Term::ByProof(Some(t), _) => Self::classify(ctx, t),
+            Term::Annot(t, _) => Self::classify(builtins, ctx, t),
+            Term::ByProof(Some(t), _) => Self::classify(builtins, ctx, t),
             Term::ByProof(None, _) => Some(Universe::UProof),
-            Term::Let(_, _, body, _) => Self::classify(ctx, body),
-            Term::IfThenElse(_, t, _) => Self::classify(ctx, t),
+            Term::Let(_, _, body, _) => Self::classify(builtins, ctx, body),
+            Term::IfThenElse(_, t, _) => Self::classify(builtins, ctx, t),
             Term::Builtin(name) | Term::Named(name) => {
-                classify_builtin(name).or(Some(Universe::UData))
+                builtins.classify(name).or(Some(Universe::UData))
             }
             Term::UnionDef(..) => Some(Universe::UProp),
             Term::Variant(..) => Some(Universe::UData),
             Term::StructDef(..) => Some(Universe::UProp),
             Term::StructCons(..) => Some(Universe::UData),
-            Term::StructProj(subject, _) => Self::classify(ctx, subject),
+            Term::StructProj(subject, _) => Self::classify(builtins, ctx, subject),
             Term::Match(_, branches) => {
                 // Match type = type of first branch (all branches must agree)
                 branches
                     .first()
-                    .and_then(|(_, _, body)| Self::classify(ctx, body))
+                    .and_then(|(_, _, body)| Self::classify(builtins, ctx, body))
             }
         }
     }
 }
 
-pub fn classify(ctx: &Context<'_>, t: &Term<'_>) -> Option<Universe> {
-    Classifier::classify(ctx, t)
+pub fn classify(builtins: &BuiltinRegistry, ctx: &Context<'_>, t: &Term<'_>) -> Option<Universe> {
+    Classifier::classify(builtins, ctx, t)
 }
