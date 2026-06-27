@@ -2,7 +2,6 @@ use logos::Logos;
 
 use bumpalo::Bump;
 
-use crate::core::debruijn::build_destruct_projections;
 use crate::core::pool::{StringPool, TermArena};
 use crate::core::syntax::{Name, PrimOp, Tactic, Term};
 use crate::diagnostic::Span;
@@ -176,7 +175,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     }
 
     pub fn parse_expr_top(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        let t = self.parse_expr(&[])?;
+        let t = self.parse_expr()?;
         if !self.is_at_end() {
             return Err(ParseError {
                 message: "unexpected tokens after expression".into(),
@@ -200,12 +199,12 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             self.advance();
             let name = self.parse_ident()?;
             let prop = if self.try_expect(&Token::Colon) {
-                self.parse_expr(&[])?
+                self.parse_expr()?
             } else {
                 self.arena.builtin(self.pool.intern("data"))
             };
             self.expect(&Token::ColonEq)?;
-            let body = self.parse_expr(&[])?;
+            let body = self.parse_expr()?;
             return Ok(TopLevel::TLTheorem(name, prop, body, start_span));
         }
         if self.peek_token() == Some(Token::KwDef) {
@@ -217,14 +216,14 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             // Suppress `:` type-annotation suffix so that `:` is reserved
             // for the constraint separator (e.g. `#check s some_sth : str`).
             self.no_annot = true;
-            let full_term = self.parse_expr(&[])?;
+            let full_term = self.parse_expr()?;
             self.no_annot = false;
             // If `parse_expr` already returned an annotation (from `:`),
             // split it; otherwise expect `:` and parse constraint.
             let (term, constraint) = if let Term::Annot(t, c) = full_term {
                 (*t, *c)
             } else if self.try_expect(&Token::Colon) {
-                (full_term, self.parse_expr(&[])?)
+                (full_term, self.parse_expr()?)
             } else {
                 (full_term, self.arena.builtin(self.pool.intern("data")))
             };
@@ -232,42 +231,38 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         }
         if self.peek_token() == Some(Token::HashShow) {
             self.advance();
-            return Ok(TopLevel::TLShow(self.parse_expr(&[])?, start_span));
+            return Ok(TopLevel::TLShow(self.parse_expr()?, start_span));
         }
-        Ok(TopLevel::TLExpr(self.parse_expr(&[])?, start_span))
+        Ok(TopLevel::TLExpr(self.parse_expr()?, start_span))
     }
 
     // ── Expressions ──
 
-    fn parse_app_no_annot(
-        &mut self,
-        env: &[Name<'bump>],
-    ) -> Result<&'bump Term<'bump>, ParseError> {
-        self.parse_app_generic(env, |s, e| s.parse_term_no_annot(e))
+    fn parse_app_no_annot(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        self.parse_app_generic(|s| s.parse_term_no_annot())
     }
 
     fn parse_app_generic(
         &mut self,
-        env: &[Name<'bump>],
-        parse_term_fn: impl Fn(&mut Self, &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError>,
+        parse_term_fn: impl Fn(&mut Self) -> Result<&'bump Term<'bump>, ParseError>,
     ) -> Result<&'bump Term<'bump>, ParseError> {
-        if let Ok(t) = self.parse_let_expr(env) {
+        if let Ok(t) = self.parse_let_expr() {
             return Ok(t);
         }
-        if let Ok(t) = self.parse_func_expr(env) {
+        if let Ok(t) = self.parse_func_expr() {
             return Ok(t);
         }
         if let Ok(t) = self.parse_dep_arrow_expr() {
             return Ok(t);
         }
-        let mut result = parse_term_fn(self, env)?;
+        let mut result = parse_term_fn(self)?;
         loop {
             if let Some(tok) = self.peek_token()
                 && (Self::token_precedence(&tok).is_some() || Self::is_top_level_start(&tok))
             {
                 break;
             }
-            match parse_term_fn(self, env) {
+            match parse_term_fn(self) {
                 Ok(t) => result = self.arena.app(result, t),
                 Err(_) => break,
             }
@@ -286,11 +281,8 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         )
     }
 
-    fn parse_term_no_annot(
-        &mut self,
-        env: &[Name<'bump>],
-    ) -> Result<&'bump Term<'bump>, ParseError> {
-        let t = self.parse_atom(env)?;
+    fn parse_term_no_annot(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        let t = self.parse_atom()?;
         self.parse_refine_only(t)
     }
 
@@ -309,7 +301,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     fn parse_def(&mut self) -> Result<ParsedDef<'bump>, ParseError> {
         self.expect(&Token::KwDef)?;
         let name = self.parse_ident()?;
-        let (params, m_ret, body) = self.parse_func_body(name, &[])?;
+        let (params, m_ret, body) = self.parse_func_body(name)?;
         let params_slice = self.arena.alloc_slice(&params);
         // Union/struct bodies are kept as-is; regular function bodies are desugared.
         let body = if matches!(body, Term::UnionDef(..) | Term::StructDef(..)) {
@@ -341,13 +333,9 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         self.arena.annot(func_body, func_type)
     }
 
-    fn parse_func_body(
-        &mut self,
-        name: Name<'bump>,
-        outer_env: &[Name<'bump>],
-    ) -> Result<ParsedFuncBody<'bump>, ParseError> {
+    fn parse_func_body(&mut self, name: Name<'bump>) -> Result<ParsedFuncBody<'bump>, ParseError> {
         let params = self.parse_many_curried_params();
-        let m_ret = self.parse_type_annotation(&[], outer_env);
+        let m_ret = self.parse_type_annotation();
         self.expect(&Token::ColonEq)?;
         // Check for union / struct body (zero-param definitions)
         let body_expr = if self.peek_token() == Some(Token::KwUnion) {
@@ -355,10 +343,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         } else if self.peek_token() == Some(Token::KwStruct) {
             self.parse_struct_body(name)?
         } else {
-            let param_names: Vec<Name<'bump>> = params.iter().map(|(n, _)| *n).collect();
-            let mut env: Vec<Name<'bump>> = param_names.iter().rev().copied().collect();
-            env.extend_from_slice(outer_env);
-            self.parse_expr(&env)?
+            self.parse_expr()?
         };
         Ok((params, m_ret, body_expr))
     }
@@ -371,7 +356,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             Ok(n) => n,
             Err(_) => return None,
         };
-        let mconstr = self.parse_type_annotation(&[], &[]);
+        let mconstr = self.parse_type_annotation();
         if !self.try_expect(&Token::RParen) {
             return None;
         }
@@ -388,40 +373,38 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     // ── Expressions ──
 
-    fn parse_expr(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
-        if let Ok(t) = self.parse_match_expr(env) {
+    fn parse_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        if let Ok(t) = self.parse_match_expr() {
             return Ok(t);
         }
-        if let Ok(t) = self.parse_if_expr(env) {
+        if let Ok(t) = self.parse_if_expr() {
             return Ok(t);
         }
-        self.parse_operators(env, false)
+        self.parse_operators(false)
     }
 
-    fn parse_if_expr(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_if_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         if !self.try_expect(&Token::KwIf) {
             return Err(ParseError {
                 message: "not an if expression".into(),
                 span: 0..0,
             });
         }
-        let cond = self.parse_expr(env)?;
+        let cond = self.parse_expr()?;
         self.expect(&Token::KwThen)?;
-        let tbranch = self.parse_expr(env)?;
+        let tbranch = self.parse_expr()?;
         self.expect(&Token::KwElse)?;
-        Ok(self
-            .arena
-            .if_then_else(cond, tbranch, self.parse_expr(env)?))
+        Ok(self.arena.if_then_else(cond, tbranch, self.parse_expr()?))
     }
 
-    fn parse_match_expr(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_match_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         if !self.try_expect(&Token::KwMatch) {
             return Err(ParseError {
                 message: "not a match expression".into(),
                 span: 0..0,
             });
         }
-        let scrutinee = self.parse_expr(env)?;
+        let scrutinee = self.parse_expr()?;
         self.expect(&Token::KwWith)?;
         // Parse branches: `| Pattern => body` repeated
         let mut branches: Vec<ParsedMatchBranch<'bump>> = Vec::new();
@@ -442,10 +425,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 binds.push((bind_name, bind_ty));
             }
             self.expect(&Token::FatArrow)?;
-            // Build extended env with bindings
-            let mut ext_env: Vec<Name<'bump>> = binds.iter().map(|(n, _)| *n).collect();
-            ext_env.extend_from_slice(env);
-            let body = self.parse_expr(&ext_env)?;
+            let body = self.parse_expr()?;
             // Use variant name as index placeholder — real index resolved during check
             let idx = branches.len();
             branches.push((idx, binds, body));
@@ -484,7 +464,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                     }
                     let fname = self.parse_ident()?;
                     let fty = if self.try_expect(&Token::Colon) {
-                        self.parse_expr(&[])?
+                        self.parse_expr()?
                     } else {
                         self.arena.builtin(self.pool.intern("data"))
                     };
@@ -529,7 +509,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 }
             };
             let fty = if self.try_expect(&Token::Colon) {
-                self.parse_term_no_annot(&[])?
+                self.parse_term_no_annot()?
             } else {
                 self.arena.builtin(self.pool.intern("data"))
             };
@@ -544,26 +524,22 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(self.arena.struct_def(name, self.arena.alloc_slice(&fields)))
     }
 
-    fn parse_operators(
-        &mut self,
-        env: &[Name<'bump>],
-        no_annot: bool,
-    ) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_operators(&mut self, no_annot: bool) -> Result<&'bump Term<'bump>, ParseError> {
         let app = if no_annot {
-            self.parse_app_no_annot(env)?
+            self.parse_app_no_annot()?
         } else {
-            self.parse_app(env)?
+            self.parse_app()?
         };
-        self.parse_binop_rhs(env, app, 0, no_annot)
+        self.parse_binop_rhs(app, 0, no_annot)
     }
 
-    fn parse_app(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
-        self.parse_app_generic(env, |s, e| s.parse_term(e))
+    fn parse_app(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        self.parse_app_generic(|s| s.parse_term())
     }
 
     // ── Let ──
 
-    fn parse_let_expr(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_let_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         if !self.try_expect(&Token::KwLet) {
             return Err(ParseError {
                 message: "not a let expression".into(),
@@ -573,20 +549,18 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         let name = self.parse_ident()?;
         // Check for destructuring: `let Name{field1, field2, ...} := val in body`
         if self.try_expect(&Token::LBrace) {
-            return self.parse_let_destruct(env, name);
+            return self.parse_let_destruct(name);
         }
-        let m_constraint = self.parse_type_annotation(&[], env);
-        let m_proof = self.parse_by_proof_clause(env);
+        let m_constraint = self.parse_type_annotation();
+        let m_proof = self.parse_by_proof_clause();
         self.expect(&Token::ColonEq)?;
-        let val = self.parse_expr(env)?;
+        let val = self.parse_expr()?;
         let val = match m_proof {
             Some(tactics) => self.arena.by_proof(Some(val), tactics),
             None => val,
         };
         self.expect(&Token::KwIn)?;
-        let mut extended_env: Vec<Name<'bump>> = vec![name];
-        extended_env.extend_from_slice(env);
-        let body = self.parse_expr(&extended_env)?;
+        let body = self.parse_expr()?;
         Ok(self.arena.let_(name, val, body, m_constraint))
     }
 
@@ -594,7 +568,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     /// Desugars to nested `let field1 := Name.field1 val in let field2 := ... in body`
     fn parse_let_destruct(
         &mut self,
-        env: &[Name<'bump>],
         struct_name: Name<'bump>,
     ) -> Result<&'bump Term<'bump>, ParseError> {
         let mut field_names: Vec<Name<'bump>> = Vec::new();
@@ -613,41 +586,23 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             });
         }
         // Optional type annotation on the whole struct value
-        let _m_constraint = self.parse_type_annotation(&[], env);
+        let _m_constraint = self.parse_type_annotation();
         self.expect(&Token::ColonEq)?;
-        let val = self.parse_expr(env)?;
+        let val = self.parse_expr()?;
         self.expect(&Token::KwIn)?;
         // Build nested let bindings.
         // Desugar `let Point{x, y} := val in body` to:
         //   let x := Point.x val in let y := Point.y val in body
-        // where each inner `val` has its De Bruijn indices shifted by 1.
+        // Since parser terms use Named (not Var), no de Bruijn shifting is needed.
+        let mut body = self.parse_expr()?;
 
-        // First, extend the env with ALL field names and parse the body.
-        // Execution order: `let x := ... in let y := ... in body`
-        // means the execution stack is [y, x, pt] (y at index 0).
-        // So build env in the same order: innermost first.
-        let mut ext_env: Vec<Name<'bump>> = env.to_vec();
-        for fname in field_names.iter() {
-            ext_env.insert(0, fname);
-        }
-        let mut body = self.parse_expr(&ext_env)?;
-
-        // Then wrap with lets, outermost first.
-        // Build projection names (e.g. "Point.x", "Point.y") and use
-        // `build_destruct_projections` to handle de Bruijn index shifting
-        // properly (respecting binder cutoffs).
-        let arena = self.arena;
-        let mut proj_names: Vec<&'bump str> = Vec::with_capacity(field_names.len());
-        for fname in field_names.iter() {
-            proj_names.push(self.pool.intern(&format!("{}.{}", struct_name, fname)));
-        }
-        let projs = build_destruct_projections(arena, &proj_names, val);
-        // Now build nested lets using the projections.
+        // Build nested lets using the projections.
         // Iterate in reverse so that the first-declared field (e.g. x)
-        // is the outermost let, matching the De Bruijn shifts computed
-        // above and the ext_env order used when parsing the body.
-        for (fname, proj) in field_names.iter().rev().zip(projs.iter().rev()) {
-            body = arena.let_(fname, proj, body, None);
+        // is the outermost let.
+        for fname in field_names.iter().rev() {
+            let proj_name = self.pool.intern(&format!("{}.{}", struct_name, fname));
+            let proj = self.arena.app(self.arena.named(proj_name), val);
+            body = self.arena.let_(fname, proj, body, None);
         }
         Ok(body)
     }
@@ -671,27 +626,20 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         }
     }
 
-    fn parse_type_annotation(
-        &mut self,
-        env: &[Name<'bump>],
-        outer_env: &[Name<'bump>],
-    ) -> Option<&'bump Term<'bump>> {
+    fn parse_type_annotation(&mut self) -> Option<&'bump Term<'bump>> {
         self.no_by = true;
-        // Build combined env: innermost params first, then outer env.
-        let mut combined: Vec<Name<'bump>> = env.to_vec();
-        combined.extend_from_slice(outer_env);
-        let result = self.try_parse(Token::Colon, |s| s.parse_expr(&combined));
+        let result = self.try_parse(Token::Colon, |s| s.parse_expr());
         self.no_by = false;
         result
     }
 
-    fn parse_by_proof_clause(&mut self, env: &[Name<'bump>]) -> Option<&'bump [Tactic<'bump>]> {
-        self.try_parse(Token::KwBy, |s| s.parse_tactics(env))
+    fn parse_by_proof_clause(&mut self) -> Option<&'bump [Tactic<'bump>]> {
+        self.try_parse(Token::KwBy, |s| s.parse_tactics())
     }
 
     // ── Func ──
 
-    fn parse_func_expr(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_func_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         if !self.try_expect(&Token::KwFunc) {
             return Err(ParseError {
                 message: "not a func expression".into(),
@@ -699,7 +647,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             });
         }
         let name = self.parse_ident()?;
-        let (params, m_ret, body) = self.parse_func_body(name, env)?;
+        let (params, m_ret, body) = self.parse_func_body(name)?;
         Ok(self.desugar_def(name, &params, m_ret, body))
     }
 
@@ -730,7 +678,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 span: 0..0,
             });
         }
-        let a = match self.parse_expr(&[]) {
+        let a = match self.parse_expr() {
             Ok(t) => t,
             Err(_) => {
                 self.pos = saved;
@@ -754,37 +702,33 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 span: 0..0,
             });
         }
-        Ok(self.arena.pi(x, a, self.parse_expr(&[x])?))
+        Ok(self.arena.pi(x, a, self.parse_expr()?))
     }
 
     // ── Term ──
 
-    fn parse_term(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
-        let t = self.parse_atom(env)?;
-        self.parse_suffixes(env, t)
+    fn parse_term(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        let t = self.parse_atom()?;
+        self.parse_suffixes(t)
     }
 
-    fn parse_suffixes(
-        &mut self,
-        env: &[Name<'bump>],
-        t: &'bump Term<'bump>,
-    ) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_suffixes(&mut self, t: &'bump Term<'bump>) -> Result<&'bump Term<'bump>, ParseError> {
         match self.try_parse_refine_suffix(t) {
-            Ok(t2) => self.parse_suffixes(env, t2),
+            Ok(t2) => self.parse_suffixes(t2),
             Err(_) => {
                 // `:` type-annotation suffix — suppressed in `#check`
                 // context so that `:` is reserved for the constraint
                 // separator (e.g. `#check s some_sth : str`).
                 if !self.no_annot
-                    && let Some(c) = self.try_parse(Token::Colon, |s| s.parse_expr(env))
+                    && let Some(c) = self.try_parse(Token::Colon, |s| s.parse_expr())
                 {
-                    return self.parse_suffixes(env, self.arena.annot(t, c));
+                    return self.parse_suffixes(self.arena.annot(t, c));
                 }
                 // `by` suffix: term by tactic1; tactic2; ...
                 if !self.no_by
-                    && let Some(tactics) = self.parse_by_proof_clause(env)
+                    && let Some(tactics) = self.parse_by_proof_clause()
                 {
-                    return self.parse_suffixes(env, self.arena.by_proof(Some(t), tactics));
+                    return self.parse_suffixes(self.arena.by_proof(Some(t), tactics));
                 }
                 // `.field` suffix: dotted name access (struct construction/projection)
                 if self.peek_token() == Some(Token::Dot)
@@ -793,7 +737,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                     self.advance(); // consume `.`
                     let field = self.parse_ident()?;
                     let dotted = self.pool.intern(&format!("{}.{}", name, field));
-                    return self.parse_suffixes(env, self.arena.named(dotted));
+                    return self.parse_suffixes(self.arena.named(dotted));
                 }
                 Ok(t)
             }
@@ -807,7 +751,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         self.arena.builtin(self.pool.intern(name))
     }
 
-    fn parse_atom(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_atom(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         match self.peek_token() {
             Some(Token::IntLit(n)) => {
                 self.advance();
@@ -837,19 +781,19 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 self.advance();
                 Ok(self.arena.auto_proof())
             }
-            Some(Token::Ident(_)) => self.parse_var(env),
-            Some(Token::Backslash) | Some(Token::Lambda) => self.parse_lam(env),
-            Some(Token::KwFun) => self.parse_fun_lam(env),
+            Some(Token::Ident(_)) => self.parse_var(),
+            Some(Token::Backslash) | Some(Token::Lambda) => self.parse_lam(),
+            Some(Token::KwFun) => self.parse_fun_lam(),
             Some(Token::Minus) => {
                 self.advance();
-                let t = self.parse_atom(env)?;
+                let t = self.parse_atom()?;
                 Ok(self.arena.app(
                     self.arena
                         .app(self.arena.prim_op(PrimOp::Sub), self.arena.lit_int(0)),
                     t,
                 ))
             }
-            Some(Token::LParen) => self.parse_parens(env),
+            Some(Token::LParen) => self.parse_parens(),
             Some(Token::KwBy) => {
                 if self.no_by {
                     // Inside a type annotation, `by` belongs to the
@@ -861,7 +805,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 }
                 // Standalone `by` block (first-class proof).
                 self.advance();
-                let tactics = self.parse_tactics(env)?;
+                let tactics = self.parse_tactics()?;
                 Ok(self.arena.by_proof(None, tactics))
             }
             Some(tok) => {
@@ -878,7 +822,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         }
     }
 
-    fn parse_var(&mut self, _env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_var(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         let name = self.parse_ident()?;
         if KEYWORDS.contains(&name) && !matches!(name, "data" | "prop" | "theorem" | "proof") {
             Err(ParseError {
@@ -910,7 +854,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         }
     }
 
-    fn parse_lam(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_lam(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         match self.peek_token() {
             Some(Token::Backslash) | Some(Token::Lambda) => self.advance(),
             _ => {
@@ -929,10 +873,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             params.push(self.parse_ident()?);
         }
         self.expect(&Token::Dot)?;
-        // Build environment: innermost param (last) is Var(0)
-        let mut extended_env: Vec<Name<'bump>> = params.clone();
-        extended_env.extend_from_slice(env);
-        let body = self.parse_expr(&extended_env)?;
+        let body = self.parse_expr()?;
         // Wrap in curried named lambdas: \x y. body  ⟹  NamedLam(x, NamedLam(y, body))
         Ok(params
             .into_iter()
@@ -942,15 +883,11 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     /// Parse `fun` lambda expression: `fun x y => body` or `fun (x : int) y => body`.
     /// Desugars to curried `Annot(Lam(...), Pi(...))` so constrained parameters
     /// are type-checked against their annotations.
-    fn parse_fun_lam(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_fun_lam(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         self.advance(); // consume `fun`
         let params = self.parse_many_fun_params()?;
         self.expect(&Token::FatArrow)?;
-        // Build environment: innermost param (last) is Var(0)
-        let param_names: Vec<Name<'bump>> = params.iter().map(|(n, _)| *n).collect();
-        let mut extended_env = param_names.clone();
-        extended_env.extend_from_slice(env);
-        let body = self.parse_expr(&extended_env)?;
+        let body = self.parse_expr()?;
         // Wrap in curried named lambdas: fun x y => body  ⟹  NamedLam(x, NamedLam(y, body))
         let func_body = params
             .iter()
@@ -976,7 +913,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 Some(Token::LParen) => {
                     self.advance();
                     let pname = self.parse_ident()?;
-                    let mconstr = self.parse_type_annotation(&[], &[]);
+                    let mconstr = self.parse_type_annotation();
                     self.expect(&Token::RParen)?;
                     params.push((pname, mconstr));
                 }
@@ -996,13 +933,13 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(params)
     }
 
-    fn parse_parens(&mut self, env: &[Name<'bump>]) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_parens(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         self.expect(&Token::LParen)?;
         // Inside parentheses, restore full annotation support even when
         // the outer context (e.g. `#check`) suppresses `:` annotations.
         let saved = self.no_annot;
         self.no_annot = false;
-        let t = self.parse_expr(env)?;
+        let t = self.parse_expr()?;
         self.no_annot = saved;
         self.expect(&Token::RParen)?;
         Ok(t)
@@ -1023,7 +960,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         self.expect(&Token::LParen)?;
         let param_name = self.parse_ident()?;
         self.expect(&Token::FatArrow)?;
-        let predicate = self.parse_expr(&[param_name])?;
+        let predicate = self.parse_expr()?;
         self.expect(&Token::RParen)?;
         // Store the actual parameter name in the Refine node so the
         // desugarer can replace Named(param_name) → RefParam.
@@ -1050,7 +987,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     fn parse_binop_rhs(
         &mut self,
-        env: &[Name<'bump>],
         mut lhs: &'bump Term<'bump>,
         min_prec: i32,
         no_annot: bool,
@@ -1066,11 +1002,11 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             };
             if tok == Token::ThinArrow {
                 self.advance();
-                let rhs_atom = self.parse_app_any(env, no_annot)?;
+                let rhs_atom = self.parse_app_any(no_annot)?;
                 return Ok(self.arena.pi(
                     self.pool.intern(""),
                     lhs,
-                    self.parse_binop_rhs(env, rhs_atom, next_min, no_annot)?,
+                    self.parse_binop_rhs(rhs_atom, next_min, no_annot)?,
                 ));
             }
             if tok == Token::Slash && self.peek_ahead_is(&Token::Eq) {
@@ -1091,8 +1027,8 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 Token::Gt => PrimOp::Gt,
                 _ => unreachable!(),
             };
-            let rhs_atom = self.parse_app_any(env, no_annot)?;
-            let rhs = self.parse_binop_rhs(env, rhs_atom, next_min, no_annot)?;
+            let rhs_atom = self.parse_app_any(no_annot)?;
+            let rhs = self.parse_binop_rhs(rhs_atom, next_min, no_annot)?;
             lhs = self
                 .arena
                 .app(self.arena.app(self.arena.prim_op(op), lhs), rhs);
@@ -1100,15 +1036,11 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(lhs)
     }
 
-    fn parse_app_any(
-        &mut self,
-        env: &[Name<'bump>],
-        no_annot: bool,
-    ) -> Result<&'bump Term<'bump>, ParseError> {
+    fn parse_app_any(&mut self, no_annot: bool) -> Result<&'bump Term<'bump>, ParseError> {
         if no_annot {
-            self.parse_app_no_annot(env)
+            self.parse_app_no_annot()
         } else {
-            self.parse_app(env)
+            self.parse_app()
         }
     }
 
@@ -1125,7 +1057,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     /// Tactics are separated by newlines or semicolons.  The last tactic
     /// may be a bare expression (implicit `exact`).  Stops at terminator
     /// tokens (`:=`, `in`, `:`, `)`, etc.) or EOF.
-    fn parse_tactics(&mut self, env: &[Name<'bump>]) -> Result<&'bump [Tactic<'bump>], ParseError> {
+    fn parse_tactics(&mut self) -> Result<&'bump [Tactic<'bump>], ParseError> {
         let mut tactics: Vec<Tactic<'bump>> = Vec::new();
         loop {
             // Stop at tokens that end the tactic block.
@@ -1146,7 +1078,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 | Some((Token::HashShow, _)) => break,
                 _ => {}
             }
-            let tactic = self.parse_tactic(env)?;
+            let tactic = self.parse_tactic()?;
             tactics.push(tactic);
             // Skip optional `;` separator.
             // Newlines are already consumed by `advance` inside
@@ -1168,16 +1100,16 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     /// `have <name> := <term>`, or a bare expression (implicit `exact`).
     /// Uses `parse_term_no_annot` so that `:` and `by` are NOT consumed
     /// (they delimit the end of the tactic block).
-    fn parse_tactic(&mut self, env: &[Name<'bump>]) -> Result<Tactic<'bump>, ParseError> {
+    fn parse_tactic(&mut self) -> Result<Tactic<'bump>, ParseError> {
         match self.peek_token() {
             Some(Token::KwExact) => {
                 self.advance();
-                let t = self.parse_app_no_annot(env)?;
+                let t = self.parse_app_no_annot()?;
                 Ok(Tactic::Exact(t))
             }
             Some(Token::KwApply) => {
                 self.advance();
-                let t = self.parse_app_no_annot(env)?;
+                let t = self.parse_app_no_annot()?;
                 Ok(Tactic::Apply(t))
             }
             Some(Token::KwIntro) => {
@@ -1194,12 +1126,12 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 self.advance();
                 let name = self.parse_ident()?;
                 self.expect(&Token::ColonEq)?;
-                let t = self.parse_app_no_annot(env)?;
+                let t = self.parse_app_no_annot()?;
                 Ok(Tactic::Have(name, t))
             }
             // Bare expression = implicit `exact`
             _ => {
-                let t = self.parse_app_no_annot(env)?;
+                let t = self.parse_app_no_annot()?;
                 Ok(Tactic::Exact(t))
             }
         }
