@@ -456,6 +456,59 @@ fn let_with_by() {
 }
 
 #[test]
+fn let_annotation_does_not_consume_by_as_type_argument() {
+    let (b, arena) = a();
+    let result = parse_expr_top("let x : int by exact true := 5 in x", b, &arena);
+    assert!(result.is_ok());
+    let term = result.unwrap();
+    match term {
+        Term::Let(_, _, _, Some(constraint)) => {
+            assert_eq!(**constraint, Term::Builtin(s(&arena, "int")));
+        }
+        other => panic!("expected let with constraint, got {other:?}"),
+    }
+}
+
+#[test]
+fn check_subject_does_not_consume_trailing_constraint_colon() {
+    let (b, arena) = a();
+    let result = parse_program("#check f 1 : int", b, &arena);
+    assert!(result.is_ok());
+    match &result.unwrap()[..] {
+        [TopLevel::TLCheck(term, constraint, _)] => {
+            assert_eq!(
+                **term,
+                *arena.app(arena.named(s(&arena, "f")), arena.lit_int(1))
+            );
+            assert_eq!(**constraint, Term::Builtin(s(&arena, "int")));
+        }
+        other => panic!("expected single #check, got {other:?}"),
+    }
+}
+
+#[test]
+fn struct_field_types_do_not_consume_following_fields() {
+    let (b, arena) = a();
+    let result = parse_def_top(
+        "def Point : prop := struct\n  x : int\n  y : str",
+        b,
+        &arena,
+    );
+    assert!(result.is_ok());
+    let (_, _, _, body) = result.unwrap();
+    match body {
+        Term::StructDef(_, fields) => {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].0, "x");
+            assert_eq!(*fields[0].1, Term::Builtin(s(&arena, "int")));
+            assert_eq!(fields[1].0, "y");
+            assert_eq!(*fields[1].1, Term::Builtin(s(&arena, "str")));
+        }
+        other => panic!("expected struct def, got {other:?}"),
+    }
+}
+
+#[test]
 fn def_simple() {
     let (b, arena) = a();
     let result = parse_def_top("def x : int := 5", b, &arena);

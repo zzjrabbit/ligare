@@ -52,6 +52,10 @@ impl<'bump> TypeChecker<'bump> {
         self.arena
     }
 
+    pub fn builtins(&self) -> &BuiltinRegistry {
+        &self.builtins
+    }
+
     /// Add a refinement definition to the persistent constraint table.
     pub fn add_refinement(
         &mut self,

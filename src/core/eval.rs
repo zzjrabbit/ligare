@@ -102,7 +102,10 @@ impl<'bump> Evaluator<'bump> {
                 Ok(self.arena.struct_cons(name, self.arena.alloc_slice(&ev)))
             }
             Term::StructProj(subject, idx) => {
-                let s = self.eval(subject)?;
+                let mut s = self.eval(subject)?;
+                while let Term::Annot(inner, _) = s {
+                    s = self.eval(inner)?;
+                }
                 if let Term::StructCons(_, field_values) = s {
                     field_values
                         .get(*idx)
@@ -122,13 +125,14 @@ impl<'bump> Evaluator<'bump> {
             Term::Match(scrut, branches) => {
                 let s = self.eval(scrut)?;
                 if let Term::Variant(_, idx, payloads) = s
-                    && let Some((_, _, body)) = branches.get(*idx) {
-                        let mut result = *body;
-                        for payload in payloads.iter().rev() {
-                            result = self.sub.beta(result, payload);
-                        }
-                        return self.eval(result);
+                    && let Some((_, _, body)) = branches.get(*idx)
+                {
+                    let mut result = *body;
+                    for payload in payloads.iter().rev() {
+                        result = self.sub.beta(result, payload);
                     }
+                    return self.eval(result);
+                }
                 // Stuck — keep the match expression
                 let bs: Vec<_> = branches
                     .iter()

@@ -9,12 +9,11 @@
      "..."        terminal token
      (* ... *)    comment
 
-   Context-sensitivity note:
-     Inside type annotations (e.g., after `:` in `let x : ...`),
-     the keyword `by` is NOT consumed as a suffix or standalone
-     proof block — it is reserved for the outer `let`-binding's
-     proof clause.  This is enforced by the parser's `no_by` flag,
-     not expressible in pure EBNF.
+   Expression boundaries:
+     The parser has one expression grammar for every term.  Outer
+     grammar productions own delimiters such as `by`, `:=`, `)`, and
+     `:`, and parse the delimited token slice with that same expression
+     grammar.
 
    Whitespace & comments:
      Whitespace (spaces, tabs, \r, \f) is ignored except as

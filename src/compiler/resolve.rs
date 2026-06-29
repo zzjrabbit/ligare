@@ -205,6 +205,7 @@ impl<'bump> Compiler<'bump> {
                 && let Term::Builtin(name) | Term::Named(name) = f
                 && let Some(idx) = self.checker.lookup_struct_proj(name)
             {
+                let arg = self.resolve_struct_ctors(self.resolve_struct_projs(arg));
                 return Some(self.arena.struct_proj(arg, idx));
             }
             None

@@ -14,9 +14,10 @@ use crate::backend::ir::FunSig;
 use crate::checker::TypeChecker;
 use crate::checker::context::empty_ctx;
 use crate::checker::erase::Eraser;
+use crate::core::classify::classify;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
-use crate::core::syntax::{Name, Term};
+use crate::core::syntax::{Name, Term, Universe};
 use crate::diagnostic::Diagnostic;
 use crate::front::parser::{TopLevel, parse_expr_top, parse_program};
 use crate::pretty::PrettyPrinter;
@@ -281,42 +282,17 @@ impl<'bump> Compiler<'bump> {
     fn process_top_level(&mut self, top: TopLevel<'bump>, file: &str) -> Result<(), Diagnostic> {
         match top {
             TopLevel::TLDef(name, params, _m_ret, body, _span) => {
-                if matches!(body, Term::UnionDef(..)) {
-                    if !self.quiet {
-                        println!("[union] {}", name);
+                let universe = classify(self.checker.builtins(), &empty_ctx(), body);
+                if universe == Some(Universe::UProp) {
+                    if self.register_prop_definition(name, params, _m_ret, body) {
+                        return Ok(());
                     }
-                    let type_param_names: Vec<_> = params.iter().map(|(n, _)| *n).collect();
-                    let type_params = self.arena.alloc_slice(&type_param_names);
-                    self.checker.add_union(name, body, type_params);
-                    if !params.is_empty() {
-                        let term = self.desugar_top_def(name, params, _m_ret, body);
-                        self.env.insert(name, term);
-                    }
-                } else if matches!(body, Term::StructDef(..)) {
-                    if !self.quiet {
-                        println!("[struct] {}", name);
-                    }
-                    let type_param_names: Vec<_> = params.iter().map(|(n, _)| *n).collect();
-                    let type_params = self.arena.alloc_slice(&type_param_names);
-                    self.checker.add_struct(name, body, type_params);
-                    if !params.is_empty() {
-                        let term = self.desugar_top_def(name, params, _m_ret, body);
-                        self.env.insert(name, term);
-                    }
-                } else if params.is_empty() && matches!(body, Term::Refine(_, _, _)) {
-                    let Term::Refine(_, parent, predicate) = body else {
-                        unreachable!()
-                    };
-                    if !self.quiet {
-                        println!("[refinement] {}", name);
-                    }
-                    self.checker.add_refinement(name, parent, predicate);
-                } else {
-                    if !self.quiet {
-                        println!("[defined] {}", name);
-                    }
-                    self.env.insert(name, body);
                 }
+
+                if !self.quiet {
+                    println!("[defined] {}", name);
+                }
+                self.env.insert(name, body);
             }
             TopLevel::TLCheck(term, constraint, span) => {
                 let resolved = self.resolve_all(term);
@@ -392,5 +368,62 @@ impl<'bump> Compiler<'bump> {
             }
         }
         Ok(())
+    }
+
+    fn register_prop_definition(
+        &mut self,
+        name: Name<'bump>,
+        params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+        m_ret: Option<&'bump Term<'bump>>,
+        body: &'bump Term<'bump>,
+    ) -> bool {
+        match body {
+            Term::UnionDef(..) => {
+                if !self.quiet {
+                    println!("[union] {}", name);
+                }
+                let type_param_names: Vec<_> = params.iter().map(|(n, _)| *n).collect();
+                let type_params = self.arena.alloc_slice(&type_param_names);
+                self.checker.add_union(name, body, type_params);
+                if !params.is_empty() {
+                    let term = self.desugar_top_def(name, params, m_ret, body);
+                    self.env.insert(name, term);
+                }
+                true
+            }
+            Term::StructDef(..) => {
+                if !self.quiet {
+                    println!("[struct] {}", name);
+                }
+                let type_param_names: Vec<_> = params.iter().map(|(n, _)| *n).collect();
+                let type_params = self.arena.alloc_slice(&type_param_names);
+                self.checker.add_struct(name, body, type_params);
+                if !params.is_empty() {
+                    let term = self.desugar_top_def(name, params, m_ret, body);
+                    self.env.insert(name, term);
+                }
+                true
+            }
+            _ if params.is_empty() && Self::refinement_parts(body).is_some() => {
+                let desugared = self.checker.desugarer.desugar(body);
+                let (parent, predicate) = Self::refinement_parts(desugared).unwrap();
+                if !self.quiet {
+                    println!("[refinement] {}", name);
+                }
+                self.checker.add_refinement(name, parent, predicate);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn refinement_parts(
+        body: &'bump Term<'bump>,
+    ) -> Option<(&'bump Term<'bump>, &'bump Term<'bump>)> {
+        match body {
+            Term::Refine(_, parent, predicate) => Some((*parent, *predicate)),
+            Term::Annot(inner, _) => Self::refinement_parts(inner),
+            _ => None,
+        }
     }
 }

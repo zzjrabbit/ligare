@@ -3,6 +3,7 @@ mod common;
 use common::{bin, leak_bump, parse, parse_constraint, s};
 use ligare::checker::check;
 use ligare::checker::context::{add_refine, empty_ctx, empty_table};
+use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
 use ligare::core::syntax::{PrimOp, Term};
 
@@ -52,6 +53,16 @@ fn nat_accepts_5() {
         ),
         Ok(())
     );
+}
+
+#[test]
+fn top_level_refinement_alias_registers_constraint() {
+    let (b, arena) = a();
+    let mut compiler = Compiler::new(b, &arena);
+    let result = compiler.process_file_str(
+        "def Nat := int where (x => x >= 0)\ndef x : Nat := 10\n#check x : int\n",
+    );
+    assert!(result.is_ok(), "Error: {:?}", result.err());
 }
 
 #[test]

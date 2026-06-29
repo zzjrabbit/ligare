@@ -7,6 +7,8 @@ use crate::core::syntax::{Name, PrimOp, Tactic, Term};
 use crate::diagnostic::Span;
 use crate::front::lexer::Token;
 
+// ── AST types ──────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopLevel<'bump> {
     /// name, params, ret-annotation, desugared-body (Annot(Lam(...), Pi(...))), span
@@ -23,6 +25,8 @@ pub enum TopLevel<'bump> {
     TLExpr(&'bump Term<'bump>, Span),
 }
 
+// ── Constants ───────────────────────────────────────────────────────────
+
 const KEYWORDS: &[&str] = &[
     "let", "in", "if", "then", "else", "true", "false", "by", "fun", "func", "where", "def",
     "auto", "theorem",
@@ -33,10 +37,12 @@ const BUILTIN_NAMES: &[&str] = &[
     "int", "bool", "str", "data", "prop", "theorem", "proof", "and", "or", "not", "implies",
 ];
 
+// ── Type aliases ────────────────────────────────────────────────────────
+
 type SpannedToken = (Token, std::ops::Range<usize>);
 
 /// Parsed top-level definition: (name, params, ret_annotation, body).
-type ParsedDef<'bump> = (
+pub type ParsedDef<'bump> = (
     Name<'bump>,
     &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
     Option<&'bump Term<'bump>>,
@@ -57,17 +63,19 @@ type ParsedMatchBranch<'bump> = (
     &'bump Term<'bump>,
 );
 
+// ── Expression boundaries ───────────────────────────────────────────────
+//
+// The parser intentionally has one expression grammar for every term. Outer
+// grammar productions own their delimiters and parse the delimited token slice
+// with that same expression grammar.
+
+// ── Parser ──────────────────────────────────────────────────────────────
+
 pub struct Parser<'a, 'bump> {
     tokens: &'a [SpannedToken],
     pos: usize,
     pool: &'a StringPool<'bump>,
     arena: &'a TermArena<'bump>,
-    /// When true, `parse_suffixes` skips the `by` suffix (used for
-    /// parsing type annotations where `by` belongs to the outer context).
-    no_by: bool,
-    /// When true, `parse_suffixes` skips the `:` type-annotation suffix
-    /// (used for `#check` so that `:` is reserved as the constraint separator).
-    no_annot: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +97,8 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 impl<'a, 'bump> Parser<'a, 'bump> {
+    // ── Constructor ─────────────────────────────────────────────────
+
     pub fn new(
         tokens: &'a [SpannedToken],
         pool: &'a StringPool<'bump>,
@@ -99,10 +109,10 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             pos: 0,
             pool,
             arena,
-            no_by: false,
-            no_annot: false,
         }
     }
+
+    // ── Token stream helpers ─────────────────────────────────────────
 
     fn peek(&self) -> Option<&SpannedToken> {
         let mut i = self.pos;
@@ -113,11 +123,13 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             }
         }
     }
+
     fn peek_token(&self) -> Option<Token> {
         self.peek().map(|(t, _)| t.clone())
     }
+
     fn advance(&mut self) {
-        // Skip any leading Newlines (to reach the current token that peek() would return)
+        // Skip any leading Newlines
         while matches!(self.tokens.get(self.pos), Some((Token::Newline, _))) {
             self.pos += 1;
         }
@@ -159,12 +171,39 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         self.pos >= self.tokens.len()
     }
 
-    /// Return the span of the current peek position, or `0..0` at EOF.
-    fn current_span(&self) -> std::ops::Range<usize> {
+    fn current_span(&self) -> Span {
         self.peek().map(|(_, s)| s.clone()).unwrap_or(0..0)
     }
 
-    // ── Top-level ──
+    fn peek_ahead_is(&self, tok: &Token) -> bool {
+        self.tokens
+            .get(self.pos + 1)
+            .map(|(t, _)| t == tok)
+            .unwrap_or(false)
+    }
+
+    /// Generic try-parse: if `peek` matches `tok`, advance and call `parse_fn`;
+    /// on error restore position. Returns `None` when `peek` doesn't match.
+    fn try_parse<T>(
+        &mut self,
+        tok: Token,
+        parse_fn: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Option<T> {
+        if self.peek_token() != Some(tok) {
+            return None;
+        }
+        let saved = self.pos;
+        self.advance();
+        match parse_fn(self) {
+            Ok(t) => Some(t),
+            Err(_) => {
+                self.pos = saved;
+                None
+            }
+        }
+    }
+
+    // ── Public entry points ───────────────────────────────────────────
 
     pub fn parse_program(&mut self) -> Result<Vec<TopLevel<'bump>>, ParseError> {
         let mut tops = Vec::new();
@@ -189,17 +228,19 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         self.parse_def()
     }
 
+    // ── Top-level ─────────────────────────────────────────────────────
+
     fn parse_top_level(&mut self) -> Result<TopLevel<'bump>, ParseError> {
-        // Skip stray newlines between top-level items.
         while self.peek_token() == Some(Token::Newline) {
             self.advance();
         }
         let start_span = self.current_span();
+
         if self.peek_token() == Some(Token::KwTheorem) {
             self.advance();
             let name = self.parse_ident()?;
             let prop = if self.try_expect(&Token::Colon) {
-                self.parse_expr()?
+                self.parse_expr_until(|tokens, i| matches!(tokens[i].0, Token::ColonEq))?
             } else {
                 self.arena.builtin(self.pool.intern("data"))
             };
@@ -207,103 +248,43 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             let body = self.parse_expr()?;
             return Ok(TopLevel::TLTheorem(name, prop, body, start_span));
         }
+
         if self.peek_token() == Some(Token::KwDef) {
             let (name, params, m_ret, body) = self.parse_def()?;
             return Ok(TopLevel::TLDef(name, params, m_ret, body, start_span));
         }
+
         if self.peek_token() == Some(Token::HashCheck) {
             self.advance();
-            // Suppress `:` type-annotation suffix so that `:` is reserved
-            // for the constraint separator (e.g. `#check s some_sth : str`).
-            self.no_annot = true;
-            let full_term = self.parse_expr()?;
-            self.no_annot = false;
-            // If `parse_expr` already returned an annotation (from `:`),
-            // split it; otherwise expect `:` and parse constraint.
-            let (term, constraint) = if let Term::Annot(t, c) = full_term {
-                (*t, *c)
-            } else if self.try_expect(&Token::Colon) {
-                (full_term, self.parse_expr()?)
+            let term = self.parse_expr_until(|tokens, i| matches!(tokens[i].0, Token::Colon))?;
+            let constraint = if self.try_expect(&Token::Colon) {
+                self.parse_expr()?
             } else {
-                (full_term, self.arena.builtin(self.pool.intern("data")))
+                self.arena.builtin(self.pool.intern("data"))
+            };
+            let (term, constraint) = if let Term::Annot(t, c) = term {
+                (*t, *c)
+            } else {
+                (term, constraint)
             };
             return Ok(TopLevel::TLCheck(term, constraint, start_span));
         }
+
         if self.peek_token() == Some(Token::HashShow) {
             self.advance();
             return Ok(TopLevel::TLShow(self.parse_expr()?, start_span));
         }
+
         Ok(TopLevel::TLExpr(self.parse_expr()?, start_span))
     }
 
-    // ── Expressions ──
-
-    fn parse_app_no_annot(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        self.parse_app_generic(|s| s.parse_term_no_annot())
-    }
-
-    fn parse_app_generic(
-        &mut self,
-        parse_term_fn: impl Fn(&mut Self) -> Result<&'bump Term<'bump>, ParseError>,
-    ) -> Result<&'bump Term<'bump>, ParseError> {
-        if let Ok(t) = self.parse_let_expr() {
-            return Ok(t);
-        }
-        if let Ok(t) = self.parse_func_expr() {
-            return Ok(t);
-        }
-        if let Ok(t) = self.parse_dep_arrow_expr() {
-            return Ok(t);
-        }
-        let mut result = parse_term_fn(self)?;
-        loop {
-            if let Some(tok) = self.peek_token()
-                && (Self::token_precedence(&tok).is_some() || Self::is_top_level_start(&tok))
-            {
-                break;
-            }
-            match parse_term_fn(self) {
-                Ok(t) => result = self.arena.app(result, t),
-                Err(_) => break,
-            }
-        }
-        Ok(result)
-    }
-
-    /// Returns `true` if the token starts a new top-level item
-    /// (e.g. `theorem`, `def`, `#check`, `#show`).  These must not
-    /// be consumed as application arguments because they belong to
-    /// the next declaration.
-    fn is_top_level_start(tok: &Token) -> bool {
-        matches!(
-            tok,
-            Token::KwTheorem | Token::KwDef | Token::HashCheck | Token::HashShow
-        )
-    }
-
-    fn parse_term_no_annot(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        let t = self.parse_atom()?;
-        self.parse_refine_only(t)
-    }
-
-    fn parse_refine_only(
-        &mut self,
-        t: &'bump Term<'bump>,
-    ) -> Result<&'bump Term<'bump>, ParseError> {
-        match self.try_parse_refine_suffix(t) {
-            Ok(t2) => self.parse_refine_only(t2),
-            Err(_) => Ok(t),
-        }
-    }
-
-    // ── Definitions ──
+    // ── Definitions ───────────────────────────────────────────────────
 
     fn parse_def(&mut self) -> Result<ParsedDef<'bump>, ParseError> {
         self.expect(&Token::KwDef)?;
         let name = self.parse_ident()?;
         let (params, m_ret, body) = self.parse_func_body(name)?;
         let params_slice = self.arena.alloc_slice(&params);
-        // Union/struct bodies are kept as-is; regular function bodies are desugared.
         let body = if matches!(body, Term::UnionDef(..) | Term::StructDef(..)) {
             body
         } else {
@@ -313,7 +294,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     }
 
     /// Desugar a `def` body into `Annot(NamedLam(...), Pi(...))`.
-    /// Name resolution (Named → Var) is handled by the desugar pass.
     fn desugar_def(
         &self,
         _name: Name<'bump>,
@@ -335,9 +315,9 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     fn parse_func_body(&mut self, name: Name<'bump>) -> Result<ParsedFuncBody<'bump>, ParseError> {
         let params = self.parse_many_curried_params();
-        let m_ret = self.parse_type_annotation();
+        let m_ret =
+            self.parse_type_annotation_until(|tokens, i| matches!(tokens[i].0, Token::ColonEq));
         self.expect(&Token::ColonEq)?;
-        // Check for union / struct body (zero-param definitions)
         let body_expr = if self.peek_token() == Some(Token::KwUnion) {
             self.parse_union_body(name)?
         } else if self.peek_token() == Some(Token::KwStruct) {
@@ -371,25 +351,130 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         params
     }
 
-    // ── Expressions ──
-
-    fn parse_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        if let Ok(t) = self.parse_match_expr() {
-            return Ok(t);
-        }
-        if let Ok(t) = self.parse_if_expr() {
-            return Ok(t);
-        }
-        self.parse_operators(false)
+    fn parse_type_annotation(&mut self) -> Option<&'bump Term<'bump>> {
+        self.parse_type_annotation_until(|tokens, i| {
+            matches!(tokens[i].0, Token::KwBy | Token::ColonEq | Token::RParen)
+        })
     }
 
-    fn parse_if_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        if !self.try_expect(&Token::KwIf) {
+    fn parse_type_annotation_until<F>(&mut self, is_delim: F) -> Option<&'bump Term<'bump>>
+    where
+        F: FnMut(&[SpannedToken], usize) -> bool,
+    {
+        self.try_parse(Token::Colon, |s| s.parse_expr_until(is_delim))
+    }
+
+    fn parse_struct_field_type(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        self.parse_expr_until(Self::is_struct_field_type_delim)
+    }
+
+    fn parse_tactic_arg(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        self.parse_expr_until(Self::is_tactic_arg_delim)
+    }
+
+    fn parse_by_proof_clause(&mut self) -> Option<&'bump [Tactic<'bump>]> {
+        self.try_parse(Token::KwBy, |s| s.parse_tactics())
+    }
+
+    // ── Expression parsing ────────────────────────────────────────────
+    //
+    //  Architecture:
+    //    parse_expr            → token-driven dispatch (no backtracking)
+    //      ├─ KwIf             → parse_if_expr
+    //      ├─ KwMatch          → parse_match_expr
+    //      ├─ KwLet            → parse_let_expr
+    //      ├─ KwFunc           → parse_func_expr
+    //      ├─ LParen (dep-arrow)→ parse_dep_arrow_expr (single targeted rollback)
+    //      └─ default          → parse_expr_bp (unified Pratt parser)
+    //
+    //    parse_expr_bp         → unified precedence climber
+    //      ├─ parse_head       → atom + suffix loop
+    //      │   ├─ parse_atom   → literals, identifiers, lambdas, parens, etc.
+    //      │   └─ suffixes     → annot, by, refine, dot
+    //      └─ loop: infix ops + application + suffixes (one precedence system)
+    //
+
+    fn parse_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        if self.peek_token().is_some_and(Self::is_expr_terminator) {
             return Err(ParseError {
-                message: "not an if expression".into(),
-                span: 0..0,
+                message: "expected expression before terminator".into(),
+                span: self.current_span(),
             });
         }
+
+        match self.peek_token() {
+            Some(Token::KwIf) => self.parse_if_expr(),
+            Some(Token::KwMatch) => self.parse_match_expr(),
+            Some(Token::KwLet) => self.parse_let_expr(),
+            Some(Token::KwFunc) => self.parse_func_expr(),
+            Some(Token::LParen) => {
+                // Single targeted rollback: try dep-arrow pattern `(x : A) -> B`.
+                // Only triggers when we see `(`; all other forms use token-driven dispatch.
+                let saved = self.pos;
+                if let Ok(t) = self.parse_dep_arrow_expr() {
+                    return Ok(t);
+                }
+                self.pos = saved;
+                self.parse_expr_bp(0)
+            }
+            _ => self.parse_expr_bp(0),
+        }
+    }
+
+    fn parse_expr_until<F>(&mut self, is_delim: F) -> Result<&'bump Term<'bump>, ParseError>
+    where
+        F: FnMut(&[SpannedToken], usize) -> bool,
+    {
+        let start = self.pos;
+        let end = self.find_expr_boundary(is_delim);
+        if end == start {
+            return Err(ParseError {
+                message: "expected expression before delimiter".into(),
+                span: self.current_span(),
+            });
+        }
+
+        let mut sub = Parser::new(&self.tokens[start..end], self.pool, self.arena);
+        let term = sub.parse_expr_top()?;
+        self.pos = end;
+        Ok(term)
+    }
+
+    fn find_expr_boundary<F>(&self, mut is_delim: F) -> usize
+    where
+        F: FnMut(&[SpannedToken], usize) -> bool,
+    {
+        let mut i = self.pos;
+        let mut parens = 0usize;
+        let mut braces = 0usize;
+        while i < self.tokens.len() {
+            match self.tokens[i].0 {
+                Token::LParen => parens += 1,
+                Token::RParen => {
+                    if parens == 0 && braces == 0 && is_delim(self.tokens, i) {
+                        break;
+                    }
+                    parens = parens.saturating_sub(1);
+                }
+                Token::LBrace => braces += 1,
+                Token::RBrace => {
+                    if parens == 0 && braces == 0 && is_delim(self.tokens, i) {
+                        break;
+                    }
+                    braces = braces.saturating_sub(1);
+                }
+                _ if parens == 0 && braces == 0 && is_delim(self.tokens, i) => break,
+                _ => {}
+            }
+            i += 1;
+        }
+        i
+    }
+
+    // ── Special expression forms ──────────────────────────────────────
+
+    fn parse_if_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        self.expect(&Token::KwIf)?;
         let cond = self.parse_expr()?;
         self.expect(&Token::KwThen)?;
         let tbranch = self.parse_expr()?;
@@ -398,35 +483,26 @@ impl<'a, 'bump> Parser<'a, 'bump> {
     }
 
     fn parse_match_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        if !self.try_expect(&Token::KwMatch) {
-            return Err(ParseError {
-                message: "not a match expression".into(),
-                span: 0..0,
-            });
-        }
+        self.expect(&Token::KwMatch)?;
         let scrutinee = self.parse_expr()?;
         self.expect(&Token::KwWith)?;
-        // Parse branches: `| Pattern => body` repeated
         let mut branches: Vec<ParsedMatchBranch<'bump>> = Vec::new();
         loop {
             if !self.try_expect(&Token::Bar) {
                 break;
             }
             let _variant_name = self.parse_ident()?;
-            // Parse optional bindings: `name1 name2 ...` (stop at `=>` or end)
             let mut binds: Vec<(Name<'bump>, &'bump Term<'bump>)> = Vec::new();
             while self
                 .peek_token()
                 .is_some_and(|t| matches!(t, Token::Ident(_)))
             {
                 let bind_name = self.parse_ident()?;
-                // Infer constraint as `data` for bindings
                 let bind_ty = self.arena.builtin(self.pool.intern("data"));
                 binds.push((bind_name, bind_ty));
             }
             self.expect(&Token::FatArrow)?;
             let body = self.parse_expr()?;
-            // Use variant name as index placeholder — real index resolved during check
             let idx = branches.len();
             branches.push((idx, binds, body));
         }
@@ -445,109 +521,9 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             .match_(scrutinee, self.arena.alloc_slice(&branches_slice)))
     }
 
-    /// Parse a union body: `union\n  | Variant1 of (x : Type)\n  | Variant2 ...`
-    fn parse_union_body(&mut self, name: Name<'bump>) -> Result<&'bump Term<'bump>, ParseError> {
-        self.expect(&Token::KwUnion)?;
-        let mut variants: Vec<(Name<'bump>, Vec<(Name<'bump>, &'bump Term<'bump>)>)> = Vec::new();
-        loop {
-            if !self.try_expect(&Token::Bar) {
-                break;
-            }
-            let vname = self.parse_ident()?;
-            // Parse optional payload: `of (field1 : Type1) (field2 : Type2)`
-            let fields: Vec<(Name<'bump>, &'bump Term<'bump>)> = if self.try_expect(&Token::KwOf) {
-                let mut fs = Vec::new();
-                // Parse one or more `(name : type)` pairs
-                loop {
-                    if !self.try_expect(&Token::LParen) {
-                        break;
-                    }
-                    let fname = self.parse_ident()?;
-                    let fty = if self.try_expect(&Token::Colon) {
-                        self.parse_expr()?
-                    } else {
-                        self.arena.builtin(self.pool.intern("data"))
-                    };
-                    self.expect(&Token::RParen)?;
-                    fs.push((fname, fty));
-                }
-                fs
-            } else {
-                Vec::new()
-            };
-            variants.push((vname, fields));
-        }
-        if variants.is_empty() {
-            return Err(ParseError {
-                message: "union must have at least one variant".into(),
-                span: self.current_span(),
-            });
-        }
-        let variants_slice: Vec<_> = variants
-            .into_iter()
-            .map(|(vn, fs)| (vn, self.arena.alloc_slice(&fs)))
-            .collect();
-        Ok(self
-            .arena
-            .union_def(name, self.arena.alloc_slice(&variants_slice)))
-    }
-
-    /// Parse a struct body: `struct\n  field1 : Type1\n  field2 : Type2`
-    fn parse_struct_body(&mut self, name: Name<'bump>) -> Result<&'bump Term<'bump>, ParseError> {
-        self.expect(&Token::KwStruct)?;
-        let mut fields: Vec<(Name<'bump>, &'bump Term<'bump>)> = Vec::new();
-        // Parse indented fields: each field is `name : type` (the `:` is optional).
-        // Use `parse_term_no_annot` for field types to avoid greedy application
-        // that would consume the next field name as an argument.
-        loop {
-            let saved = self.pos;
-            let fname = match self.parse_ident() {
-                Ok(n) => n,
-                Err(_) => {
-                    self.pos = saved;
-                    break;
-                }
-            };
-            let fty = if self.try_expect(&Token::Colon) {
-                self.parse_term_no_annot()?
-            } else {
-                self.arena.builtin(self.pool.intern("data"))
-            };
-            fields.push((fname, fty));
-        }
-        if fields.is_empty() {
-            return Err(ParseError {
-                message: "struct must have at least one field".into(),
-                span: self.current_span(),
-            });
-        }
-        Ok(self.arena.struct_def(name, self.arena.alloc_slice(&fields)))
-    }
-
-    fn parse_operators(&mut self, no_annot: bool) -> Result<&'bump Term<'bump>, ParseError> {
-        let app = if no_annot {
-            self.parse_app_no_annot()?
-        } else {
-            self.parse_app()?
-        };
-        self.parse_binop_rhs(app, 0, no_annot)
-    }
-
-    fn parse_app(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        self.parse_app_generic(|s| s.parse_term())
-    }
-
-    // ── Let ──
-
     fn parse_let_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        if !self.try_expect(&Token::KwLet) {
-            return Err(ParseError {
-                message: "not a let expression".into(),
-                span: 0..0,
-            });
-        }
+        self.expect(&Token::KwLet)?;
         let name = self.parse_ident()?;
-        // Check for destructuring: `let Name{field1, field2, ...} := val in body`
         if self.try_expect(&Token::LBrace) {
             return self.parse_let_destruct(name);
         }
@@ -564,8 +540,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(self.arena.let_(name, val, body, m_constraint))
     }
 
-    /// Parse destructuring let: `let Name{field1, field2, ...} := val in body`
-    /// Desugars to nested `let field1 := Name.field1 val in let field2 := ... in body`
     fn parse_let_destruct(
         &mut self,
         struct_name: Name<'bump>,
@@ -585,20 +559,11 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 span: self.current_span(),
             });
         }
-        // Optional type annotation on the whole struct value
         let _m_constraint = self.parse_type_annotation();
         self.expect(&Token::ColonEq)?;
         let val = self.parse_expr()?;
         self.expect(&Token::KwIn)?;
-        // Build nested let bindings.
-        // Desugar `let Point{x, y} := val in body` to:
-        //   let x := Point.x val in let y := Point.y val in body
-        // Since parser terms use Named (not Var), no de Bruijn shifting is needed.
         let mut body = self.parse_expr()?;
-
-        // Build nested lets using the projections.
-        // Iterate in reverse so that the first-declared field (e.g. x)
-        // is the outermost let.
         for fname in field_names.iter().rev() {
             let proj_name = self.pool.intern(&format!("{}.{}", struct_name, fname));
             let proj = self.arena.app(self.arena.named(proj_name), val);
@@ -607,149 +572,275 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(body)
     }
 
-    fn try_parse<T>(
-        &mut self,
-        tok: Token,
-        parse_fn: impl FnOnce(&mut Self) -> Result<T, ParseError>,
-    ) -> Option<T> {
-        if self.peek_token() != Some(tok) {
-            return None;
-        }
-        let saved = self.pos;
-        self.advance();
-        match parse_fn(self) {
-            Ok(t) => Some(t),
-            Err(_) => {
-                self.pos = saved;
-                None
-            }
-        }
-    }
-
-    fn parse_type_annotation(&mut self) -> Option<&'bump Term<'bump>> {
-        self.no_by = true;
-        let result = self.try_parse(Token::Colon, |s| s.parse_expr());
-        self.no_by = false;
-        result
-    }
-
-    fn parse_by_proof_clause(&mut self) -> Option<&'bump [Tactic<'bump>]> {
-        self.try_parse(Token::KwBy, |s| s.parse_tactics())
-    }
-
-    // ── Func ──
-
     fn parse_func_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        if !self.try_expect(&Token::KwFunc) {
-            return Err(ParseError {
-                message: "not a func expression".into(),
-                span: 0..0,
-            });
-        }
+        self.expect(&Token::KwFunc)?;
         let name = self.parse_ident()?;
         let (params, m_ret, body) = self.parse_func_body(name)?;
         Ok(self.desugar_def(name, &params, m_ret, body))
     }
 
-    // ── Dependent arrow ──
-
+    /// Parse dependent arrow `(x : A) -> B`.
+    /// The caller (parse_expr) saves/restores position on failure.
     fn parse_dep_arrow_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        let saved = self.pos;
-        if !self.try_expect(&Token::LParen) {
-            return Err(ParseError {
-                message: "not a dep arrow".into(),
-                span: 0..0,
-            });
+        self.expect(&Token::LParen)?;
+        let x = self.parse_ident()?;
+        self.expect(&Token::Colon)?;
+        let a = self.parse_expr_until(|tokens, i| matches!(tokens[i].0, Token::RParen))?;
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::ThinArrow)?;
+        let b = self.parse_expr()?;
+        Ok(self.arena.pi(x, a, b))
+    }
+
+    // ── Unified Pratt parser (application + infix ops in one system) ──
+
+    /// Infix binding-power table: (precedence, associativity).
+    fn infix_bp(tok: &Token) -> Option<(u8, Associativity)> {
+        match tok {
+            Token::Star | Token::Slash | Token::Percent => Some((5, Associativity::Left)),
+            Token::ThinArrow => Some((4, Associativity::Right)),
+            Token::Plus | Token::Minus => Some((3, Associativity::Left)),
+            Token::Eq
+            | Token::Le
+            | Token::Ge
+            | Token::Neq
+            | Token::Lt
+            | Token::Gt
+            | Token::EqEq => Some((2, Associativity::None)),
+            _ => None,
         }
-        let x = match self.parse_ident() {
-            Ok(n) => n,
-            Err(_) => {
-                self.pos = saved;
-                return Err(ParseError {
-                    message: "not a dep arrow".into(),
-                    span: 0..0,
-                });
+    }
+
+    /// Returns `true` if the token can start an atom expression when
+    /// seen in application (LED) position — i.e. after another expression.
+    /// Excludes special forms (if/match/let/func) and top-level keywords
+    /// (theorem/def/#check/#show) which are only valid at the start of
+    /// a top-level item or inside parentheses.
+    fn is_atom_start(tok: &Token) -> bool {
+        matches!(
+            tok,
+            Token::IntLit(_)
+                | Token::StrLit(_)
+                | Token::True
+                | Token::False
+                | Token::Ident(_)
+                | Token::Backslash
+                | Token::Lambda
+                | Token::KwFun
+                | Token::LParen
+                | Token::Minus
+                | Token::KwAuto
+                | Token::AndIntro
+                | Token::AndElimLeft
+                | Token::And
+                | Token::Or
+                | Token::Not
+                | Token::Implies
+                | Token::KwBy
+        )
+    }
+
+    /// Convert an infix token to the corresponding PrimOp.
+    fn token_to_primop(tok: &Token) -> PrimOp {
+        match tok {
+            Token::Star => PrimOp::Mul,
+            Token::Slash => PrimOp::Div,
+            Token::Percent => PrimOp::Mod_,
+            Token::Plus => PrimOp::Add,
+            Token::Minus => PrimOp::Sub,
+            Token::Eq | Token::EqEq => PrimOp::Eq,
+            Token::Le => PrimOp::Le,
+            Token::Ge => PrimOp::Ge,
+            Token::Neq => PrimOp::Neq,
+            Token::Lt => PrimOp::Lt,
+            Token::Gt => PrimOp::Gt,
+            _ => unreachable!(),
+        }
+    }
+
+    fn is_expr_terminator(tok: Token) -> bool {
+        matches!(
+            tok,
+            Token::ColonEq
+                | Token::KwIn
+                | Token::KwThen
+                | Token::KwElse
+                | Token::RParen
+                | Token::RBrace
+                | Token::Comma
+                | Token::Semi
+                | Token::Bar
+        )
+    }
+
+    fn is_tactic_arg_delim(tokens: &[SpannedToken], i: usize) -> bool {
+        matches!(
+            tokens[i].0,
+            Token::ColonEq
+                | Token::KwIn
+                | Token::KwThen
+                | Token::KwElse
+                | Token::RParen
+                | Token::RBrace
+                | Token::Colon
+                | Token::Semi
+                | Token::KwDef
+                | Token::HashCheck
+                | Token::HashShow
+        )
+    }
+
+    fn is_struct_field_type_delim(tokens: &[SpannedToken], i: usize) -> bool {
+        if matches!(
+            tokens[i].0,
+            Token::KwDef | Token::HashCheck | Token::HashShow | Token::ColonEq
+        ) {
+            return true;
+        }
+        if let Token::Ident(_) = tokens[i].0 {
+            return tokens.get(i + 1).is_some_and(|(t, _)| *t == Token::Colon);
+        }
+        false
+    }
+
+    /// Parse an atom plus trailing suffixes (annot, by, refine, dot).
+    fn parse_head(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        let term = self.parse_atom()?;
+        self.apply_suffixes(term)
+    }
+
+    /// Greedily apply full-expression suffix operators: `:`, `by`, `where`, `.`
+    fn apply_suffixes(
+        &mut self,
+        mut t: &'bump Term<'bump>,
+    ) -> Result<&'bump Term<'bump>, ParseError> {
+        loop {
+            if self.peek_token().is_some_and(Self::is_expr_terminator) {
+                break;
             }
-        };
-        if !self.try_expect(&Token::Colon) {
-            self.pos = saved;
-            return Err(ParseError {
-                message: "not a dep arrow".into(),
-                span: 0..0,
-            });
-        }
-        let a = match self.parse_expr() {
-            Ok(t) => t,
-            Err(_) => {
-                self.pos = saved;
-                return Err(ParseError {
-                    message: "not a dep arrow".into(),
-                    span: 0..0,
-                });
-            }
-        };
-        if !self.try_expect(&Token::RParen) {
-            self.pos = saved;
-            return Err(ParseError {
-                message: "not a dep arrow".into(),
-                span: 0..0,
-            });
-        }
-        if !self.try_expect(&Token::ThinArrow) {
-            self.pos = saved;
-            return Err(ParseError {
-                message: "not a dep arrow".into(),
-                span: 0..0,
-            });
-        }
-        Ok(self.arena.pi(x, a, self.parse_expr()?))
-    }
 
-    // ── Term ──
-
-    fn parse_term(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        let t = self.parse_atom()?;
-        self.parse_suffixes(t)
-    }
-
-    fn parse_suffixes(&mut self, t: &'bump Term<'bump>) -> Result<&'bump Term<'bump>, ParseError> {
-        match self.try_parse_refine_suffix(t) {
-            Ok(t2) => self.parse_suffixes(t2),
-            Err(_) => {
-                // `:` type-annotation suffix — suppressed in `#check`
-                // context so that `:` is reserved for the constraint
-                // separator (e.g. `#check s some_sth : str`).
-                if !self.no_annot
-                    && let Some(c) = self.try_parse(Token::Colon, |s| s.parse_expr())
-                {
-                    return self.parse_suffixes(self.arena.annot(t, c));
+            let changed = if self.peek_token() == Some(Token::KwWhere) {
+                t = self.parse_refine_suffix(t)?;
+                true
+            } else if self.peek_token() == Some(Token::Colon) {
+                if let Some(c) = self.try_parse(Token::Colon, |s| {
+                    s.parse_expr_until(|tokens, i| {
+                        matches!(tokens[i].0, Token::KwBy | Token::ColonEq | Token::RParen)
+                    })
+                }) {
+                    t = self.arena.annot(t, c);
+                    true
+                } else {
+                    false
                 }
-                // `by` suffix: term by tactic1; tactic2; ...
-                if !self.no_by
-                    && let Some(tactics) = self.parse_by_proof_clause()
-                {
-                    return self.parse_suffixes(self.arena.by_proof(Some(t), tactics));
+            } else if self.peek_token() == Some(Token::KwBy) {
+                if let Some(tactics) = self.parse_by_proof_clause() {
+                    t = self.arena.by_proof(Some(t), tactics);
+                    true
+                } else {
+                    false
                 }
-                // `.field` suffix: dotted name access (struct construction/projection)
-                if self.peek_token() == Some(Token::Dot)
-                    && let Term::Builtin(name) | Term::Named(name) = t
-                {
-                    self.advance(); // consume `.`
-                    let field = self.parse_ident()?;
-                    let dotted = self.pool.intern(&format!("{}.{}", name, field));
-                    return self.parse_suffixes(self.arena.named(dotted));
-                }
-                Ok(t)
+            } else if self.peek_token() == Some(Token::Dot)
+                && matches!(t, Term::Builtin(_) | Term::Named(_))
+            {
+                self.advance();
+                let field = self.parse_ident()?;
+                let base_name = match t {
+                    Term::Builtin(n) | Term::Named(n) => n,
+                    _ => unreachable!(),
+                };
+                let dotted = self.pool.intern(&format!("{}.{}", base_name, field));
+                t = self.arena.named(dotted);
+                true
+            } else {
+                false
+            };
+            if !changed {
+                break;
             }
         }
+        Ok(t)
     }
 
-    // ── Atom ──
+    /// Unified precedence-climbing expression parser.
+    /// Handles function application (max precedence, left-associative) and
+    /// infix operators in a single loop.
+    fn parse_expr_bp(&mut self, min_prec: u8) -> Result<&'bump Term<'bump>, ParseError> {
+        let mut lhs = self.parse_head()?;
 
-    fn builtin_atom(&mut self, name: &str) -> &'bump Term<'bump> {
-        self.advance();
-        self.arena.builtin(self.pool.intern(name))
+        // Application binding power (juxtaposition) — highest in the system.
+        const APP_BP: u8 = u8::MAX;
+
+        loop {
+            let Some(tok) = self.peek_token() else {
+                break;
+            };
+            if Self::is_expr_terminator(tok.clone()) {
+                break;
+            }
+
+            // 1) Infix operators
+            if let Some((prec, assoc)) = Self::infix_bp(&tok) {
+                if prec < min_prec {
+                    break;
+                }
+                // Special: `/=` — check ahead that `/` is followed by `=`
+                if tok == Token::Slash && self.peek_ahead_is(&Token::Eq) {
+                    break;
+                }
+                self.advance();
+                let rbp = match assoc {
+                    Associativity::Left => prec + 1,
+                    Associativity::Right => prec,
+                    Associativity::None => prec + 1,
+                };
+
+                if tok == Token::ThinArrow {
+                    let rhs = self.parse_expr_bp(rbp)?;
+                    lhs = self.arena.pi(self.pool.intern(""), lhs, rhs);
+                } else {
+                    let op = Self::token_to_primop(&tok);
+                    let rhs = self.parse_expr_bp(rbp)?;
+                    lhs = self
+                        .arena
+                        .app(self.arena.app(self.arena.prim_op(op), lhs), rhs);
+                }
+                continue;
+            }
+
+            // 2) Function application (juxtaposition)
+            if APP_BP >= min_prec && Self::is_atom_start(&tok) {
+                match self.parse_head() {
+                    Ok(arg) => {
+                        lhs = self.arena.app(lhs, arg);
+                        continue;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // 3) No more — stop
+            break;
+        }
+        Ok(lhs)
     }
+
+    // ── Refinement suffix ──────────────────────────────────────────
+
+    fn parse_refine_suffix(
+        &mut self,
+        parent: &'bump Term<'bump>,
+    ) -> Result<&'bump Term<'bump>, ParseError> {
+        self.expect(&Token::KwWhere)?;
+        self.expect(&Token::LParen)?;
+        let param_name = self.parse_ident()?;
+        self.expect(&Token::FatArrow)?;
+        let predicate = self.parse_expr()?;
+        self.expect(&Token::RParen)?;
+        Ok(self.arena.refine(param_name, parent, predicate))
+    }
+
+    // ── Atom ───────────────────────────────────────────────────────
 
     fn parse_atom(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         match self.peek_token() {
@@ -770,13 +861,34 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 self.advance();
                 Ok(self.arena.lit_bool(false))
             }
-            Some(Token::AndIntro) => Ok(self.builtin_atom("∧-intro")),
-            Some(Token::AndElimLeft) => Ok(self.builtin_atom("∧-elim-left")),
-            Some(Token::And) => Ok(self.builtin_atom("and")),
-            Some(Token::Or) => Ok(self.builtin_atom("or")),
-            Some(Token::Not) => Ok(self.builtin_atom("not")),
-            Some(Token::Implies) => Ok(self.builtin_atom("implies")),
-            Some(Token::KwTheorem) => Ok(self.builtin_atom("theorem")),
+            Some(Token::AndIntro) => {
+                self.advance();
+                Ok(self.arena.builtin(self.pool.intern("∧-intro")))
+            }
+            Some(Token::AndElimLeft) => {
+                self.advance();
+                Ok(self.arena.builtin(self.pool.intern("∧-elim-left")))
+            }
+            Some(Token::And) => {
+                self.advance();
+                Ok(self.arena.builtin(self.pool.intern("and")))
+            }
+            Some(Token::Or) => {
+                self.advance();
+                Ok(self.arena.builtin(self.pool.intern("or")))
+            }
+            Some(Token::Not) => {
+                self.advance();
+                Ok(self.arena.builtin(self.pool.intern("not")))
+            }
+            Some(Token::Implies) => {
+                self.advance();
+                Ok(self.arena.builtin(self.pool.intern("implies")))
+            }
+            Some(Token::KwTheorem) => {
+                self.advance();
+                Ok(self.arena.builtin(self.pool.intern("theorem")))
+            }
             Some(Token::KwAuto) => {
                 self.advance();
                 Ok(self.arena.auto_proof())
@@ -795,15 +907,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             }
             Some(Token::LParen) => self.parse_parens(),
             Some(Token::KwBy) => {
-                if self.no_by {
-                    // Inside a type annotation, `by` belongs to the
-                    // outer context (e.g., a let-binding proof clause).
-                    return Err(ParseError {
-                        message: "not a standalone by block".into(),
-                        span: 0..0,
-                    });
-                }
-                // Standalone `by` block (first-class proof).
                 self.advance();
                 let tactics = self.parse_tactics()?;
                 Ok(self.arena.by_proof(None, tactics))
@@ -864,7 +967,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 });
             }
         };
-        // Parse one or more parameter names: \x y z. body
         let mut params = vec![self.parse_ident()?];
         while self
             .peek_token()
@@ -874,25 +976,19 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         }
         self.expect(&Token::Dot)?;
         let body = self.parse_expr()?;
-        // Wrap in curried named lambdas: \x y. body  ⟹  NamedLam(x, NamedLam(y, body))
         Ok(params
             .into_iter()
             .rfold(body, |b, p| self.arena.named_lam(p, b)))
     }
 
-    /// Parse `fun` lambda expression: `fun x y => body` or `fun (x : int) y => body`.
-    /// Desugars to curried `Annot(Lam(...), Pi(...))` so constrained parameters
-    /// are type-checked against their annotations.
     fn parse_fun_lam(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
-        self.advance(); // consume `fun`
+        self.advance();
         let params = self.parse_many_fun_params()?;
         self.expect(&Token::FatArrow)?;
         let body = self.parse_expr()?;
-        // Wrap in curried named lambdas: fun x y => body  ⟹  NamedLam(x, NamedLam(y, body))
         let func_body = params
             .iter()
             .rfold(body, |b, &(pn, _)| self.arena.named_lam(pn, b));
-        // Build Pi type for constraint annotation (mirrors desugar_func_def)
         let default = self.arena.builtin(self.pool.intern("data"));
         let func_type = params.iter().rfold(default, |b, &(pn, mc)| {
             self.arena.pi(pn, mc.unwrap_or(default), b)
@@ -900,9 +996,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(self.arena.annot(func_body, func_type))
     }
 
-    /// Parse the parameter list for `fun`: zero or more parameters, each either
-    /// a bare name `x` or a parenthesized `(name : constraint?)`.
-    /// Stops when it sees `=>` or any token that isn't an ident or `(`.
     fn parse_many_fun_params(
         &mut self,
     ) -> Result<Vec<(Name<'bump>, Option<&'bump Term<'bump>>)>, ParseError> {
@@ -935,135 +1028,90 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     fn parse_parens(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         self.expect(&Token::LParen)?;
-        // Inside parentheses, restore full annotation support even when
-        // the outer context (e.g. `#check`) suppresses `:` annotations.
-        let saved = self.no_annot;
-        self.no_annot = false;
         let t = self.parse_expr()?;
-        self.no_annot = saved;
         self.expect(&Token::RParen)?;
         Ok(t)
     }
 
-    // ── Refinement ──
+    // ── Union / Struct bodies ───────────────────────────────────────
 
-    fn try_parse_refine_suffix(
-        &mut self,
-        parent: &'bump Term<'bump>,
-    ) -> Result<&'bump Term<'bump>, ParseError> {
-        if !self.try_expect(&Token::KwWhere) {
-            return Err(ParseError {
-                message: "not a refinement".into(),
-                span: 0..0,
-            });
-        }
-        self.expect(&Token::LParen)?;
-        let param_name = self.parse_ident()?;
-        self.expect(&Token::FatArrow)?;
-        let predicate = self.parse_expr()?;
-        self.expect(&Token::RParen)?;
-        // Store the actual parameter name in the Refine node so the
-        // desugarer can replace Named(param_name) → RefParam.
-        Ok(self.arena.refine(param_name, parent, predicate))
-    }
-
-    // ── Operators ──
-
-    fn token_precedence(tok: &Token) -> Option<(i32, Associativity)> {
-        match tok {
-            Token::Star | Token::Slash | Token::Percent => Some((4, Associativity::Left)),
-            Token::ThinArrow => Some((3, Associativity::Right)),
-            Token::Plus | Token::Minus => Some((2, Associativity::Left)),
-            Token::Eq
-            | Token::Le
-            | Token::Ge
-            | Token::Neq
-            | Token::Lt
-            | Token::Gt
-            | Token::EqEq => Some((1, Associativity::None)),
-            _ => None,
-        }
-    }
-
-    fn parse_binop_rhs(
-        &mut self,
-        mut lhs: &'bump Term<'bump>,
-        min_prec: i32,
-        no_annot: bool,
-    ) -> Result<&'bump Term<'bump>, ParseError> {
-        while let Some(tok) = self.peek_token()
-            && let Some((prec, assoc)) = Self::token_precedence(&tok)
-            && prec >= min_prec
-        {
-            let next_min = match assoc {
-                Associativity::Left => prec + 1,
-                Associativity::Right => prec,
-                Associativity::None => prec + 1,
-            };
-            if tok == Token::ThinArrow {
-                self.advance();
-                let rhs_atom = self.parse_app_any(no_annot)?;
-                return Ok(self.arena.pi(
-                    self.pool.intern(""),
-                    lhs,
-                    self.parse_binop_rhs(rhs_atom, next_min, no_annot)?,
-                ));
-            }
-            if tok == Token::Slash && self.peek_ahead_is(&Token::Eq) {
+    fn parse_union_body(&mut self, name: Name<'bump>) -> Result<&'bump Term<'bump>, ParseError> {
+        self.expect(&Token::KwUnion)?;
+        let mut variants: Vec<(Name<'bump>, Vec<(Name<'bump>, &'bump Term<'bump>)>)> = Vec::new();
+        loop {
+            if !self.try_expect(&Token::Bar) {
                 break;
             }
-            self.advance();
-            let op = match &tok {
-                Token::Star => PrimOp::Mul,
-                Token::Slash => PrimOp::Div,
-                Token::Percent => PrimOp::Mod_,
-                Token::Plus => PrimOp::Add,
-                Token::Minus => PrimOp::Sub,
-                Token::Eq | Token::EqEq => PrimOp::Eq,
-                Token::Le => PrimOp::Le,
-                Token::Ge => PrimOp::Ge,
-                Token::Neq => PrimOp::Neq,
-                Token::Lt => PrimOp::Lt,
-                Token::Gt => PrimOp::Gt,
-                _ => unreachable!(),
+            let vname = self.parse_ident()?;
+            let fields: Vec<(Name<'bump>, &'bump Term<'bump>)> = if self.try_expect(&Token::KwOf) {
+                let mut fs = Vec::new();
+                loop {
+                    if !self.try_expect(&Token::LParen) {
+                        break;
+                    }
+                    let fname = self.parse_ident()?;
+                    let fty = if self.try_expect(&Token::Colon) {
+                        self.parse_expr_until(|tokens, i| matches!(tokens[i].0, Token::RParen))?
+                    } else {
+                        self.arena.builtin(self.pool.intern("data"))
+                    };
+                    self.expect(&Token::RParen)?;
+                    fs.push((fname, fty));
+                }
+                fs
+            } else {
+                Vec::new()
             };
-            let rhs_atom = self.parse_app_any(no_annot)?;
-            let rhs = self.parse_binop_rhs(rhs_atom, next_min, no_annot)?;
-            lhs = self
-                .arena
-                .app(self.arena.app(self.arena.prim_op(op), lhs), rhs);
+            variants.push((vname, fields));
         }
-        Ok(lhs)
-    }
-
-    fn parse_app_any(&mut self, no_annot: bool) -> Result<&'bump Term<'bump>, ParseError> {
-        if no_annot {
-            self.parse_app_no_annot()
-        } else {
-            self.parse_app()
+        if variants.is_empty() {
+            return Err(ParseError {
+                message: "union must have at least one variant".into(),
+                span: self.current_span(),
+            });
         }
+        let variants_slice: Vec<_> = variants
+            .into_iter()
+            .map(|(vn, fs)| (vn, self.arena.alloc_slice(&fs)))
+            .collect();
+        Ok(self
+            .arena
+            .union_def(name, self.arena.alloc_slice(&variants_slice)))
     }
 
-    fn peek_ahead_is(&self, tok: &Token) -> bool {
-        self.tokens
-            .get(self.pos + 1)
-            .map(|(t, _)| t == tok)
-            .unwrap_or(false)
+    fn parse_struct_body(&mut self, name: Name<'bump>) -> Result<&'bump Term<'bump>, ParseError> {
+        self.expect(&Token::KwStruct)?;
+        let mut fields: Vec<(Name<'bump>, &'bump Term<'bump>)> = Vec::new();
+        loop {
+            let saved = self.pos;
+            let fname = match self.parse_ident() {
+                Ok(n) => n,
+                Err(_) => {
+                    self.pos = saved;
+                    break;
+                }
+            };
+            let fty = if self.try_expect(&Token::Colon) {
+                self.parse_struct_field_type()?
+            } else {
+                self.arena.builtin(self.pool.intern("data"))
+            };
+            fields.push((fname, fty));
+        }
+        if fields.is_empty() {
+            return Err(ParseError {
+                message: "struct must have at least one field".into(),
+                span: self.current_span(),
+            });
+        }
+        Ok(self.arena.struct_def(name, self.arena.alloc_slice(&fields)))
     }
 
-    // ── Tactic parsing ──
+    // ── Tactic parsing ──────────────────────────────────────────────
 
-    /// Parse a sequence of tactics from a `by` block (Lean 4 style).
-    /// Tactics are separated by newlines or semicolons.  The last tactic
-    /// may be a bare expression (implicit `exact`).  Stops at terminator
-    /// tokens (`:=`, `in`, `:`, `)`, etc.) or EOF.
     fn parse_tactics(&mut self) -> Result<&'bump [Tactic<'bump>], ParseError> {
         let mut tactics: Vec<Tactic<'bump>> = Vec::new();
         loop {
-            // Stop at tokens that end the tactic block.
-            // We peek *before* advance skips newlines, so we also see
-            // newlines as implicit separators — the next non-newline
-            // token being a terminator ends the block.
             match self.peek() {
                 None
                 | Some((Token::ColonEq, _))
@@ -1080,9 +1128,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             }
             let tactic = self.parse_tactic()?;
             tactics.push(tactic);
-            // Skip optional `;` separator.
-            // Newlines are already consumed by `advance` inside
-            // `parse_tactic`, so they act as implicit separators.
             if self.peek_token() == Some(Token::Semi) {
                 self.advance();
             }
@@ -1096,25 +1141,20 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(self.arena.alloc_slice(&tactics))
     }
 
-    /// Parse a single tactic: `exact <term>`, `apply <term>`, `intro [name]`,
-    /// `have <name> := <term>`, or a bare expression (implicit `exact`).
-    /// Uses `parse_term_no_annot` so that `:` and `by` are NOT consumed
-    /// (they delimit the end of the tactic block).
     fn parse_tactic(&mut self) -> Result<Tactic<'bump>, ParseError> {
         match self.peek_token() {
             Some(Token::KwExact) => {
                 self.advance();
-                let t = self.parse_app_no_annot()?;
+                let t = self.parse_tactic_arg()?;
                 Ok(Tactic::Exact(t))
             }
             Some(Token::KwApply) => {
                 self.advance();
-                let t = self.parse_app_no_annot()?;
+                let t = self.parse_tactic_arg()?;
                 Ok(Tactic::Apply(t))
             }
             Some(Token::KwIntro) => {
                 self.advance();
-                // Optional name: `intro x` or just `intro`
                 let name = if let Some(Token::Ident(_)) = self.peek_token() {
                     Some(self.parse_ident()?)
                 } else {
@@ -1126,12 +1166,11 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 self.advance();
                 let name = self.parse_ident()?;
                 self.expect(&Token::ColonEq)?;
-                let t = self.parse_app_no_annot()?;
+                let t = self.parse_tactic_arg()?;
                 Ok(Tactic::Have(name, t))
             }
-            // Bare expression = implicit `exact`
             _ => {
-                let t = self.parse_app_no_annot()?;
+                let t = self.parse_tactic_arg()?;
                 Ok(Tactic::Exact(t))
             }
         }
@@ -1145,9 +1184,7 @@ enum Associativity {
     None,
 }
 
-// ── Helper functions ──
-
-// ── Public entry points ──
+// ── Free functions ────────────────────────────────────────────────────
 
 fn tokenize(input: &str) -> Vec<SpannedToken> {
     Token::lexer(input)
@@ -1195,22 +1232,15 @@ mod tests {
         (b, TermArena::new(b))
     }
 
-    // ── Destructuring let ──
-    // `let Point{x, y} := p in x + y` desugars to:
-    //   let x := Point.x p in let y := Point.y p in x + y
     #[test]
     fn let_destructuring_ast() {
         let (bump, arena) = setup();
         let term = parse_expr_top("let Point{x, y} := p in x + y", bump, &arena)
             .expect("parse should succeed");
 
-        // Outer let: let x := Point.x p in <inner>
         match term {
             Term::Let(name_x, val_x, body, None) => {
-                // x is the first-declared field, becomes the outermost let binder
                 assert_eq!(name_x, &"x");
-
-                // val = Point.x applied to p
                 match val_x {
                     Term::App(proj_x, arg_x) => {
                         assert_eq!(**proj_x, Term::Named(&"Point.x"));
@@ -1218,23 +1248,16 @@ mod tests {
                     }
                     other => panic!("expected App for x projection, got {:?}", other),
                 }
-
-                // Inner let: let y := Point.y p in x + y
                 match body {
                     Term::Let(name_y, val_y, inner_body, None) => {
                         assert_eq!(name_y, &"y");
-
                         match val_y {
                             Term::App(proj_y, arg_y) => {
                                 assert_eq!(**proj_y, Term::Named(&"Point.y"));
-                                // p has no De Bruijn vars, so shift by 1 is a no-op
                                 assert_eq!(**arg_y, Term::Named(&"p"));
                             }
                             other => panic!("expected App for y projection, got {:?}", other),
                         }
-
-                        // inner_body = x + y
-                        // Unresolved at parse time: x = Named("x"), y = Named("y")
                         match inner_body {
                             Term::App(op_app, rhs) => match op_app {
                                 Term::App(op, lhs) => {
@@ -1256,7 +1279,6 @@ mod tests {
         }
     }
 
-    // ── Struct defintion ──
     #[test]
     fn struct_definition_ast() {
         let (bump, arena) = setup();
@@ -1265,12 +1287,9 @@ mod tests {
                 .expect("parse should succeed");
 
         assert_eq!(name, "Foo");
-        // No curried params
         assert!(params.is_empty());
-        // Return type annotation
         assert_eq!(m_ret.map(|t| *t), Some(Term::Builtin(&"prop")));
 
-        // Body is StructDef (not desugared for union/struct definitions)
         match body {
             Term::StructDef(struct_name, fields) => {
                 assert_eq!(struct_name, &"Foo");
@@ -1284,7 +1303,6 @@ mod tests {
         }
     }
 
-    // ── Lambda wrapping an application ──
     #[test]
     fn lambda_application_ast() {
         let (bump, arena) = setup();
@@ -1293,7 +1311,6 @@ mod tests {
         match term {
             Term::NamedLam(name, body) => {
                 assert_eq!(name, &"x");
-                // body = x + 1  i.e. App(App(PrimOp(Add), Named("x")), LitInt(1))
                 match body {
                     Term::App(op_app, rhs) => {
                         match op_app {
@@ -1312,7 +1329,6 @@ mod tests {
         }
     }
 
-    // ── If-then-else ──
     #[test]
     fn if_expression_ast() {
         let (bump, arena) = setup();
@@ -1329,7 +1345,6 @@ mod tests {
         }
     }
 
-    // ── Match expression ──
     #[test]
     fn match_expression_ast() {
         let (bump, arena) = setup();
@@ -1341,13 +1356,11 @@ mod tests {
                 assert_eq!(**scrutinee, Term::Named(&"x"));
                 assert_eq!(branches.len(), 2);
 
-                // Branch 0: | A => 1
                 let (idx0, binds0, body0) = &branches[0];
                 assert_eq!(*idx0, 0);
                 assert!(binds0.is_empty());
                 assert_eq!(**body0, Term::LitInt(1));
 
-                // Branch 1: | B => 2
                 let (idx1, binds1, body1) = &branches[1];
                 assert_eq!(*idx1, 1);
                 assert!(binds1.is_empty());
@@ -1357,12 +1370,10 @@ mod tests {
         }
     }
 
-    // ── Dotted name ──
     #[test]
     fn dotted_name_ast() {
         let (bump, arena) = setup();
         let term = parse_expr_top("Foo.bar", bump, &arena).expect("parse should succeed");
-
         assert_eq!(*term, Term::Named(&"Foo.bar"));
     }
 }
