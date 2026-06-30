@@ -1,7 +1,7 @@
-//! Type system for C code generation.
+//! C type system for code generation.
 //!
 //! Defines the `TypeMapper` trait for Ligare→C type resolution and the
-//! `TypeAnalyzer` struct that builds type maps, analyzes dependencies,
+//! `TypeAnalyzer` struct that builds C type maps, analyzes dependencies,
 //! and emits typedefs — all as methods on a single cohesive object.
 
 use crate::backend::ir::CType;
@@ -40,9 +40,8 @@ pub trait TypeMapper {
     /// Map a constraint Term to its C type.
     fn constraint_to_ctype(&self, t: &Term<'_>) -> Result<CType, Diagnostic>;
 
-    /// Returns true if the constraint represents a type-level universe
-    /// (data, prop, theorem, proof).
-    fn is_type_universe(&self, t: &Term<'_>) -> bool;
+    /// Returns true if the constraint marks an erased generic parameter.
+    fn is_erased_parameter_constraint(&self, t: &Term<'_>) -> bool;
 }
 
 // ── TypeAnalyzer ──
@@ -348,7 +347,7 @@ impl TypeMapper for TypeAnalyzer {
         crate::backend::ir::constraint_to_ctype(t, &self.union_names, &self.struct_names)
     }
 
-    fn is_type_universe(&self, t: &Term<'_>) -> bool {
-        crate::backend::ir::is_type_universe(t)
+    fn is_erased_parameter_constraint(&self, t: &Term<'_>) -> bool {
+        crate::backend::ir::is_erased_parameter_constraint(t)
     }
 }

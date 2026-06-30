@@ -1,7 +1,7 @@
 //! Term erasure — removes proof-irrelevant terms.
 //!
-//! After constraint checking, all terms classified as `prop`, `theorem`, or
-//! `proof` are erased, leaving only `data` terms for code generation.
+//! After constraint checking, proof-irrelevant terms rooted in `prop`,
+//! `theorem`, or `proof` are erased, leaving `data` terms for code generation.
 
 use crate::checker::builtin::BuiltinRegistry;
 use crate::core::pool::TermArena;

@@ -1,0 +1,77 @@
+def Nat := int where (x => x >= 0)
+def x : Nat := 10
+#check x : int
+def sdiv (a : int) (b : int where (x => x /= 0)) := a / b
+def fib (n : int) : int := if n < 2 then n else fib (n-1) + fib (n-2)
+#check fib 20 : int
+#show fib 10
+#check sdiv 1 1 : int
+
+-- Proof block (Lean 4-style `by` syntax with newlines):
+-- For refinement types, `by` proves the predicate:
+#check 5 by
+  exact true : Nat
+
+-- Multi-tactic proof (intro + exact, constructs identity function):
+#check 0 by
+  intro
+  exact 0 : int -> int
+
+-- First-class proof: standalone `by` (no subject term):
+-- Can appear anywhere an expression is expected:
+#check (by
+  intro
+  exact 0) : int -> int
+
+-- Applied immediately (identity function, always returns 0):
+#show (by
+  intro
+  exact 0) 5
+
+-- Basic theorem: a value satisfies a type
+theorem zero_is_nat : Nat := 0 by
+  exact true
+
+-- Theorem with function type (legacy \ syntax)
+theorem identity : int -> int := \x. x
+
+-- Theorem with fun syntax
+theorem add_one : int -> int := fun x => x + 1
+
+-- Theorem referencing a previously defined theorem
+#check zero_is_nat : Nat
+
+-- Theorem can be used as a value
+#check identity 5 : int
+
+def some_sth : str := "hello"
+def some_fn (s : str) := s
+
+-- String literal tests
+#check some_fn some_sth : str
+#check "hello" : data
+#show some_fn some_sth
+
+-- Struct types
+def Point : prop := struct
+  x : int
+  y : int
+
+#check Point.mk 3 4 : Point
+
+def p : Point := Point.mk 10 20
+#check Point.x p : int
+#check Point.y p : int
+#show Point.x p
+
+-- Struct arithmetic
+def add (a : Point) (b : Point) : Point :=
+  Point.mk (Point.x a + Point.x b) (Point.y a + Point.y b)
+
+#show Point.x (add p p)
+
+-- Destructuring let
+def dist_sq (pt : Point) : int :=
+  let Point{x, y} := pt in x * x + y * y
+
+#show dist_sq p

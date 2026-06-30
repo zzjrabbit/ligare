@@ -69,7 +69,7 @@ impl<'bump> Compiler<'bump> {
         mut codegen: CodegenState<'bump>,
     ) -> Result<MonomorphizedProgram<'bump>, Diagnostic> {
         let generic_fns =
-            Self::generic_defs(&codegen.raw_defs, |t| self.is_type_param_constraint(t));
+            Self::generic_defs(&codegen.raw_defs, |t| self.is_erased_param_constraint(t));
         let generic_types = self.generic_type_defs(&tops);
         if generic_fns.is_empty() && generic_types.is_empty() {
             return Ok(MonomorphizedProgram { tops, codegen });
@@ -88,7 +88,7 @@ impl<'bump> Compiler<'bump> {
             .raw_defs
             .into_iter()
             .filter_map(|top| {
-                if self.top_has_type_params(&top) {
+                if self.top_has_erased_params(&top) {
                     return None;
                 }
                 Some(self.rewrite_top(top, &mut state))
@@ -123,7 +123,7 @@ impl<'bump> Compiler<'bump> {
 
     fn generic_defs(
         raw_defs: &[TopLevel<'bump>],
-        is_type_param_constraint: impl Fn(&Term<'_>) -> bool,
+        is_erased_param_constraint: impl Fn(&Term<'_>) -> bool,
     ) -> HashMap<Name<'bump>, GenericDef<'bump>> {
         raw_defs
             .iter()
@@ -133,7 +133,7 @@ impl<'bump> Compiler<'bump> {
                 };
                 params
                     .iter()
-                    .any(|(_, c)| c.is_some_and(&is_type_param_constraint))
+                    .any(|(_, c)| c.is_some_and(&is_erased_param_constraint))
                     .then_some((
                         *name,
                         GenericDef {
@@ -161,7 +161,7 @@ impl<'bump> Compiler<'bump> {
                     .filter(|_| {
                         params
                             .iter()
-                            .any(|(_, c)| c.is_some_and(|t| self.is_type_param_constraint(t)))
+                            .any(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
                     })
                     .map(|_| (*name, GenericTypeDef { params, body }))
             })
@@ -174,7 +174,7 @@ impl<'bump> Compiler<'bump> {
             TopLevel::TLExpr(t, s) => TopLevel::TLExpr(self.rewrite_term(t, state), s),
             TopLevel::TLDef(n, p, r, b, s) => {
                 if p.iter()
-                    .any(|(_, c)| c.is_some_and(|t| self.is_type_param_constraint(t)))
+                    .any(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
                 {
                     return TopLevel::TLDef(n, p, r, b, s);
                 }
@@ -271,7 +271,7 @@ impl<'bump> Compiler<'bump> {
         let n_type_params = def
             .params
             .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_type_param_constraint(t)))
+            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
             .count();
         if n_type_params == 0 || args.len() < n_type_params {
             return None;
@@ -307,7 +307,7 @@ impl<'bump> Compiler<'bump> {
         let n_type_params = def
             .params
             .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_type_param_constraint(t)))
+            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
             .count();
         if n_type_params == 0 || args.len() < n_type_params {
             return None;
@@ -338,7 +338,7 @@ impl<'bump> Compiler<'bump> {
         let n_type_params = def
             .params
             .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_type_param_constraint(t)))
+            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
             .count();
         let subst = def.params[..n_type_params]
             .iter()
@@ -378,7 +378,7 @@ impl<'bump> Compiler<'bump> {
         let n_type_params = def
             .params
             .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_type_param_constraint(t)))
+            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
             .count();
         let subst = def.params[..n_type_params]
             .iter()
@@ -588,7 +588,7 @@ impl<'bump> Compiler<'bump> {
         let n_type_params = def
             .params
             .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_type_param_constraint(t)))
+            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
             .count();
         let subst = def.params[..n_type_params]
             .iter()
@@ -677,13 +677,13 @@ impl<'bump> Compiler<'bump> {
         }
     }
 
-    fn top_has_type_params(&self, top: &TopLevel<'bump>) -> bool {
+    fn top_has_erased_params(&self, top: &TopLevel<'bump>) -> bool {
         matches!(
             top,
             TopLevel::TLDef(_, params, _, _, _)
                 if params
                     .iter()
-                    .any(|(_, c)| c.is_some_and(|t| self.is_type_param_constraint(t)))
+                    .any(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
         )
     }
 
@@ -717,8 +717,8 @@ impl<'bump> Compiler<'bump> {
         t
     }
 
-    fn is_type_param_constraint(&self, term: &Term<'_>) -> bool {
-        SemanticQueries::new(self.checker.builtins()).is_type_parameter_constraint(term)
+    fn is_erased_param_constraint(&self, term: &Term<'_>) -> bool {
+        SemanticQueries::new(self.checker.builtins()).is_erased_parameter_constraint(term)
     }
 
     fn type_arg_is_supported(&self, term: &Term<'_>) -> bool {

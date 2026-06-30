@@ -52,11 +52,11 @@ impl FunSig {
         union_names: &HashSet<String>,
         struct_names: &HashSet<String>,
     ) -> Result<Self, Diagnostic> {
-        // Filter out type-level (generic) parameters — those constrained
-        // by universe-level constraints (data, prop, theorem, proof).
+        // Filter out erased generic parameters constrained by meta-constraints
+        // (prop, theorem, proof).
         let data_params: Vec<_> = params
             .iter()
-            .filter(|(_, mc)| !mc.is_some_and(|c| is_type_universe(c)))
+            .filter(|(_, mc)| !mc.is_some_and(|c| is_erased_parameter_constraint(c)))
             .collect();
         let param_types: Vec<CType> = data_params
             .iter()
@@ -75,7 +75,7 @@ impl FunSig {
             .collect::<Vec<_>>();
         let ret_body = peel_lams(body, params.len());
         let ret_type = match m_ret {
-            Some(t) if !is_type_universe(t) => constraint_to_ctype(t, union_names, struct_names)?,
+            Some(t) if !is_meta_constraint(t) => constraint_to_ctype(t, union_names, struct_names)?,
             _ => infer_ret_ctype(
                 ret_body,
                 &param_types,
@@ -169,12 +169,16 @@ fn is_primop_app(term: &Term<'_>) -> bool {
     }
 }
 
-/// Returns true if the constraint represents a type-level universe
-/// (data, prop, theorem, proof) — parameters with these constraints
-/// should be stripped from C function signatures.
-pub fn is_type_universe(t: &Term<'_>) -> bool {
+/// Returns true for Ligare meta-constraints (`data`, `prop`, `theorem`, `proof`).
+pub fn is_meta_constraint(t: &Term<'_>) -> bool {
     let builtins = BuiltinRegistry::new();
-    SemanticQueries::new(&builtins).is_type_universe(t)
+    SemanticQueries::new(&builtins).is_meta_constraint(t)
+}
+
+/// Returns true for generic parameters erased before C code generation.
+pub fn is_erased_parameter_constraint(t: &Term<'_>) -> bool {
+    let builtins = BuiltinRegistry::new();
+    SemanticQueries::new(&builtins).is_erased_parameter_constraint(t)
 }
 
 /// Map a constraint Term to its C type.  Recognizes builtin type names,

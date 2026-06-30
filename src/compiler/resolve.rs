@@ -24,10 +24,15 @@ pub type StructWithArgs<'bump> = (
 use super::Compiler;
 
 impl<'bump> Compiler<'bump> {
-    /// Resolve ALL `Builtin(name)` references from the env (constants AND functions).
-    /// Used for eval paths where function bodies need to be available.
-    /// Also runs the desugar pass to convert `NamedLam` → `Lam` and `Named` → `Var`.
+    /// Resolve ALL free `Builtin(name)`/`Named(name)` references from the env
+    /// (constants AND functions). Used for eval paths where function bodies
+    /// need to be available.
+    ///
+    /// Local binders must become de Bruijn indices before global substitution,
+    /// otherwise a global definition named `x` could capture `fun x => ...`.
     pub fn resolve_all(&self, term: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
+        let term = desugarer.desugar(term);
         let t = self.arena.map(term, &|t| {
             if let Term::Builtin(name) | Term::Named(name) = t
                 && let Some(def) = self.env.get(name)
@@ -60,9 +65,7 @@ impl<'bump> Compiler<'bump> {
             }
             None
         });
-        // Desugar: convert NamedLam → Lam, resolve Named → Var
-        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
-        desugarer.desugar(t)
+        t
     }
 
     /// Extract the function name from a term if it's a recursive call.

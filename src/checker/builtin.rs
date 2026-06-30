@@ -66,8 +66,8 @@ fn entry(u: Universe, c: BuiltinChecker, lk: Option<LogicKind>) -> BuiltinEntry 
 
 /// Registry of builtin types and logic operators.
 ///
-/// Owned by `TypeChecker`; constructed once at startup.  `Classifier` can
-/// access a shared reference for universe classification.
+/// Owned by `TypeChecker`; constructed once at startup.  Semantic queries can
+/// access a shared reference for builtin universe lookup.
 #[derive(Debug, Clone)]
 pub struct BuiltinRegistry {
     table: HashMap<&'static str, BuiltinEntry>,
@@ -102,8 +102,8 @@ impl BuiltinRegistry {
         }
     }
 
-    /// Classify a builtin name to its universe.
-    pub fn classify(&self, name: &str) -> Option<Universe> {
+    /// Return the universe associated with a builtin name.
+    pub fn universe_of(&self, name: &str) -> Option<Universe> {
         self.table.get(name).map(|e| e.universe)
     }
 

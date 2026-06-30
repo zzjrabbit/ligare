@@ -15,7 +15,6 @@ use crate::checker::TypeChecker;
 use crate::checker::context::empty_ctx;
 use crate::checker::erase::Eraser;
 use crate::config::BUILTIN_DATA;
-use crate::core::classify::classify;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
 use crate::core::semantics::SemanticQueries;
@@ -220,10 +219,9 @@ impl<'bump> Compiler<'bump> {
                     && Self::refinement_parts(body).is_none()
                 {
                     let semantics = SemanticQueries::new(self.checker.builtins());
-                    if params
-                        .iter()
-                        .any(|(_, c)| c.is_some_and(|t| semantics.is_type_parameter_constraint(t)))
-                    {
+                    if params.iter().any(|(_, c)| {
+                        c.is_some_and(|t| semantics.is_erased_parameter_constraint(t))
+                    }) {
                         continue;
                     }
                     let sig = FunSig::from_func(params, *m_ret, body, union_names, struct_names)?;
@@ -271,7 +269,7 @@ impl<'bump> Compiler<'bump> {
                     let semantics = SemanticQueries::new(self.checker.builtins());
                     if params
                         .iter()
-                        .any(|(_, c)| c.is_some_and(|t| semantics.is_type_parameter_constraint(t)))
+                        .any(|(_, c)| c.is_some_and(|t| semantics.is_erased_parameter_constraint(t)))
                     {
                         return None;
                     }
@@ -399,19 +397,20 @@ impl<'bump> Compiler<'bump> {
     fn process_top_level(&mut self, top: TopLevel<'bump>) -> Result<(), Diagnostic> {
         match top {
             TopLevel::TLDef(name, params, _m_ret, body, span) => {
-                let universe = classify(self.checker.builtins(), &empty_ctx(), body);
+                let semantics = SemanticQueries::new(self.checker.builtins());
+                let universe = semantics.universe(&empty_ctx(), body);
                 if universe == Some(Universe::UProp) {
                     if self.register_prop_definition(name, params, _m_ret, body) {
                         return Ok(());
                     }
                 }
 
-                let previous = if self.has_type_parameter(params) {
+                let previous = if self.has_erased_parameter(params) {
                     self.env.insert(name, body)
                 } else {
                     self.env.insert(name, self.definition_signature(body))
                 };
-                if !self.has_type_parameter(params)
+                if !self.has_erased_parameter(params)
                     && let Err(err) = self.checker.check(
                         &empty_ctx(),
                         self.resolve_all(body),
@@ -471,8 +470,8 @@ impl<'bump> Compiler<'bump> {
                         if !self.quiet {
                             println!("[theorem] {}", name);
                         }
-                        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
-                        self.env.insert(name, desugarer.desugar(body));
+                        self.env
+                            .insert(name, self.arena.annot(resolved_body, resolved_prop));
                     }
                 }
             }
@@ -579,16 +578,10 @@ impl<'bump> Compiler<'bump> {
         }
     }
 
-    fn has_type_parameter(&self, params: &[(Name<'bump>, Option<&'bump Term<'bump>>)]) -> bool {
+    fn has_erased_parameter(&self, params: &[(Name<'bump>, Option<&'bump Term<'bump>>)]) -> bool {
+        let semantics = SemanticQueries::new(self.checker.builtins());
         params.iter().any(|(_, c)| {
-            matches!(
-                c,
-                Some(Term::Builtin("prop" | "theorem" | "proof"))
-                    | Some(Term::Named("prop" | "theorem" | "proof"))
-                    | Some(Term::Universe(
-                        Universe::UProp | Universe::UTheorem | Universe::UProof
-                    ))
-            )
+            c.is_some_and(|constraint| semantics.is_erased_parameter_constraint(constraint))
         })
     }
 

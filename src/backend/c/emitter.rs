@@ -105,10 +105,12 @@ impl<'a> CEmitter<'a> {
                 )))
             }
         } else {
-            // Filter out type-level (generic) params
+            // Filter out erased generic params.
             let data_params: Vec<_> = params
                 .iter()
-                .filter(|(_, mc)| !mc.is_some_and(|c| self.type_analyzer.is_type_universe(c)))
+                .filter(|(_, mc)| {
+                    !mc.is_some_and(|c| self.type_analyzer.is_erased_parameter_constraint(c))
+                })
                 .collect();
             let pns: Vec<String> = data_params
                 .iter()

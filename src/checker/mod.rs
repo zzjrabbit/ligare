@@ -170,6 +170,7 @@ impl<'bump> TypeChecker<'bump> {
             Term::Annot(t, c) => {
                 if let (Term::Pi(..), Term::Pi(..)) = (c, constraint) {
                     self.check_pi_match(c, constraint)?;
+                    return self.check(ctx, t, constraint);
                 }
                 self.check(ctx, t, c)?;
                 self.check(ctx, t, constraint)
