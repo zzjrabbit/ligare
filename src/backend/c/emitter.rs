@@ -10,6 +10,7 @@ use crate::backend::c::expr::ExpressionEmitter;
 use crate::backend::c::match_emit::MatchEmitter;
 use crate::backend::c::names::NameResolver;
 use crate::backend::c::types::{TypeAnalyzer, TypeMapper};
+use crate::backend::c::value::CExpr;
 use crate::backend::ir::{CType, FunSig};
 use crate::core::syntax::{Name, Term};
 use crate::diagnostic::Diagnostic;
@@ -85,25 +86,23 @@ impl<'a> CEmitter<'a> {
             let arity = self.name_resolver.count_lams(body);
             if arity == 0 {
                 let mut ctx = EmitCtx::new();
-                let (code, ctype) = self.expr_emitter.emit_expr(
+                let value = self.expr_emitter.emit_expr(
                     body,
                     &mut ctx,
                     self.type_analyzer.union_map(),
                     self.type_analyzer.struct_map(),
                 )?;
+                let code = value.expr.code()?;
                 Ok(format!(
                     "const {} {} = {};\n",
-                    ctype.c_name(),
+                    value.ctype.c_name(),
                     self.name_resolver.escape(name),
-                    code
+                    code.as_str()
                 ))
             } else {
-                let pns: Vec<String> = (0..arity)
-                    .map(|i| self.name_resolver.anon_param(i))
-                    .collect();
-                let peeled = self.name_resolver.peel_lams(body, arity);
-                let param_types = vec![CType::Int64; arity];
-                self.emit_fun(name, &pns, &param_types, peeled)
+                Err(Diagnostic::new(format!(
+                    "Cannot emit function `{name}` without explicit parameter types"
+                )))
             }
         } else {
             // Filter out type-level (generic) params
@@ -120,7 +119,11 @@ impl<'a> CEmitter<'a> {
                 .iter()
                 .find(|(n, _)| *n == name)
                 .map(|(_, sig)| sig.param_types.clone())
-                .unwrap_or_else(|| vec![CType::Int64; data_params.len()]);
+                .ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "Cannot emit function `{name}`; missing function signature"
+                    ))
+                })?;
             let peeled = self.name_resolver.peel_lams(body, params.len());
             self.emit_fun(name, &pns, &param_types, peeled)
         }
@@ -141,23 +144,24 @@ impl<'a> CEmitter<'a> {
             .collect();
         let mut ctx = EmitCtx::from_params(params, param_types);
         ctx.self_name = Some(name.to_string());
-        let (body_code, ret_ty) = self.expr_emitter.emit_expr(
+        let body_value = self.expr_emitter.emit_expr(
             body,
             &mut ctx,
             self.type_analyzer.union_map(),
             self.type_analyzer.struct_map(),
         )?;
-        let return_stmt = if body_code.starts_with("match__") {
-            let block =
-                self.match_emitter
-                    .emit(&body_code, &ret_ty, 0, self.type_analyzer.union_map());
-            format!("{block}    return {};\n", self.name_resolver.result_temp(0))
-        } else {
-            format!("    return {};\n", body_code)
+        let return_stmt = match body_value.expr {
+            CExpr::Match(plan) => {
+                let block = self
+                    .match_emitter
+                    .emit(&plan, 0, self.type_analyzer.union_map());
+                format!("{block}    return {};\n", self.name_resolver.result_temp(0))
+            }
+            CExpr::Code(code) => format!("    return {};\n", code.as_str()),
         };
         Ok(format!(
             "{} {}({}) {{\n{}}}\n",
-            ret_ty.c_name(),
+            body_value.ctype.c_name(),
             self.name_resolver.escape(name),
             cps.join(", "),
             return_stmt
@@ -237,25 +241,25 @@ impl<'a> CodeGenerator for CEmitter<'a> {
             let mut match_counter: u32 = 0;
             for term in &outputs {
                 let mut ctx = EmitCtx::new();
-                let (expr, ctype) = self.expr_emitter.emit_expr(
+                let value = self.expr_emitter.emit_expr(
                     term,
                     &mut ctx,
                     self.type_analyzer.union_map(),
                     self.type_analyzer.struct_map(),
                 )?;
-                if expr.starts_with("match__") {
-                    let block = self.match_emitter.emit(
-                        &expr,
-                        &ctype,
-                        match_counter,
-                        self.type_analyzer.union_map(),
-                    );
-                    match_counter += 1;
-                    out.push_str(&block);
-                    let r_var = self.name_resolver.result_temp(match_counter - 1);
-                    self.emit_printf(&mut out, &r_var, &ctype);
-                } else {
-                    self.emit_printf(&mut out, &expr, &ctype);
+                match value.expr {
+                    CExpr::Match(plan) => {
+                        let block = self.match_emitter.emit(
+                            &plan,
+                            match_counter,
+                            self.type_analyzer.union_map(),
+                        );
+                        match_counter += 1;
+                        out.push_str(&block);
+                        let r_var = self.name_resolver.result_temp(match_counter - 1);
+                        self.emit_printf(&mut out, &r_var, &value.ctype);
+                    }
+                    CExpr::Code(code) => self.emit_printf(&mut out, code.as_str(), &value.ctype),
                 }
             }
             out.push_str("    return 0;\n}\n");

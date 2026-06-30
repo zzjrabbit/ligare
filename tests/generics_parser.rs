@@ -22,12 +22,12 @@ fn parse_generic_id_definition() {
     assert_eq!(params.len(), 2);
     // First param: A : prop
     assert_eq!(params[0].0, s(&arena, "A"));
-    // Second param: x : A (should be Builtin("A"))
+    // Second param: x : A is still raw metadata on the def parameter list.
     assert_eq!(params[1].0, s(&arena, "x"));
     if let Some(ty) = params[1].1 {
         assert!(
             matches!(ty, Term::Builtin(name) | Term::Named(name) if *name == "A"),
-            "x's type should be Named(\"A\"), got: {:?}",
+            "x's type should be Named(\"A\") metadata, got: {:?}",
             ty
         );
     } else {
@@ -37,26 +37,20 @@ fn parse_generic_id_definition() {
     if let Some(ret) = m_ret {
         assert!(
             matches!(ret, Term::Builtin(name) | Term::Named(name) if *name == "A"),
-            "Return type should be Named(\"A\"), got: {:?}",
+            "Return type should be Named(\"A\") metadata, got: {:?}",
             ret
         );
     } else {
         panic!("should have return type");
     }
-    // Body is now in desugared form: Annot(NamedLam("A", NamedLam("x", Named("x"))), Pi(...))
+    // Body is desugared: local params and type params are de Bruijn vars.
     match body {
         Term::Annot(lam_body, _pi) => match lam_body {
-            Term::NamedLam(name_a, inner) => {
-                assert_eq!(*name_a, s(&arena, "A"));
-                match inner {
-                    Term::NamedLam(name_x, Term::Named(name)) => {
-                        assert_eq!(*name_x, s(&arena, "x"));
-                        assert_eq!(*name, s(&arena, "x"));
-                    }
-                    _ => panic!("Expected NamedLam(\"x\", Named(\"x\")), got: {:?}", inner),
-                }
-            }
-            _ => panic!("Expected NamedLam, got: {:?}", lam_body),
+            Term::Lam(inner) => match inner {
+                Term::Lam(Term::Var(0)) => {}
+                _ => panic!("Expected Lam(Var(0)), got: {:?}", inner),
+            },
+            _ => panic!("Expected Lam, got: {:?}", lam_body),
         },
         _ => panic!("Expected Annot, got: {:?}", body),
     }
@@ -78,7 +72,7 @@ fn parse_generic_two_type_params() {
     assert_eq!(params[0].0, s(&arena, "A"));
     // B : prop
     assert_eq!(params[1].0, s(&arena, "B"));
-    // x : A (Builtin("A"))
+    // x : A metadata
     assert_eq!(params[2].0, s(&arena, "x"));
     if let Some(ty) = params[2].1 {
         assert!(
@@ -87,7 +81,7 @@ fn parse_generic_two_type_params() {
             ty
         );
     }
-    // y : B (Builtin("B"))
+    // y : B metadata
     assert_eq!(params[3].0, s(&arena, "y"));
     if let Some(ty) = params[3].1 {
         assert!(
@@ -155,25 +149,15 @@ fn parse_generic_desugared_form() {
     let (b, arena) = a();
     let result = parse_def_top("def id (A : prop) (x : A) : A := x", b, &arena);
     let (_, _params, _m_ret, body) = result.unwrap();
-    // Body is in raw parser form: Annot(NamedLam("A", NamedLam("x", Named("x"))), Pi(...))
-    // Type refs are Named, not de Bruijn Var.
+    // Body is desugared: local names in the body/type are de Bruijn vars.
     match body {
         Term::Annot(lam_body, ty) => {
             match lam_body {
-                Term::NamedLam(name_a, inner) => {
-                    assert_eq!(*name_a, s(&arena, "A"));
-                    match inner {
-                        Term::NamedLam(name_x, Term::Named(name)) => {
-                            assert_eq!(*name_x, s(&arena, "x"));
-                            assert_eq!(*name, s(&arena, "x"));
-                        }
-                        _ => panic!(
-                            "Expected NamedLam(\"x\", Named(\"x\")), got inner: {:?}",
-                            inner
-                        ),
-                    }
-                }
-                _ => panic!("Expected NamedLam, got: {:?}", lam_body),
+                Term::Lam(inner) => match inner {
+                    Term::Lam(Term::Var(0)) => {}
+                    _ => panic!("Expected Lam(Var(0)), got inner: {:?}", inner),
+                },
+                _ => panic!("Expected Lam, got: {:?}", lam_body),
             }
             match ty {
                 Term::Pi(name_a, dom_a, cod) => {
@@ -182,17 +166,8 @@ fn parse_generic_desugared_form() {
                     match cod {
                         Term::Pi(name_x, dom_x, cod_x) => {
                             assert_eq!(**name_x, *s(&arena, "x"));
-                            // Raw parser output: param refs are Named, not de Bruijn Var.
-                            assert_eq!(
-                                **dom_x,
-                                Term::Named(s(&arena, "A")),
-                                "dom_x should be Named(\"A\")"
-                            );
-                            assert_eq!(
-                                **cod_x,
-                                Term::Named(s(&arena, "A")),
-                                "cod_x should be Named(\"A\")"
-                            );
+                            assert_eq!(**dom_x, Term::Var(0), "dom_x should reference A");
+                            assert_eq!(**cod_x, Term::Var(1), "cod_x should reference A");
                         }
                         _ => panic!("Expected inner Pi, got: {:?}", cod),
                     }

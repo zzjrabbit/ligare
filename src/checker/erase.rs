@@ -1,12 +1,11 @@
 //! Term erasure — removes proof-irrelevant terms.
 //!
-//! After type-checking, all terms classified as `prop`, `theorem`, or
+//! After constraint checking, all terms classified as `prop`, `theorem`, or
 //! `proof` are erased, leaving only `data` terms for code generation.
 
 use crate::checker::builtin::BuiltinRegistry;
-use crate::checker::context::Context;
-use crate::core::classify::classify;
 use crate::core::pool::TermArena;
+use crate::core::semantics::{ErasePolicy, SemanticQueries};
 use crate::core::syntax::{Term, Universe};
 
 /// Erases proof-irrelevant subterms from a term tree.
@@ -22,6 +21,10 @@ impl<'bump> Eraser<'bump> {
 
     fn unit(&self) -> &'bump Term<'bump> {
         self.arena.lit_int(0)
+    }
+
+    fn semantics(&self) -> SemanticQueries<'_> {
+        SemanticQueries::new(&self.builtins)
     }
 
     /// Erase to plain Term (existing behavior, kept for backward compat).
@@ -42,7 +45,7 @@ impl<'bump> Eraser<'bump> {
             Term::ByProof(Some(inner), _) => self.erase(inner),
             Term::ByProof(None, _) | Term::AutoProof => self.unit(),
             Term::App(f, a) => {
-                if classify(&self.builtins, &Context::empty(), f) == Some(Universe::UData) {
+                if self.semantics().erase_policy(f) == ErasePolicy::KeepData {
                     self.arena.app(self.erase(f), self.erase(a))
                 } else {
                     self.unit()
@@ -53,7 +56,7 @@ impl<'bump> Eraser<'bump> {
             Term::Universe(Universe::UData) => t,
             Term::Universe(_) => self.unit(),
             Term::Builtin(_) | Term::Named(_) => {
-                if classify(&self.builtins, &Context::empty(), t) == Some(Universe::UData) {
+                if self.semantics().erase_policy(t) == ErasePolicy::KeepData {
                     t
                 } else {
                     self.unit()

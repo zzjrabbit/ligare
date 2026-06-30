@@ -6,7 +6,7 @@ mod common;
 use common::{bin, leak_bump, s};
 use ligare::checker::check;
 use ligare::checker::context::{empty_ctx, empty_table};
-use ligare::core::debruijn::SubstitutionContext;
+use ligare::core::debruijn::{Desugarer, SubstitutionContext};
 use ligare::core::pool::TermArena;
 use ligare::core::syntax::{PrimOp, Term};
 
@@ -23,9 +23,8 @@ fn check_empty<'bump>(
     check(arena, &empty_table(), &empty_ctx(), t, c)
 }
 
-/// Helper: directly build the desugared form `Annot(Lam(...), Pi(...))`.
-/// Type annotations and return type use `Builtin` names (as the parser
-/// produces), not de Bruijn Var indices.
+/// Helper: build a generic function from raw named local references, then
+/// desugar so all local type/data parameters become de Bruijn variables.
 fn make_generic<'bump>(
     arena: &'bump TermArena<'bump>,
     _name: &str,
@@ -48,15 +47,23 @@ fn make_generic<'bump>(
         .collect();
     let params = arena.alloc_slice(&params_vec);
 
-    // Build lambda body: wrap in N lambdas
-    let lam_body = params.iter().fold(body, |b, _| arena.lam(b));
-
-    // Build Pi type: right-fold params over the return type.
-    // Keep Builtin names for type-parameter references — the checker
-    // will resolve them via name-based substitution during application.
-    let pi_type = params
+    let desugarer = Desugarer::new(arena);
+    let names: Vec<_> = params.iter().rev().map(|(pn, _)| *pn).collect();
+    let lam_body = params
         .iter()
-        .rfold(ret, |b, &(pn, mc)| arena.pi(pn, mc.unwrap_or(ret), b));
+        .rfold(desugarer.desugar_with_names(body, &names), |b, _| {
+            arena.lam(b)
+        });
+    let pi_type = params.iter().enumerate().rev().fold(
+        desugarer.desugar_with_names(ret, &names),
+        |b, (idx, &(pn, mc))| {
+            let dom_env: Vec<_> = params[..idx].iter().rev().map(|(n, _)| *n).collect();
+            let dom = mc
+                .map(|t| desugarer.desugar_with_names(t, &dom_env))
+                .unwrap_or_else(|| arena.builtin(s(arena, "data")));
+            arena.pi(pn, dom, b)
+        },
+    );
 
     arena.annot(lam_body, pi_type)
 }
@@ -71,8 +78,8 @@ fn generic_id_int() {
         &arena,
         "id",
         &[("A", arena.builtin(s(&arena, "prop")))],
-        &[("x", arena.builtin(s(&arena, "A")))],
-        arena.builtin(s(&arena, "A")),
+        &[("x", arena.named(s(&arena, "A")))],
+        arena.named(s(&arena, "A")),
         arena.var(0),
     );
     // id int 5 : int
@@ -93,8 +100,8 @@ fn generic_id_bool() {
         &arena,
         "id",
         &[("A", arena.builtin(s(&arena, "prop")))],
-        &[("x", arena.builtin(s(&arena, "A")))],
-        arena.builtin(s(&arena, "A")),
+        &[("x", arena.named(s(&arena, "A")))],
+        arena.named(s(&arena, "A")),
         arena.var(0),
     );
     // id bool true : bool
@@ -115,8 +122,8 @@ fn generic_id_wrong_data_arg_fails() {
         &arena,
         "id",
         &[("A", arena.builtin(s(&arena, "prop")))],
-        &[("x", arena.builtin(s(&arena, "A")))],
-        arena.builtin(s(&arena, "A")),
+        &[("x", arena.named(s(&arena, "A")))],
+        arena.named(s(&arena, "A")),
         arena.var(0),
     );
     // id bool 5 → 5 is int, but bool was chosen for A
@@ -141,10 +148,10 @@ fn two_type_params() {
             ("B", arena.builtin(s(&arena, "prop"))),
         ],
         &[
-            ("x", arena.builtin(s(&arena, "A"))),
-            ("y", arena.builtin(s(&arena, "B"))),
+            ("x", arena.named(s(&arena, "A"))),
+            ("y", arena.named(s(&arena, "B"))),
         ],
-        arena.builtin(s(&arena, "A")),
+        arena.named(s(&arena, "A")),
         arena.var(1),
     );
     // konst int bool 5 true : int
@@ -173,8 +180,8 @@ fn type_param_prop() {
         &arena,
         "id",
         &[("A", arena.builtin(s(&arena, "prop")))],
-        &[("x", arena.builtin(s(&arena, "A")))],
-        arena.builtin(s(&arena, "A")),
+        &[("x", arena.named(s(&arena, "A")))],
+        arena.named(s(&arena, "A")),
         arena.var(0),
     );
     // id int 5 : int
@@ -202,12 +209,12 @@ fn three_type_three_data_params() {
             ("C", arena.builtin(s(&arena, "prop"))),
         ],
         &[
-            ("a", arena.builtin(s(&arena, "A"))),
-            ("b", arena.builtin(s(&arena, "B"))),
-            ("c", arena.builtin(s(&arena, "C"))),
+            ("a", arena.named(s(&arena, "A"))),
+            ("b", arena.named(s(&arena, "B"))),
+            ("c", arena.named(s(&arena, "C"))),
         ],
-        arena.builtin(s(&arena, "A")), // return A
-        arena.var(2),                  // body: a
+        arena.named(s(&arena, "A")), // return A
+        arena.var(2),                // body: a
     );
     // f int bool str 1 true "hi" : int
     let app = arena.app(
@@ -237,7 +244,7 @@ fn three_type_three_data_params() {
 #[test]
 fn subst_pi_codomain() {
     let (_b, arena) = a();
-    // Pi("A", prop, Pi("x", Builtin("A"), Builtin("A")))
+    // Pi("A", prop, Pi("x", Var(0), Var(0)))
     // Build Pi type with Var(0) (de Bruijn) referencing A
     let pi_type = arena.pi(
         s(&arena, "A"),
@@ -324,9 +331,9 @@ fn return_type_is_type_param() {
         &arena,
         "wrap",
         &[("A", arena.builtin(s(&arena, "prop")))],
-        &[("x", arena.builtin(s(&arena, "A")))],
-        arena.builtin(s(&arena, "A")), // return A
-        arena.var(0),                  // body: x
+        &[("x", arena.named(s(&arena, "A")))],
+        arena.named(s(&arena, "A")), // return A
+        arena.var(0),                // body: x
     );
     // wrap int 5 : int
     let app = arena.app(
@@ -348,15 +355,15 @@ fn data_param_constrained_by_nonzero_with_type_param() {
     // This tests that a refinement on a data param works with generics.
     let nonzero = arena.refine(
         s(&arena, ""),
-        arena.builtin(s(&arena, "A")),
+        arena.named(s(&arena, "A")),
         bin(&arena, PrimOp::Neq, arena.ref_param(), arena.lit_int(0)),
     );
     let f = make_generic(
         &arena,
         "safe_div",
         &[("A", arena.builtin(s(&arena, "prop")))],
-        &[("x", arena.builtin(s(&arena, "A"))), ("y", nonzero)],
-        arena.builtin(s(&arena, "A")),
+        &[("x", arena.named(s(&arena, "A"))), ("y", nonzero)],
+        arena.named(s(&arena, "A")),
         bin(&arena, PrimOp::Div, arena.var(1), arena.var(0)),
     );
     // safe_div int 10 2 : int

@@ -4,7 +4,7 @@
 //!
 //! - **SubstitutionContext** — `subst`, `shift`, `beta`, `instantiate_pi`,
 //!   and variant-aware traversals.  Used by evaluators (`eval`, `whnf`)
-//!   and the type checker.
+//!   and the constraint checker.
 //! - **Desugarer** — resolves parser-produced `Named`/`NamedLam` nodes
 //!   into de Bruijn `Var`/`Lam` form.
 
@@ -22,22 +22,31 @@ use crate::core::syntax::{Tactic, Term};
 /// `NamedLam(name, body)` for lambdas.  This pass walks the AST, tracks the
 /// binding context (name stack), and replaces each `Named(name)` with `Var(i)`
 /// where `i` is the position of `name` in the current name stack.
-pub struct Desugarer<'bump> {
-    arena: &'bump TermArena<'bump>,
+pub struct Desugarer<'arena, 'bump> {
+    arena: &'arena TermArena<'bump>,
 }
 
-impl<'bump> Desugarer<'bump> {
-    pub fn new(arena: &'bump TermArena<'bump>) -> Self {
+impl<'arena, 'bump> Desugarer<'arena, 'bump> {
+    pub fn new(arena: &'arena TermArena<'bump>) -> Self {
         Self { arena }
     }
 
-    pub fn arena(&self) -> &'bump TermArena<'bump> {
+    pub fn arena(&self) -> &'arena TermArena<'bump> {
         self.arena
     }
 
     /// Desugar a term: resolve all `NamedLam` → `Lam` and `Named` → `Var`.
     pub fn desugar(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
         self.desugar_with_env(t, &[])
+    }
+
+    /// Desugar a term with an existing innermost-first local environment.
+    pub fn desugar_with_names(
+        &self,
+        t: &'bump Term<'bump>,
+        env: &[&'bump str],
+    ) -> &'bump Term<'bump> {
+        self.desugar_with_env(t, env)
     }
 
     /// Recursive helper that carries a name stack `env` (innermost first).
@@ -357,8 +366,8 @@ impl<'bump> SubstitutionContext<'bump> {
 
     /// Peel the outermost Pi binder: substitute `arg` for Var(0) in the
     /// codomain, then shift the result by -1 to remove the binder.
-    /// This is used when type-checking function application (both in
-    /// `check_app` and `infer_fun_type`).
+    /// This is used when checking application constraints, including
+    /// `check_app` and Pi inference.
     pub fn instantiate_pi(
         &self,
         arg: &'bump Term<'bump>,

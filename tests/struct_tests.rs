@@ -105,6 +105,60 @@ fn struct_projection_wrong_type_fails() {
 }
 
 #[test]
+fn struct_projection_unknown_subject_fails() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    let result = compiler
+        .process_file_str("def Point : prop := struct\n  x : int\n#check Point.x p : int\n");
+    let err = result.expect_err("Should reject projection from subject without struct constraint");
+    assert!(
+        err.message.contains("term has no known struct constraint"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn struct_projection_unknown_subject_in_function_fails() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    let result = compiler.process_file_str(
+        "def Point : prop := struct\n  x : int\ndef bad (p : data) : int := Point.x p\n",
+    );
+    let err = result.expect_err("Should reject projection from data-typed function parameter");
+    assert!(
+        err.message.contains("term has no known struct constraint"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn struct_projection_wrong_subject_type_message_mentions_not_struct() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    let result = compiler
+        .process_file_str("def Point : prop := struct\n  x : int\n#check Point.x true : int\n");
+    let err = result.expect_err("Should reject projection from bool literal");
+    assert!(err.message.contains("not a struct"), "{}", err.message);
+}
+
+#[test]
+fn let_destruct_unknown_subject_fails() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    let result = compiler.process_file_str(
+        "def Point : prop := struct\n  x : int\n#check let Point{x} := p in x : int\n",
+    );
+    let err = result.expect_err("Should reject destructuring a subject without struct constraint");
+    assert!(
+        err.message.contains("term has no known struct constraint"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
 fn struct_second_field_projection() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);

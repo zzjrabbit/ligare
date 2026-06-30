@@ -1,4 +1,4 @@
-//! Compiler orchestrator — coordinates parsing, type checking, and code generation.
+//! Compiler orchestrator — coordinates parsing, constraint checking, and code generation.
 //!
 //! Resolution logic lives in `resolve.rs`; this module holds the `Compiler`
 //! struct and its lifecycle methods.
@@ -14,16 +14,69 @@ use crate::backend::ir::FunSig;
 use crate::checker::TypeChecker;
 use crate::checker::context::empty_ctx;
 use crate::checker::erase::Eraser;
+use crate::config::BUILTIN_DATA;
 use crate::core::classify::classify;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
+use crate::core::semantics::SemanticQueries;
 use crate::core::syntax::{Name, Term, Universe};
 use crate::diagnostic::Diagnostic;
 use crate::front::parser::{TopLevel, parse_expr_top, parse_program};
 use crate::pretty::PrettyPrinter;
 
+mod monomorph;
+
+fn read_source_file(file: &str) -> Result<String, Diagnostic> {
+    fs::read_to_string(file)
+        .map_err(|e| Diagnostic::new(format!("cannot read source file `{}`: {}", file, e)))
+}
+
+/// Borrowed view of the data C codegen needs.
+///
+/// This is intentionally a light wrapper over the existing compiler-owned
+/// storage. It makes the handoff explicit without introducing a full pipeline
+/// of separate IR types.
+pub struct CodegenInput<'a, 'bump> {
+    pub tops: &'a [TopLevel<'bump>],
+    pub raw_defs: &'a [TopLevel<'bump>],
+    pub fun_sigs: &'a [(&'bump str, FunSig)],
+    pub union_types: &'a [(&'bump str, &'bump Term<'bump>)],
+    pub struct_types: &'a [(&'bump str, &'bump Term<'bump>)],
+}
+
+struct ParsedProgram<'bump> {
+    tops: Vec<TopLevel<'bump>>,
+}
+
+pub(crate) struct CodegenState<'bump> {
+    raw_defs: Vec<TopLevel<'bump>>,
+    fun_sigs: Vec<(&'bump str, FunSig)>,
+    union_types: Vec<(&'bump str, &'bump Term<'bump>)>,
+    struct_types: Vec<(&'bump str, &'bump Term<'bump>)>,
+}
+
+impl<'bump> CodegenState<'bump> {
+    fn empty() -> Self {
+        Self {
+            raw_defs: Vec::new(),
+            fun_sigs: Vec::new(),
+            union_types: Vec::new(),
+            struct_types: Vec::new(),
+        }
+    }
+}
+
+pub(crate) struct MonomorphizedProgram<'bump> {
+    tops: Vec<TopLevel<'bump>>,
+    codegen: CodegenState<'bump>,
+}
+
+struct ErasedProgram<'bump> {
+    tops: Vec<TopLevel<'bump>>,
+}
+
 /// The compiler orchestrator — owns the bump allocator, term arena, and
-/// coordinates parsing, type checking, and evaluation.
+/// coordinates parsing, constraint checking, and evaluation.
 ///
 /// Resolution methods are implemented in `resolve.rs` via `impl Compiler`.
 pub struct Compiler<'bump> {
@@ -65,8 +118,7 @@ impl<'bump> Compiler<'bump> {
 
     /// Process a source file: parse it and handle each top-level item.
     pub fn process_file(&mut self, file: &str) -> Result<(), Diagnostic> {
-        let content =
-            fs::read_to_string(file).map_err(|e| Diagnostic::new(format!("{}: {}", file, e)))?;
+        let content = read_source_file(file)?;
         self.process_str(&content, file)
     }
 
@@ -77,19 +129,20 @@ impl<'bump> Compiler<'bump> {
 
     fn process_str(&mut self, content: &str, file: &str) -> Result<(), Diagnostic> {
         let tops = parse_program(content, self.bump, self.arena).map_err(|e| {
-            Diagnostic::with_span(format!("{}: parse error: {}", file, e.message), e.span)
+            Diagnostic::with_span(format!("parse error: {}", e.message), e.span)
+                .with_source(file, content)
         })?;
         for top in tops {
-            self.process_top_level(top, file)?;
+            self.process_top_level(top)
+                .map_err(|d| d.with_source_if_missing(file, content))?;
         }
         Ok(())
     }
 
-    /// Process a source file, collect top-level items, and type-check.
+    /// Process a source file, collect top-level items, and check constraints.
     pub fn collect_file(&mut self, file: &str) -> Result<(), Diagnostic> {
         self.quiet = true;
-        let content =
-            fs::read_to_string(file).map_err(|e| Diagnostic::new(format!("{}: {}", file, e)))?;
+        let content = read_source_file(file)?;
         self.collect_str(&content, file)
     }
 
@@ -100,42 +153,35 @@ impl<'bump> Compiler<'bump> {
     }
 
     fn collect_str(&mut self, content: &str, file: &str) -> Result<(), Diagnostic> {
-        let tops = parse_program(content, self.bump, self.arena).map_err(|e| {
-            Diagnostic::with_span(format!("{}: parse error: {}", file, e.message), e.span)
-        })?;
-        for top in &tops {
-            self.process_top_level(top.clone(), file)?;
+        let parsed = self.parse_program_for_collection(content, file)?;
+        for top in &parsed.tops {
+            self.process_top_level(top.clone())
+                .map_err(|d| d.with_source_if_missing(file, content))?;
         }
-        let (union_names, struct_names) = self.build_name_sets(&tops);
-        self.collect_signatures(&tops, &union_names, &struct_names)?;
-
-        // Build raw (un-erased) definitions for on-demand codegen.
-        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
-        for top in &tops {
-            if let TopLevel::TLDef(name, params, m_ret, body_term, span) = top {
-                if matches!(body_term, Term::UnionDef(..) | Term::StructDef(..)) {
-                    continue;
-                }
-                let term = self.env.get(name).copied().unwrap_or(*body_term);
-                let resolved = self.subst_top_level(term);
-                let desugared = desugarer.desugar(resolved);
-                self.raw_defs.push(TopLevel::TLDef(
-                    name,
-                    params,
-                    *m_ret,
-                    desugared,
-                    span.clone(),
-                ));
-            }
-        }
+        let (union_names, struct_names) = self.build_name_sets(&parsed.tops);
+        let codegen = self.collect_codegen_state(&parsed.tops, &union_names, &struct_names)?;
+        let monomorphized = self.monomorphize_for_codegen(parsed.tops, codegen)?;
+        self.apply_codegen_state(monomorphized.codegen);
 
         let eraser = Eraser::new(self.arena, self.checker.builtins.clone());
-        let evald_tops = self.erase_and_collect_tops(tops, &eraser);
-        self.tops.extend(evald_tops);
+        let erased = self.erase_and_collect_tops(monomorphized.tops, &eraser);
+        self.tops.extend(erased.tops);
         Ok(())
     }
 
-    /// Build sets of union and struct type names from the top-level definitions.
+    fn parse_program_for_collection(
+        &self,
+        content: &str,
+        file: &str,
+    ) -> Result<ParsedProgram<'bump>, Diagnostic> {
+        let tops = parse_program(content, self.bump, self.arena).map_err(|e| {
+            Diagnostic::with_span(format!("parse error: {}", e.message), e.span)
+                .with_source(file, content)
+        })?;
+        Ok(ParsedProgram { tops })
+    }
+
+    /// Build sets of union and struct constraint names from the top-level definitions.
     fn build_name_sets(&self, tops: &[TopLevel<'bump>]) -> (HashSet<String>, HashSet<String>) {
         let union_names: HashSet<String> = tops
             .iter()
@@ -154,28 +200,57 @@ impl<'bump> Compiler<'bump> {
         (union_names, struct_names)
     }
 
-    /// Collect function signatures, union types, and struct types from the
-    /// original (un-erased) top-level definitions before erasure.
-    fn collect_signatures(
-        &mut self,
+    /// Collect the codegen-facing inputs from the original un-erased tops.
+    fn collect_codegen_state(
+        &self,
         tops: &[TopLevel<'bump>],
         union_names: &HashSet<String>,
         struct_names: &HashSet<String>,
-    ) -> Result<(), Diagnostic> {
+    ) -> Result<CodegenState<'bump>, Diagnostic> {
+        let mut state = CodegenState::empty();
         for top in tops {
             if let TopLevel::TLDef(name, params, m_ret, body, _) = top {
                 if matches!(body, Term::UnionDef(..)) {
-                    self.union_types.push((name, body));
+                    state.union_types.push((name, body));
                 } else if matches!(body, Term::StructDef(..)) {
-                    self.struct_types.push((name, body));
+                    state.struct_types.push((name, body));
                 }
-                if !matches!(body, Term::UnionDef(..) | Term::StructDef(..)) {
+                if !params.is_empty()
+                    && !matches!(body, Term::UnionDef(..) | Term::StructDef(..))
+                    && Self::refinement_parts(body).is_none()
+                {
+                    let semantics = SemanticQueries::new(self.checker.builtins());
+                    if params
+                        .iter()
+                        .any(|(_, c)| c.is_some_and(|t| semantics.is_type_parameter_constraint(t)))
+                    {
+                        continue;
+                    }
                     let sig = FunSig::from_func(params, *m_ret, body, union_names, struct_names)?;
-                    self.fun_sigs.push((name, sig));
+                    state.fun_sigs.push((name, sig));
                 }
             }
         }
-        Ok(())
+
+        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
+        for top in tops {
+            if let TopLevel::TLDef(name, params, m_ret, body_term, span) = top {
+                if matches!(body_term, Term::UnionDef(..) | Term::StructDef(..)) {
+                    continue;
+                }
+                let term = self.env.get(name).copied().unwrap_or(*body_term);
+                let resolved = self.subst_top_level(term);
+                let desugared = desugarer.desugar(resolved);
+                state.raw_defs.push(TopLevel::TLDef(
+                    name,
+                    params,
+                    *m_ret,
+                    desugared,
+                    span.clone(),
+                ));
+            }
+        }
+        Ok(state)
     }
 
     /// Erase, resolve, and filter top-level definitions. Skips union/struct
@@ -184,14 +259,22 @@ impl<'bump> Compiler<'bump> {
         &self,
         tops: Vec<TopLevel<'bump>>,
         eraser: &Eraser<'bump>,
-    ) -> Vec<TopLevel<'bump>> {
-        tops.into_iter()
+    ) -> ErasedProgram<'bump> {
+        let tops = tops
+            .into_iter()
             .filter_map(|top| match top {
                 TopLevel::TLDef(_name, _params, _m_ret, Term::UnionDef(..) | Term::StructDef(..), _) =>
                 {
                     None
                 }
                 TopLevel::TLDef(name, params, m_ret, body_term, span) => {
+                    let semantics = SemanticQueries::new(self.checker.builtins());
+                    if params
+                        .iter()
+                        .any(|(_, c)| c.is_some_and(|t| semantics.is_type_parameter_constraint(t)))
+                    {
+                        return None;
+                    }
                     let term = self.env.get(name).copied().unwrap_or(body_term);
                     let resolved = self.subst_top_level(term);
                     let desugared = self.checker.desugarer.desugar(resolved);
@@ -219,13 +302,22 @@ impl<'bump> Compiler<'bump> {
                             && matches!(body, Term::Builtin(_) | Term::Named(_) | Term::UnionDef(..) | Term::StructDef(..))
                 )
             })
-            .collect()
+            .collect();
+        ErasedProgram { tops }
+    }
+
+    fn apply_codegen_state(&mut self, state: CodegenState<'bump>) {
+        self.raw_defs = state.raw_defs;
+        self.fun_sigs = state.fun_sigs;
+        self.union_types = state.union_types;
+        self.struct_types = state.struct_types;
     }
 
     /// Evaluate an expression string (for `--eval`).
     pub fn eval_expr(&self, expr: &str) -> Result<(), Diagnostic> {
         let term = parse_expr_top(expr, self.bump, self.arena).map_err(|err| {
             Diagnostic::with_span(format!("--eval parse error: {}", err.message), err.span)
+                .with_source("--eval", expr)
         })?;
         let resolved = self.resolve_all(term);
         let self_name = self.extract_func_name(term);
@@ -257,6 +349,17 @@ impl<'bump> Compiler<'bump> {
         &self.fun_sigs
     }
 
+    /// Get a single explicit codegen input view.
+    pub fn codegen_input(&self) -> CodegenInput<'_, 'bump> {
+        CodegenInput {
+            tops: &self.tops,
+            raw_defs: &self.raw_defs,
+            fun_sigs: &self.fun_sigs,
+            union_types: &self.union_types,
+            struct_types: &self.struct_types,
+        }
+    }
+
     // ── private helpers ──
 
     /// Desugar a generic union/struct definition (one with type parameters)
@@ -268,25 +371,62 @@ impl<'bump> Compiler<'bump> {
         m_ret: Option<&'bump Term<'bump>>,
         body: &'bump Term<'bump>,
     ) -> &'bump Term<'bump> {
-        let func_body = params.iter().rfold(body, |b, &(_pn, _)| self.arena.lam(b));
+        let names: Vec<_> = params.iter().rev().map(|(pn, _)| *pn).collect();
+        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
+        let func_body = params.iter().rfold(
+            desugarer.desugar_with_names(body, &names),
+            |b, &(_pn, _)| self.arena.lam(b),
+        );
         let default = self.arena.builtin(self.arena.alloc_str("data"));
-        let func_type = params
+        let ret = m_ret
+            .map(|t| desugarer.desugar_with_names(t, &names))
+            .unwrap_or(default);
+        let func_constraint = params
             .iter()
-            .rfold(m_ret.unwrap_or(default), |b, &(pn, mc)| {
-                self.arena.pi(pn, mc.unwrap_or(default), b)
+            .enumerate()
+            .rev()
+            .fold(ret, |b, (idx, &(pn, mc))| {
+                let dom_env: Vec<_> = params[..idx].iter().rev().map(|(n, _)| *n).collect();
+                let dom = mc
+                    .map(|t| desugarer.desugar_with_names(t, &dom_env))
+                    .unwrap_or(default);
+                self.arena.pi(pn, dom, b)
             });
-        self.arena.annot(func_body, func_type)
+        self.arena.annot(func_body, func_constraint)
     }
 
     /// Process a single top-level item.
-    fn process_top_level(&mut self, top: TopLevel<'bump>, file: &str) -> Result<(), Diagnostic> {
+    fn process_top_level(&mut self, top: TopLevel<'bump>) -> Result<(), Diagnostic> {
         match top {
-            TopLevel::TLDef(name, params, _m_ret, body, _span) => {
+            TopLevel::TLDef(name, params, _m_ret, body, span) => {
                 let universe = classify(self.checker.builtins(), &empty_ctx(), body);
                 if universe == Some(Universe::UProp) {
                     if self.register_prop_definition(name, params, _m_ret, body) {
                         return Ok(());
                     }
+                }
+
+                let previous = if self.has_type_parameter(params) {
+                    self.env.insert(name, body)
+                } else {
+                    self.env.insert(name, self.definition_signature(body))
+                };
+                if !self.has_type_parameter(params)
+                    && let Err(err) = self.checker.check(
+                        &empty_ctx(),
+                        self.resolve_all(body),
+                        self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA)),
+                    )
+                {
+                    if let Some(prev) = previous {
+                        self.env.insert(name, prev);
+                    } else {
+                        self.env.remove(name);
+                    }
+                    return Err(Diagnostic::with_span(
+                        format!("definition {} failed: {}", name, err),
+                        span,
+                    ));
                 }
 
                 if !self.quiet {
@@ -303,7 +443,7 @@ impl<'bump> Compiler<'bump> {
                 {
                     Err(err) => {
                         return Err(Diagnostic::with_span(
-                            format!("{}: check failed: {}", file, err),
+                            format!("check failed: {}", err),
                             span,
                         ));
                     }
@@ -323,7 +463,7 @@ impl<'bump> Compiler<'bump> {
                 {
                     Err(err) => {
                         return Err(Diagnostic::with_span(
-                            format!("{}: theorem check failed: {}", file, err),
+                            format!("theorem check failed: {}", err),
                             span,
                         ));
                     }
@@ -341,13 +481,24 @@ impl<'bump> Compiler<'bump> {
                     return Ok(());
                 }
                 let resolved = self.resolve_all(_term);
+                self.checker
+                    .check(
+                        &empty_ctx(),
+                        resolved,
+                        self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA)),
+                    )
+                    .map_err(|err| {
+                        Diagnostic::with_span(format!("show check failed: {}", err), _span.clone())
+                    })?;
                 let self_name = self.extract_func_name(_term);
                 let mut ev = Evaluator::new(self.arena);
                 if let Some(n) = self_name {
                     ev.set_self_name(n);
                 }
                 match ev.eval(resolved) {
-                    Err(err) => eprintln!("{}: show error: {}", file, err),
+                    Err(err) => {
+                        return Err(Diagnostic::with_span(format!("show error: {}", err), _span));
+                    }
                     Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
                 }
             }
@@ -356,13 +507,24 @@ impl<'bump> Compiler<'bump> {
                     return Ok(());
                 }
                 let resolved = self.resolve_all(_term);
+                self.checker
+                    .check(
+                        &empty_ctx(),
+                        resolved,
+                        self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA)),
+                    )
+                    .map_err(|err| {
+                        Diagnostic::with_span(format!("eval check failed: {}", err), _span.clone())
+                    })?;
                 let self_name = self.extract_func_name(_term);
                 let mut ev = Evaluator::new(self.arena);
                 if let Some(n) = self_name {
                     ev.set_self_name(n);
                 }
                 match ev.eval(resolved) {
-                    Err(err) => eprintln!("{}: eval error: {}", file, err),
+                    Err(err) => {
+                        return Err(Diagnostic::with_span(format!("eval error: {}", err), _span));
+                    }
                     Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
                 }
             }
@@ -414,6 +576,29 @@ impl<'bump> Compiler<'bump> {
                 true
             }
             _ => false,
+        }
+    }
+
+    fn has_type_parameter(&self, params: &[(Name<'bump>, Option<&'bump Term<'bump>>)]) -> bool {
+        params.iter().any(|(_, c)| {
+            matches!(
+                c,
+                Some(Term::Builtin("prop" | "theorem" | "proof"))
+                    | Some(Term::Named("prop" | "theorem" | "proof"))
+                    | Some(Term::Universe(
+                        Universe::UProp | Universe::UTheorem | Universe::UProof
+                    ))
+            )
+        })
+    }
+
+    fn definition_signature(&self, body: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        match body {
+            Term::Annot(_, constraint) => {
+                let stub = self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA));
+                self.arena.annot(stub, constraint)
+            }
+            _ => body,
         }
     }
 

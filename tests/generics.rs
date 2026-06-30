@@ -257,10 +257,10 @@ fn generic_with_theorem_universe() {
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
 
-// ── C codegen for generic functions ──
+// ── C codegen monomorphizes generic functions ──
 
 #[test]
-fn codegen_generic_id() {
+fn codegen_generic_id_monomorphizes_int() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     compiler
@@ -274,16 +274,31 @@ fn codegen_generic_id() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    // Should have a function named `id` with one data param
-    assert!(c.contains("int64_t id("), "missing id function:\n{c}");
-    assert!(
-        !c.contains("int64_t A"),
-        "type param A should be erased:\n{c}"
-    );
+    assert!(c.contains("int64_t id__int(int64_t x)"), "{c}");
+    assert!(c.contains("id__int(42)"), "{c}");
 }
 
 #[test]
-fn codegen_generic_const() {
+fn codegen_generic_id_monomorphizes_str() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str("def id (A : prop) (x : A) : A := x\n#show id str \"hi\"\n")
+        .unwrap();
+    let c = ligare::backend::c::emit_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(c.contains("const char* id__str(const char* x)"), "{c}");
+    assert!(c.contains("id__str(\"hi\")"), "{c}");
+}
+
+#[test]
+fn codegen_generic_const_monomorphizes() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     compiler
@@ -299,19 +314,15 @@ fn codegen_generic_const() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    assert!(c.contains("int64_t konst("), "missing konst function:\n{c}");
-    // Should have 2 data params, not 4
-    let _komma_count = c.matches(',').count();
-    // The function signature should have exactly one comma: `int64_t konst(int64_t x, int64_t y)`
-    // But other commas exist too. Just check param count isn't 4.
     assert!(
-        !c.contains("int64_t A"),
-        "type param A should be erased:\n{c}"
+        c.contains("int64_t konst__int__bool(int64_t x, int64_t y)"),
+        "{c}"
     );
+    assert!(c.contains("konst__int__bool(42, 1)"), "{c}");
 }
 
 #[test]
-fn codegen_generic_three_type_params() {
+fn codegen_generic_three_type_params_monomorphizes() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     compiler
@@ -327,16 +338,14 @@ fn codegen_generic_three_type_params() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    assert!(
-        c.contains("int64_t triple("),
-        "missing triple function:\n{c}"
-    );
+    assert!(c.contains("int64_t triple__int__bool__str("), "{c}");
+    assert!(c.contains("triple__int__bool__str(1, 1, \"hi\")"), "{c}");
 }
 
 // ── Generic union codegen ──
 
 #[test]
-fn codegen_generic_union() {
+fn codegen_unused_generic_union_emits_no_runtime_type() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     compiler
@@ -352,17 +361,36 @@ fn codegen_generic_union() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    // Should have a typedef for the union type
-    assert!(
-        c.contains("typedef struct Option"),
-        "missing Option typedef:\n{c}"
-    );
+    assert!(!c.contains("Cannot map unresolved constraint"), "{c}");
+    assert!(!c.contains("typedef struct Option"), "{c}");
+}
+
+#[test]
+fn codegen_generic_union_monomorphizes_used_instance() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str(
+            "def Option (A : prop) : prop := union\n  | None\n  | Some of (val : A)\ndef unwrap (A : prop) (opt : Option A) (default : A) : A :=\n  match opt with\n  | None => default\n  | Some x => x\n#show unwrap int (Some 42) 0\n",
+        )
+        .unwrap();
+    let c = ligare::backend::c::emit_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(c.contains("typedef struct Option__int"), "{c}");
+    assert!(c.contains("int64_t unwrap__int(Option__int opt"), "{c}");
+    assert!(c.contains("unwrap__int(((Option__int)"), "{c}");
 }
 
 // ── Generic struct codegen ──
 
 #[test]
-fn codegen_generic_struct() {
+fn codegen_unused_generic_struct_emits_no_runtime_type() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     compiler
@@ -376,8 +404,6 @@ fn codegen_generic_struct() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    assert!(
-        c.contains("typedef struct Pair"),
-        "missing Pair typedef:\n{c}"
-    );
+    assert!(!c.contains("Cannot map unresolved constraint"), "{c}");
+    assert!(!c.contains("typedef struct Pair"), "{c}");
 }

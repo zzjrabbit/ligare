@@ -18,7 +18,7 @@ type VariantInfo<'bump> = (
 );
 use crate::core::whnf::WhnfEvaluator;
 
-/// The type checker — bundles arena, constraint table, and checking logic.
+/// Constraint checker — bundles arena, constraint table, and checking logic.
 ///
 /// Maintains a constraint table that is mutated when refinement definitions
 /// are encountered (via `add_refinement`).  Individual `check` calls may
@@ -26,12 +26,12 @@ use crate::core::whnf::WhnfEvaluator;
 pub struct TypeChecker<'bump> {
     pub(crate) arena: &'bump TermArena<'bump>,
     pub(crate) evaluator: WhnfEvaluator<'bump>,
-    pub(crate) desugarer: Desugarer<'bump>,
+    pub(crate) desugarer: Desugarer<'bump, 'bump>,
     pub(crate) builtins: BuiltinRegistry,
     table: ConstraintTable<'bump>,
-    /// Registry of union definitions: maps union name → (UnionDef term, type_param_names)
+    /// Registry of union definitions: maps union name → (UnionDef term, param_names)
     pub(crate) union_table: Vec<(Name<'bump>, &'bump Term<'bump>, &'bump [Name<'bump>])>,
-    /// Registry of struct definitions: maps struct name → (StructDef term, type_param_names)
+    /// Registry of struct definitions: maps struct name → (StructDef term, param_names)
     pub(crate) struct_table: Vec<(Name<'bump>, &'bump Term<'bump>, &'bump [Name<'bump>])>,
 }
 
@@ -238,13 +238,16 @@ impl<'bump> TypeChecker<'bump> {
             Term::StructCons(sname, field_values) => {
                 self.check_struct_cons(ctx, sname, field_values, constraint)
             }
+            Term::Variant(uname, idx, payloads) => {
+                self.check_variant(ctx, uname, *idx, payloads, constraint)
+            }
             Term::StructProj(subject, idx) => {
                 self.check_struct_proj(ctx, subject, *idx, constraint)
             }
-            // Application: use the function's type rather than forcing
+            // Application: use the term's Pi constraint rather than forcing
             // full evaluation (which would compute recursive calls).
             Term::App(f, a) => self.check_app(ctx, f, a, constraint),
-            // A bare Builtin/Named name may be a type (int, str, etc.) or a
+            // A bare Builtin/Named name may be a constraint (int, str, etc.) or a
             // refinement (Nat).  If neither, check if it's a variant constructor
             // or a struct constructor / projector.
             Term::Builtin(name) | Term::Named(name) => {
@@ -261,16 +264,27 @@ impl<'bump> TypeChecker<'bump> {
                     let (sname, _fields) = self.lookup_struct_ctor(name).unwrap();
                     let sc = self.arena.struct_cons(sname, &[]);
                     self.check(ctx, sc, constraint)
-                } else if self.lookup_struct_proj(name).is_some() {
-                    // Struct projector used as a standalone function — we can't
-                    // check it without a subject.  It's a data-level function.
-                    Err(format!("{} must be applied to a struct", name))
+                } else if self.is_struct_projector_name(name) {
+                    // Struct projector used as a standalone function, or an
+                    // unknown field on a known struct.
+                    if self.lookup_struct_proj(name).is_some() {
+                        Err(format!("{} must be applied to a struct", name))
+                    } else {
+                        Err(format!("unknown struct field projector: {}", name))
+                    }
                 } else {
                     Err(format!("unbound: {}", name))
                 }
             }
             _ => self.check_by_constraint(ctx, desugared, constraint),
         }
+    }
+
+    fn is_struct_projector_name(&self, name: &str) -> bool {
+        let Some((struct_name, _field_name)) = name.rsplit_once('.') else {
+            return false;
+        };
+        self.lookup_struct(struct_name).is_some()
     }
 
     /// Create a temporary checker with a different table (for sub-checks).

@@ -13,7 +13,7 @@ use ligare::core::pool::TermArena;
 #[command(
     name = "ligare",
     about = "Ligare compiler frontend",
-    long_about = "Each source file may contain:\n  def <name> [params] [: <type>] := <body>   top-level definition\n  theorem <name> : <type> := <body>           named theorem/proof\n  #check <term> : <constraint>               type-check assertion\n  <expr>                                      evaluate expression"
+    long_about = "Each source file may contain:\n  def <name> [params] [: <constraint>] := <body>   top-level definition\n  theorem <name> : <constraint> := <body>           named theorem/proof\n  #check <term> : <constraint>                     constraint assertion\n  <expr>                                            evaluate expression"
 )]
 struct Cli {
     /// Evaluate an expression after processing all files
@@ -61,12 +61,13 @@ fn run_codegen(cli: &Cli, bump: &Bump, arena: &TermArena<'_>) {
         process::exit(1);
     }
 
+    let codegen = compiler.codegen_input();
     let c_source = match emit_c(
-        compiler.tops(),
-        compiler.raw_defs(),
-        compiler.fun_sigs(),
-        &compiler.union_types,
-        &compiler.struct_types,
+        codegen.tops,
+        codegen.raw_defs,
+        codegen.fun_sigs,
+        codegen.union_types,
+        codegen.struct_types,
     ) {
         Ok(c) => c,
         Err(e) => {

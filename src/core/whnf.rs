@@ -2,8 +2,8 @@
 //!
 //! WHNF stops at constructors and does not evaluate under binders or
 //! force evaluation of non-strict arguments.  This is the evaluator used
-//! by the type checker — it normalizes types and constraints without
-//! computing runtime values (e.g. recursive function calls).
+//! by the constraint checker — it normalizes constraints without computing
+//! runtime terms such as recursive calls.
 //!
 //! Key differences from the strong evaluator (`eval`):
 //! - `This` is left untouched — recursive calls are NOT unrolled.
@@ -19,7 +19,7 @@ use crate::core::syntax::Term;
 /// Weak Head Normal Form evaluator.
 ///
 /// Encapsulates the arena and substitution context, providing a clean
-/// interface for type-checking purposes where full normalisation is
+/// interface for constraint-checking purposes where full normalisation is
 /// neither needed nor desirable.
 pub struct WhnfEvaluator<'bump> {
     arena: &'bump TermArena<'bump>,

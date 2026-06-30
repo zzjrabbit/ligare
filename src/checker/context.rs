@@ -30,9 +30,6 @@ impl<'bump> Context<'bump> {
     pub fn lookup(&self, i: usize) -> Option<&'bump Term<'bump>> {
         self.entries.get(i).map(|e| e.constraint)
     }
-    pub fn lookup_name(&self, name: &str) -> Option<&CtxEntry<'bump>> {
-        self.entries.iter().find(|e| e.name == name)
-    }
     pub fn extend(&self, name: Name<'bump>, constraint: &'bump Term<'bump>) -> Self {
         let mut entries = self.entries.clone();
         entries.insert(

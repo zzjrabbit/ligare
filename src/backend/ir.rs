@@ -6,6 +6,11 @@
 
 use std::collections::HashSet;
 
+use crate::checker::builtin::BuiltinRegistry;
+use crate::core::semantics::SemanticQueries;
+use crate::core::syntax::Term;
+use crate::diagnostic::Diagnostic;
+
 /// Concrete C type — only the data-relevant ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CType {
@@ -41,15 +46,12 @@ pub struct FunSig {
 
 impl FunSig {
     pub fn from_func(
-        params: &[(
-            crate::core::syntax::Name<'_>,
-            Option<&crate::core::syntax::Term<'_>>,
-        )],
-        m_ret: Option<&crate::core::syntax::Term<'_>>,
-        body: &crate::core::syntax::Term<'_>,
+        params: &[(crate::core::syntax::Name<'_>, Option<&Term<'_>>)],
+        m_ret: Option<&Term<'_>>,
+        body: &Term<'_>,
         union_names: &HashSet<String>,
         struct_names: &HashSet<String>,
-    ) -> Result<Self, crate::diagnostic::Diagnostic> {
+    ) -> Result<Self, Diagnostic> {
         // Filter out type-level (generic) parameters — those constrained
         // by universe-level constraints (data, prop, theorem, proof).
         let data_params: Vec<_> = params
@@ -58,15 +60,29 @@ impl FunSig {
             .collect();
         let param_types: Vec<CType> = data_params
             .iter()
-            .map(|(_, mc)| {
-                mc.map_or(Ok(CType::Int64), |c| {
-                    constraint_to_ctype(c, union_names, struct_names)
-                })
+            .map(|(name, mc)| {
+                let Some(c) = mc else {
+                    return Err(Diagnostic::new(format!(
+                        "Cannot infer C type for parameter `{name}` without an explicit constraint"
+                    )));
+                };
+                constraint_to_ctype(c, union_names, struct_names)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let param_names = data_params
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        let ret_body = peel_lams(body, params.len());
         let ret_type = match m_ret {
             Some(t) if !is_type_universe(t) => constraint_to_ctype(t, union_names, struct_names)?,
-            _ => infer_ret_ctype(body, &param_types)?,
+            _ => infer_ret_ctype(
+                ret_body,
+                &param_types,
+                &param_names,
+                union_names,
+                struct_names,
+            )?,
         };
         Ok(FunSig {
             param_types,
@@ -79,73 +95,122 @@ impl FunSig {
 /// (in declaration order, i.e. left-to-right).  This mirrors the type
 /// inference that `emit_fun` does during code generation.
 fn infer_ret_ctype(
-    body: &crate::core::syntax::Term<'_>,
+    body: &Term<'_>,
     param_types: &[CType],
-) -> Result<CType, crate::diagnostic::Diagnostic> {
+    param_names: &[&str],
+    union_names: &HashSet<String>,
+    struct_names: &HashSet<String>,
+) -> Result<CType, Diagnostic> {
     match body {
-        crate::core::syntax::Term::Var(i) => {
-            Ok(param_types.get(*i).cloned().unwrap_or(CType::Int64))
+        Term::Var(i) => param_types.get(*i).cloned().ok_or_else(|| {
+            Diagnostic::new(format!(
+                "Cannot infer C return type: variable index {i} has no parameter type"
+            ))
+        }),
+        Term::Named(name) => param_names
+            .iter()
+            .position(|n| *n == *name)
+            .and_then(|i| param_types.get(i).cloned())
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "Cannot infer C return type for unbound name `{name}`; add an explicit return type"
+                ))
+            }),
+        Term::LitInt(_) | Term::LitBool(_) => Ok(CType::Int64),
+        Term::LitStr(_) => Ok(CType::Str),
+        Term::Annot(inner, c) => constraint_to_ctype(c, union_names, struct_names)
+            .or_else(|_| infer_ret_ctype(inner, param_types, param_names, union_names, struct_names)),
+        Term::App(f, _) if is_primop_app(f) => Ok(CType::Int64),
+        Term::IfThenElse(_, then_term, else_term) => {
+            let then_ty =
+                infer_ret_ctype(then_term, param_types, param_names, union_names, struct_names)?;
+            let else_ty =
+                infer_ret_ctype(else_term, param_types, param_names, union_names, struct_names)?;
+            if then_ty == else_ty {
+                Ok(then_ty)
+            } else {
+                Err(Diagnostic::new(format!(
+                    "Cannot infer C return type for if expression with branch types {:?} and {:?}",
+                    then_ty, else_ty
+                )))
+            }
         }
-        crate::core::syntax::Term::LitStr(_) => Ok(CType::Str),
-        crate::core::syntax::Term::Lam(inner) => {
-            // Lambda wrapping: the inner body determines the return type.
-            // Push a dummy Int64 for the lambda parameter and recurse.
-            let mut extended: Vec<CType> = vec![CType::Int64];
-            extended.extend_from_slice(param_types);
-            infer_ret_ctype(inner, &extended)
+        Term::Let(_, _, body, _) | Term::Lam(body) | Term::NamedLam(_, body) => {
+            infer_ret_ctype(body, param_types, param_names, union_names, struct_names)
         }
-        _ => Ok(CType::Int64),
+        _ => Err(Diagnostic::new(format!(
+            "Cannot infer C return type for unannotated body {:?}; add an explicit return type",
+            body
+        ))),
+    }
+}
+
+fn peel_lams<'a>(body: &'a Term<'a>, count: usize) -> &'a Term<'a> {
+    let mut term = body;
+    let mut remaining = count;
+    while remaining > 0 {
+        match term {
+            Term::Annot(inner, _) => term = inner,
+            Term::Lam(inner) | Term::NamedLam(_, inner) => {
+                term = inner;
+                remaining -= 1;
+            }
+            _ => break,
+        }
+    }
+    term
+}
+
+fn is_primop_app(term: &Term<'_>) -> bool {
+    match term {
+        Term::PrimOp(_) => true,
+        Term::App(f, _) => is_primop_app(f),
+        _ => false,
     }
 }
 
 /// Returns true if the constraint represents a type-level universe
 /// (data, prop, theorem, proof) — parameters with these constraints
 /// should be stripped from C function signatures.
-pub fn is_type_universe(t: &crate::core::syntax::Term<'_>) -> bool {
-    match t {
-        crate::core::syntax::Term::Builtin(name) | crate::core::syntax::Term::Named(name) => {
-            matches!(*name, "data" | "prop" | "theorem" | "proof")
-        }
-        crate::core::syntax::Term::Universe(_) => true,
-        _ => false,
-    }
+pub fn is_type_universe(t: &Term<'_>) -> bool {
+    let builtins = BuiltinRegistry::new();
+    SemanticQueries::new(&builtins).is_type_universe(t)
 }
 
 /// Map a constraint Term to its C type.  Recognizes builtin type names,
 /// user-defined struct types, and union types;
 /// returns an error for unrecognized types.
 pub fn constraint_to_ctype(
-    t: &crate::core::syntax::Term<'_>,
+    t: &Term<'_>,
     union_names: &HashSet<String>,
     struct_names: &HashSet<String>,
-) -> Result<CType, crate::diagnostic::Diagnostic> {
+) -> Result<CType, Diagnostic> {
     match t {
-        crate::core::syntax::Term::Builtin(name) if *name == "str" => Ok(CType::Str),
-        crate::core::syntax::Term::Builtin(name) | crate::core::syntax::Term::Named(name)
-            if struct_names.contains(&name.to_string()) =>
-        {
+        Term::Builtin(name) if *name == "int" || *name == "bool" => Ok(CType::Int64),
+        Term::Builtin(name) if *name == "str" => Ok(CType::Str),
+        Term::Builtin(name) | Term::Named(name) if struct_names.contains(&name.to_string()) => {
             Ok(CType::Struct(name.to_string()))
         }
-        crate::core::syntax::Term::Builtin(name) | crate::core::syntax::Term::Named(name)
-            if union_names.contains(&name.to_string()) =>
-        {
+        Term::Builtin(name) | Term::Named(name) if union_names.contains(&name.to_string()) => {
             Ok(CType::Union(name.to_string()))
         }
-        crate::core::syntax::Term::Builtin(_)
-        | crate::core::syntax::Term::Named(_)
-        | crate::core::syntax::Term::LitInt(_)
-        | crate::core::syntax::Term::LitBool(_)
-        | crate::core::syntax::Term::Var(_)
-        | crate::core::syntax::Term::Universe(_) => Ok(CType::Int64),
-        crate::core::syntax::Term::Refine(_, parent, _) => {
-            constraint_to_ctype(parent, union_names, struct_names)
-        }
-        crate::core::syntax::Term::Annot(_, c) => constraint_to_ctype(c, union_names, struct_names),
-        // Handle union type applications like `Option int` → Union("Option")
-        crate::core::syntax::Term::App(head, _) => {
-            if let crate::core::syntax::Term::Builtin(name)
-            | crate::core::syntax::Term::Named(name) = *head
-            {
+        Term::Builtin(name) | Term::Named(name) => Err(Diagnostic::new(format!(
+            "Cannot map unresolved constraint `{name}` to a C type"
+        ))),
+        Term::Refine(_, parent, _) => constraint_to_ctype(parent, union_names, struct_names),
+        Term::Annot(_, c) => constraint_to_ctype(c, union_names, struct_names),
+        // Handle monomorphized generic type applications like
+        // `Option int` → Union("Option__int") when that instance exists.
+        Term::App(head, _) => {
+            if let Some(name) = type_app_name(t) {
+                if union_names.contains(&name) {
+                    return Ok(CType::Union(name));
+                }
+                if struct_names.contains(&name) {
+                    return Ok(CType::Struct(name));
+                }
+            }
+            if let Term::Builtin(name) | Term::Named(name) = *head {
                 if union_names.contains(&name.to_string()) {
                     return Ok(CType::Union(name.to_string()));
                 }
@@ -153,25 +218,55 @@ pub fn constraint_to_ctype(
                     return Ok(CType::Struct(name.to_string()));
                 }
             }
-            Ok(CType::Int64)
+            Err(Diagnostic::new(format!(
+                "Cannot map type application {:?} to a C type",
+                t
+            )))
         }
-        crate::core::syntax::Term::Pi(_, _, _)
-        | crate::core::syntax::Term::Lam(_)
-        | crate::core::syntax::Term::Let(..)
-        | crate::core::syntax::Term::IfThenElse(..)
-        | crate::core::syntax::Term::ByProof(..)
-        | crate::core::syntax::Term::AutoProof
-        | crate::core::syntax::Term::RefParam
-        | crate::core::syntax::Term::PrimOp(_)
-        | crate::core::syntax::Term::UnionDef(..)
-        | crate::core::syntax::Term::Variant(..)
-        | crate::core::syntax::Term::Match(..)
-        | crate::core::syntax::Term::StructDef(..)
-        | crate::core::syntax::Term::StructCons(..)
-        | crate::core::syntax::Term::StructProj(..) => Ok(CType::Int64),
-        _ => Err(crate::diagnostic::Diagnostic::new(format!(
+        _ => Err(Diagnostic::new(format!(
             "Cannot map constraint {:?} to C type",
             t
         ))),
     }
+}
+
+fn type_app_name(t: &Term<'_>) -> Option<String> {
+    let (head, args) = collect_type_app(t);
+    if args.is_empty() {
+        return None;
+    }
+    let (Term::Builtin(base) | Term::Named(base)) = head else {
+        return None;
+    };
+    Some(format!(
+        "{}__{}",
+        sanitize_type_name(base),
+        args.iter()
+            .map(|arg| type_arg_slug(arg))
+            .collect::<Vec<_>>()
+            .join("__")
+    ))
+}
+
+fn collect_type_app<'a>(t: &'a Term<'a>) -> (&'a Term<'a>, Vec<&'a Term<'a>>) {
+    let mut args = Vec::new();
+    let mut cur = t;
+    while let Term::App(f, a) = cur {
+        args.push(*a);
+        cur = f;
+    }
+    args.reverse();
+    (cur, args)
+}
+
+fn type_arg_slug(t: &Term<'_>) -> String {
+    match t {
+        Term::Builtin(n) | Term::Named(n) => sanitize_type_name(n),
+        Term::App(_, _) => type_app_name(t).unwrap_or_else(|| "unknown".into()),
+        _ => "unknown".into(),
+    }
+}
+
+fn sanitize_type_name(name: &str) -> String {
+    name.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
 }

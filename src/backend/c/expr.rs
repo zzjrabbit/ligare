@@ -5,12 +5,56 @@
 //! ownership semantics.
 
 use crate::backend::c::context::EmitCtx;
+use crate::backend::c::match_emit::MatchEmitter;
 use crate::backend::c::names::NameResolver;
 use crate::backend::c::types::{StructInfo, UnionInfo};
+use crate::backend::c::value::{CCode, CExpr, CValue, MatchBind, MatchCase, MatchPlan};
 use crate::backend::ir::{CType, FunSig};
 use crate::core::syntax::{PrimOp, Term};
 use crate::diagnostic::Diagnostic;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+
+fn c_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\000"),
+            c if c.is_control() => out.push_str(&format!("\\{:03o}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[derive(Clone, Debug)]
+struct CallParts {
+    function: CCode,
+    args: Vec<CCode>,
+}
+
+struct FieldInit {
+    field: String,
+    value: CCode,
+    by_ref: bool,
+}
+
+impl FieldInit {
+    fn render(&self) -> String {
+        if self.by_ref {
+            format!(".{} = &{}", self.field, self.value.as_str())
+        } else {
+            format!(".{} = {}", self.field, self.value.as_str())
+        }
+    }
+}
 
 /// Translates Ligare `Term` nodes into C expressions.
 ///
@@ -21,6 +65,8 @@ pub struct ExpressionEmitter<'a> {
     fun_sigs: &'a [(&'a str, FunSig)],
     /// Name resolver for escaping.
     names: NameResolver,
+    /// Counter for nested match expression temporaries.
+    match_expr_counter: Cell<u32>,
 }
 
 impl<'a> ExpressionEmitter<'a> {
@@ -29,6 +75,7 @@ impl<'a> ExpressionEmitter<'a> {
         Self {
             fun_sigs,
             names: NameResolver::new(),
+            match_expr_counter: Cell::new(1000),
         }
     }
 
@@ -41,39 +88,53 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), Diagnostic> {
+    ) -> Result<CValue, Diagnostic> {
         match term {
-            Term::LitInt(n) => Ok((n.to_string(), CType::Int64)),
-            Term::LitBool(b) => Ok((if *b { "1" } else { "0" }.into(), CType::Int64)),
-            Term::LitStr(s) => Ok((format!("\"{}\"", s), CType::Str)),
+            Term::LitInt(n) => Ok(CValue::code(n.to_string(), CType::Int64)),
+            Term::LitBool(b) => Ok(CValue::code(if *b { "1" } else { "0" }, CType::Int64)),
+            Term::LitStr(s) => Ok(CValue::code(c_string_literal(s), CType::Str)),
 
-            Term::Var(i) => Ok((ctx.name_of(*i).to_string(), ctx.type_of(*i))),
+            Term::Var(i) => Ok(CValue::code(ctx.name_of(*i)?.to_string(), ctx.type_of(*i)?)),
 
             Term::Let(name, val, body, _) => {
                 let escaped_name = self.names.escape(name);
-                let (v, val_ty) = self.emit_expr(val, ctx, union_map, struct_map)?;
+                let val = self.emit_expr(val, ctx, union_map, struct_map)?;
+                let v = self.value_code(val.clone(), union_map)?;
+                let val_ty = val.ctype;
                 let ty_name = val_ty.c_name();
                 ctx.push_binding(escaped_name.clone(), val_ty.clone());
-                let (b, body_ty) = self.emit_expr(body, ctx, union_map, struct_map)?;
+                let body = self.emit_expr(body, ctx, union_map, struct_map)?;
+                let b = self.value_code(body.clone(), union_map)?;
+                let body_ty = body.ctype;
                 ctx.pop_binding();
-                Ok((
-                    format!("({{ {} {} = {}; {}; }})", ty_name, escaped_name, v, b),
+                Ok(CValue::code(
+                    format!(
+                        "({{ {} {} = {}; {}; }})",
+                        ty_name,
+                        escaped_name,
+                        v.as_str(),
+                        b.as_str()
+                    ),
                     body_ty,
                 ))
             }
 
             Term::Lam(body) => {
                 ctx.push_binding(self.names.anon_param(0), CType::Int64);
-                let (b, ret_ty) = self.emit_expr(body, ctx, union_map, struct_map)?;
+                let value = self.emit_expr(body, ctx, union_map, struct_map)?;
                 ctx.pop_binding();
-                Ok((b, ret_ty))
+                Ok(value)
             }
 
             Term::IfThenElse(c, t, f) => {
-                let (cc, _) = self.emit_expr(c, ctx, union_map, struct_map)?;
-                let (ct, t_ty) = self.emit_expr(t, ctx, union_map, struct_map)?;
-                let (cf, _) = self.emit_expr(f, ctx, union_map, struct_map)?;
-                Ok((format!("({}) ? ({}) : ({})", cc, ct, cf), t_ty))
+                let cc = self.emit_expr_code(c, ctx, union_map, struct_map)?;
+                let then_value = self.emit_expr(t, ctx, union_map, struct_map)?;
+                let ct = self.value_code(then_value.clone(), union_map)?;
+                let cf = self.emit_expr_code(f, ctx, union_map, struct_map)?;
+                Ok(CValue::code(
+                    format!("({}) ? ({}) : ({})", cc.as_str(), ct.as_str(), cf.as_str()),
+                    then_value.ctype,
+                ))
             }
 
             Term::App(_, _) => self.emit_app(term, ctx, union_map, struct_map),
@@ -86,12 +147,16 @@ impl<'a> ExpressionEmitter<'a> {
                     .iter()
                     .find(|(n, _)| *n == *name)
                     .map(|(_, sig)| sig.ret_type.clone())
-                    .unwrap_or(CType::Int64);
-                Ok((self.names.escape(name), ty))
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "Cannot determine C type for `{name}`; missing function signature"
+                        ))
+                    })?;
+                Ok(CValue::code(self.names.escape(name), ty))
             }
 
-            Term::UnionDef(..) => Ok((String::new(), CType::Int64)),
-            Term::StructDef(..) => Ok((String::new(), CType::Int64)),
+            Term::UnionDef(..) => Ok(CValue::code(String::new(), CType::Int64)),
+            Term::StructDef(..) => Ok(CValue::code(String::new(), CType::Int64)),
 
             Term::StructCons(sname, field_values) => {
                 self.emit_struct_cons(sname, field_values, ctx, union_map, struct_map)
@@ -113,6 +178,34 @@ impl<'a> ExpressionEmitter<'a> {
         }
     }
 
+    fn emit_expr_code(
+        &self,
+        term: &Term<'_>,
+        ctx: &mut EmitCtx,
+        union_map: &HashMap<String, UnionInfo>,
+        struct_map: &HashMap<String, StructInfo>,
+    ) -> Result<CCode, Diagnostic> {
+        let value = self.emit_expr(term, ctx, union_map, struct_map)?;
+        self.value_code(value, union_map)
+    }
+
+    fn value_code(
+        &self,
+        value: CValue,
+        union_map: &HashMap<String, UnionInfo>,
+    ) -> Result<CCode, Diagnostic> {
+        match value.expr {
+            CExpr::Code(code) => Ok(code),
+            CExpr::Match(plan) => {
+                let counter = self.match_expr_counter.get();
+                self.match_expr_counter.set(counter + 1);
+                Ok(CCode::new(
+                    MatchEmitter::new().emit_expr(&plan, counter, union_map),
+                ))
+            }
+        }
+    }
+
     // ── Sub-emitters ──
 
     fn emit_struct_cons(
@@ -122,17 +215,31 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), Diagnostic> {
+    ) -> Result<CValue, Diagnostic> {
         let type_name: String = sname.to_string();
-        let field_codes: Vec<String> = field_values
+        let Some(info) = struct_map.get(&type_name) else {
+            return Err(Diagnostic::new(format!(
+                "Cannot emit constructor for unknown struct `{type_name}`"
+            )));
+        };
+        if field_values.len() != info.fields.len() {
+            return Err(Diagnostic::new(format!(
+                "Struct `{type_name}` expects {} field(s), got {}",
+                info.fields.len(),
+                field_values.len()
+            )));
+        }
+        let field_codes: Vec<CCode> = field_values
             .iter()
-            .map(|v| {
-                let (code, _) = self.emit_expr(v, ctx, union_map, struct_map)?;
-                Ok(code)
-            })
+            .map(|v| self.emit_expr_code(v, ctx, union_map, struct_map))
             .collect::<Result<Vec<_>, Diagnostic>>()?;
-        Ok((
-            format!("(({}){{ {} }})", type_name, field_codes.join(", ")),
+        let field_codes = field_codes
+            .iter()
+            .map(CCode::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(CValue::code(
+            format!("(({}){{ {} }})", type_name, field_codes),
             CType::Struct(type_name),
         ))
     }
@@ -144,15 +251,23 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), Diagnostic> {
-        let (scode, sty) = self.emit_expr(subject, ctx, union_map, struct_map)?;
+    ) -> Result<CValue, Diagnostic> {
+        let subject = self.emit_expr(subject, ctx, union_map, struct_map)?;
+        let scode = self.value_code(subject.clone(), union_map)?;
+        let sty = subject.ctype;
         if let CType::Struct(ref sname) = sty
             && let Some(info) = struct_map.get(sname)
             && let Some((fname, ftype)) = info.fields.get(idx)
         {
-            return Ok((format!("({}).{}", scode, fname), ftype.clone()));
+            return Ok(CValue::code(
+                format!("({}).{}", scode.as_str(), fname),
+                ftype.clone(),
+            ));
         }
-        Ok((format!("({})._f{}", scode, idx), CType::Int64))
+        Err(Diagnostic::new(format!(
+            "Cannot determine C type for struct projection field {idx} on {:?}",
+            sty
+        )))
     }
 
     fn emit_variant(
@@ -163,11 +278,11 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), Diagnostic> {
+    ) -> Result<CValue, Diagnostic> {
         let type_name: String = uname.to_string();
         let data_init =
             self.variant_data_init(&type_name, idx, payloads, ctx, union_map, struct_map)?;
-        Ok((
+        Ok(CValue::code(
             format!(
                 "(({}){{ .tag = {}, .data = {} }})",
                 type_name, idx, data_init
@@ -185,39 +300,57 @@ impl<'a> ExpressionEmitter<'a> {
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
     ) -> Result<String, Diagnostic> {
-        if let Some(info) = union_map.get(type_name) {
-            if let Some(vi) = info.variants.get(idx) {
-                if vi.fields.is_empty() {
-                    return Ok(format!("{{ .{} = {{0}} }}", vi.name));
-                }
-                let field_inits: Vec<String> = vi
-                    .fields
-                    .iter()
-                    .zip(payloads.iter())
-                    .map(|((fnm, fty), p)| {
-                        let (code, pty) = self.emit_expr(p, ctx, union_map, struct_map)?;
-                        let is_rec = if let CType::Union(un) = fty {
-                            un == type_name
-                        } else if let CType::Union(ref un) = pty {
-                            un == type_name
-                        } else {
-                            false
-                        };
-                        Ok(if is_rec {
-                            format!(".{} = &{}", fnm, code)
-                        } else {
-                            format!(".{} = {}", fnm, code)
-                        })
-                    })
-                    .collect::<Result<Vec<_>, Diagnostic>>()?;
-                return Ok(format!(
-                    "{{ .{} = {{ {} }} }}",
-                    vi.name,
-                    field_inits.join(", ")
-                ));
-            }
+        let info = union_map.get(type_name).ok_or_else(|| {
+            Diagnostic::new(format!(
+                "Cannot emit variant {idx} for unknown union `{type_name}`"
+            ))
+        })?;
+        let vi = info.variants.get(idx).ok_or_else(|| {
+            Diagnostic::new(format!(
+                "Cannot emit variant {idx} for union `{type_name}` with {} variant(s)",
+                info.variants.len()
+            ))
+        })?;
+        if payloads.len() != vi.fields.len() {
+            return Err(Diagnostic::new(format!(
+                "Variant `{}.{}` expects {} payload(s), got {}",
+                type_name,
+                vi.name,
+                vi.fields.len(),
+                payloads.len()
+            )));
         }
-        Ok(String::from("{0}"))
+        if vi.fields.is_empty() {
+            return Ok(format!("{{ .{} = {{0}} }}", vi.name));
+        }
+        let field_inits: Vec<FieldInit> = vi
+            .fields
+            .iter()
+            .zip(payloads.iter())
+            .map(|((fnm, fty), p)| {
+                let value = self.emit_expr(p, ctx, union_map, struct_map)?;
+                let code = self.value_code(value.clone(), union_map)?;
+                let pty = value.ctype;
+                let is_rec = if let CType::Union(un) = fty {
+                    un == type_name
+                } else if let CType::Union(ref un) = pty {
+                    un == type_name
+                } else {
+                    false
+                };
+                Ok(FieldInit {
+                    field: fnm.clone(),
+                    value: code,
+                    by_ref: is_rec,
+                })
+            })
+            .collect::<Result<Vec<_>, Diagnostic>>()?;
+        let field_inits = field_inits
+            .iter()
+            .map(FieldInit::render)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!("{{ .{} = {{ {} }} }}", vi.name, field_inits))
     }
 
     fn emit_match(
@@ -231,32 +364,82 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), Diagnostic> {
-        let (sc, sc_ty) = self.emit_expr(scrut, ctx, union_map, struct_map)?;
-        let mut parts = vec!["match".to_string(), sc_ty.c_name(), sc];
-        let mut ret_ty = CType::Int64;
+    ) -> Result<CValue, Diagnostic> {
+        let scrut_value = self.emit_expr(scrut, ctx, union_map, struct_map)?;
+        let sc = self.value_code(scrut_value.clone(), union_map)?;
+        let sc_ty = scrut_value.ctype;
+        let scrut_union = match &sc_ty {
+            CType::Union(name) => Some(name.as_str()),
+            _ => None,
+        };
+        let mut cases = Vec::new();
+        let mut ret_ty: Option<CType> = None;
         for (idx, binds, body) in branches.iter() {
             let mut branch_ctx = ctx.snapshot();
-            for (name, _) in binds.iter().rev() {
-                branch_ctx.push_binding(self.names.escape(name), CType::Int64);
+            let un: HashSet<String> = union_map.keys().cloned().collect();
+            let sn: HashSet<String> = struct_map.keys().cloned().collect();
+            for (bind_idx, (name, ty)) in binds.iter().enumerate().rev() {
+                let cty =
+                    self.match_bind_ctype(scrut_union, *idx, bind_idx, ty, union_map, &un, &sn)?;
+                branch_ctx.push_binding(self.names.escape(name), cty);
             }
-            let (bc, bty) = self.emit_expr(body, &mut branch_ctx, union_map, struct_map)?;
-            ret_ty = bty;
-            let escaped = bc.replace(',', "\x1e");
-            parts.push(idx.to_string());
-            parts.push(binds.len().to_string());
-            for (_name, ty) in binds.iter() {
-                parts.push(self.names.escape(_name));
-                let un: HashSet<String> = union_map.keys().cloned().collect();
-                let sn: HashSet<String> = struct_map.keys().cloned().collect();
-                let cty = crate::backend::ir::constraint_to_ctype(ty, &un, &sn)?;
-                parts.push(cty.c_name());
+            let body_value = self.emit_expr(body, &mut branch_ctx, union_map, struct_map)?;
+            let bc = self.value_code(body_value.clone(), union_map)?;
+            if let Some(prev_ty) = &ret_ty {
+                if prev_ty != &body_value.ctype {
+                    return Err(Diagnostic::new(format!(
+                        "Match branches return incompatible C types: {} and {}",
+                        prev_ty.c_name(),
+                        body_value.ctype.c_name()
+                    )));
+                }
+            } else {
+                ret_ty = Some(body_value.ctype.clone());
             }
-            parts.push(escaped);
+            let mut case_binds = Vec::new();
+            for (bind_idx, (_name, ty)) in binds.iter().enumerate() {
+                let cty =
+                    self.match_bind_ctype(scrut_union, *idx, bind_idx, ty, union_map, &un, &sn)?;
+                case_binds.push(MatchBind {
+                    name: self.names.escape(_name),
+                    ctype: cty,
+                });
+            }
+            cases.push(MatchCase {
+                variant_idx: *idx,
+                binds: case_binds,
+                body_code: bc,
+            });
         }
-        let ty_str = ret_ty.c_name();
-        parts.insert(3, ty_str);
-        Ok((parts.join("__"), ret_ty))
+        let ret_ty = ret_ty.ok_or_else(|| {
+            Diagnostic::new("Cannot determine C type for match expression without branches")
+        })?;
+        Ok(CValue::match_(MatchPlan {
+            scrut_type: sc_ty,
+            scrut_code: sc,
+            ret_type: ret_ty.clone(),
+            cases,
+        }))
+    }
+
+    fn match_bind_ctype(
+        &self,
+        scrut_union: Option<&str>,
+        variant_idx: usize,
+        bind_idx: usize,
+        fallback_ty: &Term<'_>,
+        union_map: &HashMap<String, UnionInfo>,
+        union_names: &HashSet<String>,
+        struct_names: &HashSet<String>,
+    ) -> Result<CType, Diagnostic> {
+        if let Some(uname) = scrut_union
+            && let Some(info) = union_map.get(uname)
+            && let Some(variant) = info.variants.get(variant_idx)
+            && let Some((_, cty)) = variant.fields.get(bind_idx)
+        {
+            return Ok(cty.clone());
+        }
+        crate::backend::ir::constraint_to_ctype(fallback_ty, union_names, struct_names)
     }
 
     // ── Function call emission ──
@@ -267,40 +450,62 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, CType), Diagnostic> {
+    ) -> Result<CValue, Diagnostic> {
         let Term::App(f, a) = term else {
             unreachable!()
         };
         if let Term::App(prim, left) = *f
             && let Term::PrimOp(op) = *prim
         {
-            let (ls, _) = self.emit_expr(left, ctx, union_map, struct_map)?;
-            let (rs, _) = self.emit_expr(a, ctx, union_map, struct_map)?;
-            return Ok((self.emit_binop(*op, &ls, &rs), CType::Int64));
+            let left = self.emit_expr(left, ctx, union_map, struct_map)?;
+            let right = self.emit_expr(a, ctx, union_map, struct_map)?;
+            let left_code = self.value_code(left, union_map)?;
+            let right_code = self.value_code(right, union_map)?;
+            return Ok(CValue::code(
+                self.emit_binop(*op, left_code.as_str(), right_code.as_str()),
+                CType::Int64,
+            ));
         }
         if matches!(*f, Term::PrimOp(_)) {
-            let (as_, ty) = self.emit_expr(a, ctx, union_map, struct_map)?;
-            return Ok((as_, ty));
+            return self.emit_expr(a, ctx, union_map, struct_map);
         }
-        let (func, args) = self.collect_call_args(term, ctx, union_map, struct_map)?;
+        let call = self.collect_call_args(term, ctx, union_map, struct_map)?;
         let param_count = self
             .fun_sigs
             .iter()
-            .find(|(n, _)| *n == func)
+            .find(|(n, _)| *n == call.function.as_str())
             .map(|(_, sig)| sig.param_types.len())
-            .unwrap_or(0);
-        let trimmed: Vec<String> = if args.len() > param_count {
-            args[args.len() - param_count..].to_vec()
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "Cannot emit call to `{}`; missing function signature",
+                    call.function.as_str()
+                ))
+            })?;
+        let args = if call.args.len() > param_count {
+            call.args[call.args.len() - param_count..].to_vec()
         } else {
-            args
+            call.args
         };
         let ret_ty = self
             .fun_sigs
             .iter()
-            .find(|(n, _)| *n == func)
+            .find(|(n, _)| *n == call.function.as_str())
             .map(|(_, sig)| sig.ret_type.clone())
-            .unwrap_or(CType::Int64);
-        Ok((format!("{}({})", func, trimmed.join(", ")), ret_ty))
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "Cannot determine C return type for `{}`; missing function signature",
+                    call.function.as_str()
+                ))
+            })?;
+        let args = args
+            .iter()
+            .map(CCode::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(CValue::code(
+            format!("{}({})", call.function.as_str(), args),
+            ret_ty,
+        ))
     }
 
     fn collect_call_args(
@@ -309,17 +514,20 @@ impl<'a> ExpressionEmitter<'a> {
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
-    ) -> Result<(String, Vec<String>), Diagnostic> {
+    ) -> Result<CallParts, Diagnostic> {
         match term {
             Term::App(f, a) => {
-                let (func, mut args) = self.collect_call_args(f, ctx, union_map, struct_map)?;
-                let (as_, _) = self.emit_expr(a, ctx, union_map, struct_map)?;
-                args.push(as_);
-                Ok((func, args))
+                let mut call = self.collect_call_args(f, ctx, union_map, struct_map)?;
+                let arg = self.emit_expr(a, ctx, union_map, struct_map)?;
+                call.args.push(self.value_code(arg, union_map)?);
+                Ok(call)
             }
             _ => {
-                let (s, _) = self.emit_expr(term, ctx, union_map, struct_map)?;
-                Ok((s, Vec::new()))
+                let value = self.emit_expr(term, ctx, union_map, struct_map)?;
+                Ok(CallParts {
+                    function: self.value_code(value, union_map)?,
+                    args: Vec::new(),
+                })
             }
         }
     }

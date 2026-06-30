@@ -24,6 +24,7 @@ pub mod expr;
 pub mod match_emit;
 pub mod names;
 pub mod types;
+mod value;
 
 #[cfg(test)]
 mod tests;

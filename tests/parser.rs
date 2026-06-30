@@ -280,12 +280,7 @@ fn def_refinement() {
     let refine_term = arena.refine(
         s(&arena, "x"),
         arena.builtin(s(&arena, "int")),
-        bin(
-            &arena,
-            PrimOp::Ge,
-            arena.named(s(&arena, "x")),
-            arena.lit_int(0),
-        ),
+        bin(&arena, PrimOp::Ge, arena.ref_param(), arena.lit_int(0)),
     );
     let expected_body = arena.annot(refine_term, arena.builtin(s(&arena, "data")));
     assert_eq!(params, &[]);
@@ -347,6 +342,26 @@ fn parse_match_with_bindings() {
         &arena,
     );
     assert!(result.is_ok());
+}
+
+#[test]
+fn parse_match_without_branches_fails() {
+    let (b, arena) = a();
+    let err = parse_expr_top("match x with", b, &arena).expect_err("empty match must fail");
+    assert!(
+        err.message
+            .contains("match expression must have at least one branch"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn parse_match_missing_arrow_reports_expected_arrow() {
+    let (b, arena) = a();
+    let err = parse_expr_top("match x with | Some value value", b, &arena)
+        .expect_err("match branch without => must fail");
+    assert!(err.message.contains("expected FatArrow"), "{}", err.message);
 }
 
 #[test]
@@ -509,6 +524,48 @@ fn struct_field_types_do_not_consume_following_fields() {
 }
 
 #[test]
+fn empty_union_definition_fails() {
+    let (b, arena) = a();
+    let err = parse_def_top("def Empty : prop := union", b, &arena)
+        .expect_err("union without variants must fail");
+    assert!(
+        err.contains("union must have at least one variant"),
+        "{err}"
+    );
+}
+
+#[test]
+fn empty_struct_definition_fails() {
+    let (b, arena) = a();
+    let err = parse_def_top("def Empty : prop := struct", b, &arena)
+        .expect_err("struct without fields must fail");
+    assert!(err.contains("struct must have at least one field"), "{err}");
+}
+
+#[test]
+fn fun_expression_without_params_fails() {
+    let (b, arena) = a();
+    let err = parse_expr_top("fun => 1", b, &arena).expect_err("fun without params must fail");
+    assert!(
+        err.message
+            .contains("fun expression must have at least one parameter"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn parse_expr_top_rejects_trailing_delimiter() {
+    let (b, arena) = a();
+    let err = parse_expr_top("1 )", b, &arena).expect_err("trailing delimiter must fail");
+    assert!(
+        err.message.contains("unexpected tokens after expression"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
 fn def_simple() {
     let (b, arena) = a();
     let result = parse_def_top("def x : int := 5", b, &arena);
@@ -528,13 +585,8 @@ fn def_with_params() {
     assert!(result.is_ok());
     let (name, params, m_ret, body) = result.unwrap();
     assert_eq!(name, "add");
-    let inner = bin(
-        &arena,
-        PrimOp::Add,
-        arena.named(s(&arena, "a")),
-        arena.named(s(&arena, "b")),
-    );
-    let lam_body = arena.named_lam(s(&arena, "a"), arena.named_lam(s(&arena, "b"), inner));
+    let inner = bin(&arena, PrimOp::Add, arena.var(1), arena.var(0));
+    let lam_body = arena.lam(arena.lam(inner));
     let ty = arena.pi(
         s(&arena, "a"),
         arena.builtin(s(&arena, "int")),
@@ -719,13 +771,8 @@ fn def_with_binary_sub_in_body() {
     assert!(result.is_ok());
     let (name, params, m_ret, body) = result.unwrap();
     assert_eq!(name, "dec");
-    let inner = bin(
-        &arena,
-        PrimOp::Sub,
-        arena.named(s(&arena, "n")),
-        arena.lit_int(1),
-    );
-    let lam_body = arena.named_lam(s(&arena, "n"), inner);
+    let inner = bin(&arena, PrimOp::Sub, arena.var(0), arena.lit_int(1));
+    let lam_body = arena.lam(inner);
     let ty = arena.pi(
         s(&arena, "n"),
         arena.builtin(s(&arena, "int")),
@@ -764,7 +811,7 @@ fn fib_def_structure_matches_expected() {
     let (name, params, m_ret, body) = result.unwrap();
     assert_eq!(name, "fib");
 
-    let n = arena.named(s(&arena, "n"));
+    let n = arena.var(0);
     let cond = bin(&arena, PrimOp::Lt, n, arena.lit_int(2));
     let then_branch = n;
     let rec_call_1 = arena.app(
@@ -777,7 +824,7 @@ fn fib_def_structure_matches_expected() {
     );
     let else_branch = bin(&arena, PrimOp::Add, rec_call_1, rec_call_2);
     let inner_body = arena.if_then_else(cond, then_branch, else_branch);
-    let lam_body = arena.named_lam(s(&arena, "n"), inner_body);
+    let lam_body = arena.lam(inner_body);
     let ty = arena.pi(
         s(&arena, "n"),
         arena.builtin(s(&arena, "int")),

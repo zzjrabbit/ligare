@@ -1,6 +1,6 @@
 //! Tests for the C code generation backend.
 //!
-//! Tests cover literals, constants, functions (with and without FunSig),
+//! Tests cover literals, constants, functions with confirmed signatures,
 //! function calls, let bindings, and union/struct codegen.
 
 use crate::backend::c::{CEmitter, CodeGenerator};
@@ -33,6 +33,11 @@ fn emit(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
     emitter.generate(tops, tops, &[], &[]).unwrap()
 }
 
+fn emit_err(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
+    let emitter = CEmitter::new(&[], &[], fun_sigs).unwrap();
+    emitter.generate(tops, tops, &[], &[]).unwrap_err().message
+}
+
 fn emit_with_types(
     tops: &[TopLevel<'_>],
     raw_defs: &[TopLevel<'_>],
@@ -44,6 +49,20 @@ fn emit_with_types(
     emitter
         .generate(tops, raw_defs, struct_types, union_types)
         .unwrap()
+}
+
+fn emit_err_with_types(
+    tops: &[TopLevel<'_>],
+    raw_defs: &[TopLevel<'_>],
+    fun_sigs: &[(&str, FunSig)],
+    union_types: &[(&str, &Term<'_>)],
+    struct_types: &[(&str, &Term<'_>)],
+) -> String {
+    let emitter = CEmitter::new(struct_types, union_types, fun_sigs).unwrap();
+    emitter
+        .generate(tops, raw_defs, struct_types, union_types)
+        .unwrap_err()
+        .message
 }
 
 // ── Literals ──
@@ -65,6 +84,32 @@ fn str_literal_uses_s() {
     );
     assert!(c.contains("\"hi\""));
     assert!(c.contains("%s"));
+}
+
+#[test]
+fn str_literal_is_c_escaped() {
+    let (_b, arena) = setup();
+    let c = emit(
+        &[TopLevel::TLShow(
+            arena.lit_str(arena.alloc_str("a\"b\\c\n")),
+            0..0,
+        )],
+        &[],
+    );
+    assert!(c.contains("\"a\\\"b\\\\c\\n\""), "{c}");
+}
+
+#[test]
+fn str_literal_control_escape_is_bounded() {
+    let (_b, arena) = setup();
+    let c = emit(
+        &[TopLevel::TLShow(
+            arena.lit_str(arena.alloc_str("a\u{1f}f")),
+            0..0,
+        )],
+        &[],
+    );
+    assert!(c.contains("\"a\\037f\""), "{c}");
 }
 
 #[test]
@@ -105,10 +150,10 @@ fn str_const_def() {
     assert!(c.contains("\"hi\""));
 }
 
-// ── Functions (no FunSig, lam-tree) ──
+// ── Functions without confirmed signatures ──
 
 #[test]
-fn lam_function_defaults_to_int64_params_and_return() {
+fn lam_function_without_param_types_errors() {
     let (_b, arena) = setup();
     let body = arena.app(
         arena.app(arena.prim_op(PrimOp::Add), arena.var(1)),
@@ -116,18 +161,17 @@ fn lam_function_defaults_to_int64_params_and_return() {
     );
     let lam = arena.lam(arena.lam(body));
     let name = arena.alloc_str("add");
-    let c = emit(&[TopLevel::TLDef(name, &[], None, lam, 0..0)], &[]);
-    assert!(c.contains("int64_t add(int64_t arg_0, int64_t arg_1)"));
+    let err = emit_err(&[TopLevel::TLDef(name, &[], None, lam, 0..0)], &[]);
+    assert!(err.contains("without explicit parameter types"));
 }
 
 #[test]
-fn lam_returning_str_infers_str_return_type() {
+fn lam_returning_str_without_param_type_errors() {
     let (_b, arena) = setup();
     let lam = arena.lam(arena.lit_str(arena.alloc_str("hi")));
     let name = arena.alloc_str("greet");
-    let c = emit(&[TopLevel::TLDef(name, &[], None, lam, 0..0)], &[]);
-    assert!(c.contains("const char* greet(int64_t arg_0)"));
-    assert!(c.contains("\"hi\""));
+    let err = emit_err(&[TopLevel::TLDef(name, &[], None, lam, 0..0)], &[]);
+    assert!(err.contains("without explicit parameter types"));
 }
 
 // ── Functions WITH FunSig ──
@@ -236,13 +280,13 @@ fn call_to_function_uses_fun_sig_return_type() {
 }
 
 #[test]
-fn emit_undefined_func_call_still_emits() {
+fn emit_undefined_func_call_errors() {
     let (_b, arena) = setup();
     let n = arena.alloc_str("s");
     let call = arena.app(arena.builtin(n), arena.lit_str(arena.alloc_str("hi")));
     let tops = &[TopLevel::TLShow(call, 0..0)];
-    let c = emit(tops, &[]);
-    assert!(c.contains("s("));
+    let err = emit_err(tops, &[]);
+    assert!(err.contains("missing function signature"));
 }
 
 #[test]
@@ -370,5 +414,72 @@ fn union_recursive_variant_emits_address_of() {
     assert!(
         c.contains("&((Nat)"),
         "expected &((Nat){{...}}) for recursive field in:\n{c}"
+    );
+}
+
+#[test]
+fn unknown_union_variant_errors() {
+    let (_b, arena) = setup();
+    let missing_name = arena.alloc_str("Missing");
+    let term = arena.variant(missing_name, 0, arena.alloc_slice(&[]));
+    let tops = &[TopLevel::TLShow(term, 0..0)];
+    let err = emit_err_with_types(tops, tops, &[], &[], &[]);
+    assert!(err.contains("unknown union `Missing`"), "{err}");
+}
+
+#[test]
+fn union_variant_payload_count_errors() {
+    let (_b, arena) = setup();
+    let nat_name = arena.alloc_str("Nat");
+    let zero_variant: (
+        crate::core::syntax::Name,
+        &[(crate::core::syntax::Name, &crate::core::syntax::Term)],
+    ) = (arena.alloc_str("Zero"), arena.alloc_slice(&[]));
+    let succ_fields: &[(crate::core::syntax::Name, &crate::core::syntax::Term)] =
+        arena.alloc_slice(&[(arena.alloc_str("pred"), arena.builtin(nat_name))]);
+    let succ_variant: (
+        crate::core::syntax::Name,
+        &[(crate::core::syntax::Name, &crate::core::syntax::Term)],
+    ) = (arena.alloc_str("Succ"), succ_fields);
+    let variants: &[(
+        crate::core::syntax::Name,
+        &[(crate::core::syntax::Name, &crate::core::syntax::Term)],
+    )] = arena.alloc_slice(&[zero_variant, succ_variant]);
+    let nat_udef = arena.union_def(nat_name, variants);
+    let union_types: &[(&str, &crate::core::syntax::Term)] =
+        arena.bump().alloc([(nat_name, nat_udef)]);
+
+    let malformed = arena.variant(nat_name, 1, arena.alloc_slice(&[]));
+    let tops = &[TopLevel::TLShow(malformed, 0..0)];
+    let err = emit_err_with_types(tops, tops, &[], union_types, &[]);
+    assert!(
+        err.contains("Variant `Nat.Succ` expects 1 payload(s), got 0"),
+        "{err}"
+    );
+}
+
+#[test]
+fn struct_constructor_field_count_errors() {
+    let (_b, arena) = setup();
+    let pair_name = arena.alloc_str("Pair");
+    let fields: &[(crate::core::syntax::Name, &crate::core::syntax::Term)] = arena.alloc_slice(&[
+        (
+            arena.alloc_str("left"),
+            arena.builtin(arena.alloc_str("int")),
+        ),
+        (
+            arena.alloc_str("right"),
+            arena.builtin(arena.alloc_str("int")),
+        ),
+    ]);
+    let pair_def = arena.struct_def(pair_name, fields);
+    let struct_types: &[(&str, &crate::core::syntax::Term)] =
+        arena.bump().alloc([(pair_name, pair_def)]);
+    let malformed = arena.struct_cons(pair_name, arena.alloc_slice(&[arena.lit_int(1)]));
+    let tops = &[TopLevel::TLShow(malformed, 0..0)];
+    let err = emit_err_with_types(tops, tops, &[], &[], struct_types);
+    assert!(
+        err.contains("Struct `Pair` expects 2 field(s), got 1"),
+        "{err}"
     );
 }

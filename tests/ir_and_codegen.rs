@@ -58,21 +58,17 @@ fn constraint_struct_name_returns_struct() {
 }
 
 #[test]
-fn constraint_lam_defaults_to_int64() {
+fn constraint_lam_errors() {
     let names = HashSet::new();
-    assert_eq!(
-        constraint_to_ctype(&Term::Lam(&Term::Var(0)), &names, &names).unwrap(),
-        CType::Int64
-    );
+    let err = constraint_to_ctype(&Term::Lam(&Term::Var(0)), &names, &names).unwrap_err();
+    assert!(err.message.contains("Cannot map constraint"));
 }
 
 #[test]
-fn constraint_var_is_int64() {
+fn constraint_var_errors() {
     let names = HashSet::new();
-    assert_eq!(
-        constraint_to_ctype(&Term::Var(0), &names, &names).unwrap(),
-        CType::Int64
-    );
+    let err = constraint_to_ctype(&Term::Var(0), &names, &names).unwrap_err();
+    assert!(err.message.contains("Cannot map constraint"));
 }
 
 // ── FunSig::from_func ──
@@ -103,13 +99,22 @@ fn funsig_with_str_param() {
 }
 
 #[test]
-fn funsig_with_autoproof_defaults_to_int64() {
+fn funsig_with_unmappable_param_errors() {
     let (_b, arena) = setup();
     let params: &[(&str, Option<&Term>)] =
         arena.alloc_slice(&[(s(&arena, "x"), Some(arena.auto_proof()))]);
-    let sig =
-        FunSig::from_func(params, None, arena.var(0), &HashSet::new(), &HashSet::new()).unwrap();
-    assert_eq!(sig.param_types, vec![CType::Int64]);
+    let err = FunSig::from_func(params, None, arena.var(0), &HashSet::new(), &HashSet::new())
+        .unwrap_err();
+    assert!(err.message.contains("Cannot map constraint"));
+}
+
+#[test]
+fn funsig_with_missing_param_constraint_errors() {
+    let (_b, arena) = setup();
+    let params: &[(&str, Option<&Term>)] = arena.alloc_slice(&[(s(&arena, "x"), None)]);
+    let err = FunSig::from_func(params, None, arena.var(0), &HashSet::new(), &HashSet::new())
+        .unwrap_err();
+    assert!(err.message.contains("without an explicit constraint"));
 }
 
 // ── C codegen: match with str payload ──
@@ -338,5 +343,21 @@ fn check_int_as_union_fails() {
 fn parse_error_propagates() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
-    assert!(compiler.process_file_str("def x := @@@\n").is_err());
+    let err = compiler
+        .process_file_str("def x := @@@\n")
+        .expect_err("invalid token should fail");
+    assert!(err.message.contains("invalid token `@`"), "{}", err.message);
+}
+
+#[test]
+fn diagnostic_display_includes_source_context() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    let err = compiler
+        .process_file_str("def ok := 1\n#check true : int\n")
+        .expect_err("constraint mismatch should fail");
+    let rendered = err.to_string();
+    assert!(rendered.contains("<str>:2:1"), "{rendered}");
+    assert!(rendered.contains("#check true : int"), "{rendered}");
+    assert!(rendered.contains("^"), "{rendered}");
 }

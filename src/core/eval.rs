@@ -6,7 +6,7 @@
 //! operations.  It is used at the top level (`--eval`, `#show`) where
 //! the user explicitly requests runtime computation.
 //!
-//! During type checking, prefer `WhnfEvaluator` from `crate::core::whnf`.
+//! During constraint checking, prefer `WhnfEvaluator` from `crate::core::whnf`.
 
 use crate::core::debruijn::SubstitutionContext;
 use crate::core::pool::TermArena;
@@ -69,7 +69,7 @@ impl<'bump> Evaluator<'bump> {
                 } else {
                     // Standalone proof: mechanically expand tactics.
                     // Only `intro` + `exact` is supported here;
-                    // `apply` requires type information not available in eval.
+                    // `apply` requires constraint information not available in eval.
                     let expanded = self.arena.expand_proof_tactics(tactics)?;
                     self.eval(expanded)
                 }

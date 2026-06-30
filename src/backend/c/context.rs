@@ -5,6 +5,7 @@
 //! the push/pop protocol.
 
 use crate::backend::ir::CType;
+use crate::diagnostic::Diagnostic;
 
 /// Mutable emission state threaded through a single expression walk.
 ///
@@ -51,13 +52,21 @@ impl EmitCtx {
     }
 
     /// Look up the C type of a De Bruijn variable by index.
-    pub fn type_of(&self, index: usize) -> CType {
-        self.var_types.get(index).cloned().unwrap_or(CType::Int64)
+    pub fn type_of(&self, index: usize) -> Result<CType, Diagnostic> {
+        self.var_types.get(index).cloned().ok_or_else(|| {
+            Diagnostic::new(format!(
+                "Cannot determine C type for variable index {index}; missing binding type"
+            ))
+        })
     }
 
     /// Look up the C variable name by De Bruijn index.
-    pub fn name_of(&self, index: usize) -> &str {
-        &self.bound[index]
+    pub fn name_of(&self, index: usize) -> Result<&str, Diagnostic> {
+        self.bound.get(index).map(String::as_str).ok_or_else(|| {
+            Diagnostic::new(format!(
+                "Cannot emit variable index {index}; missing binding name"
+            ))
+        })
     }
 
     /// Get a snapshot of the current bindings (for branch contexts).

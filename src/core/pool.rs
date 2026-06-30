@@ -102,43 +102,53 @@ impl<'bump> TermArena<'bump> {
         t: &'bump Term<'bump>,
         f: &impl Fn(&'bump Term<'bump>) -> Option<&'bump Term<'bump>>,
     ) -> &'bump Term<'bump> {
+        let mut f = |t| f(t);
+        self.map_mut(t, &mut f)
+    }
+
+    /// Bottom-up tree transformation for closures that carry mutable state.
+    pub fn map_mut(
+        &self,
+        t: &'bump Term<'bump>,
+        f: &mut impl FnMut(&'bump Term<'bump>) -> Option<&'bump Term<'bump>>,
+    ) -> &'bump Term<'bump> {
         if let Some(r) = f(t) {
             return r;
         }
         match t {
-            Term::App(fun, arg) => self.app(self.map(fun, f), self.map(arg, f)),
-            Term::Lam(body) => self.lam(self.map(body, f)),
-            Term::NamedLam(n, body) => self.named_lam(n, self.map(body, f)),
-            Term::Pi(n, a, b) => self.pi(n, self.map(a, f), self.map(b, f)),
+            Term::App(fun, arg) => self.app(self.map_mut(fun, f), self.map_mut(arg, f)),
+            Term::Lam(body) => self.lam(self.map_mut(body, f)),
+            Term::NamedLam(n, body) => self.named_lam(n, self.map_mut(body, f)),
+            Term::Pi(n, a, b) => self.pi(n, self.map_mut(a, f), self.map_mut(b, f)),
             Term::Let(n, v, b, mc) => {
-                let mc2 = mc.map(|c| self.map(c, f));
-                self.let_(n, self.map(v, f), self.map(b, f), mc2)
+                let mc2 = mc.map(|c| self.map_mut(c, f));
+                self.let_(n, self.map_mut(v, f), self.map_mut(b, f), mc2)
             }
             Term::IfThenElse(c, th, el) => {
-                self.if_then_else(self.map(c, f), self.map(th, f), self.map(el, f))
+                self.if_then_else(self.map_mut(c, f), self.map_mut(th, f), self.map_mut(el, f))
             }
-            Term::Annot(inner, ct) => self.annot(self.map(inner, f), self.map(ct, f)),
+            Term::Annot(inner, ct) => self.annot(self.map_mut(inner, f), self.map_mut(ct, f)),
             Term::ByProof(inner, tactics) => {
-                let inner_mapped = inner.map(|t| self.map(t, f));
+                let inner_mapped = inner.map(|t| self.map_mut(t, f));
                 let mapped: Vec<Tactic<'bump>> = tactics
                     .iter()
                     .map(|tac| match tac {
-                        Tactic::Exact(t) => Tactic::Exact(self.map(t, f)),
-                        Tactic::Apply(t) => Tactic::Apply(self.map(t, f)),
+                        Tactic::Exact(t) => Tactic::Exact(self.map_mut(t, f)),
+                        Tactic::Apply(t) => Tactic::Apply(self.map_mut(t, f)),
                         Tactic::Intro(_) => *tac,
-                        Tactic::Have(n, t) => Tactic::Have(n, self.map(t, f)),
+                        Tactic::Have(n, t) => Tactic::Have(n, self.map_mut(t, f)),
                     })
                     .collect();
                 self.by_proof(inner_mapped, self.alloc_slice(&mapped))
             }
-            Term::Refine(n, par, p) => self.refine(n, self.map(par, f), self.map(p, f)),
+            Term::Refine(n, par, p) => self.refine(n, self.map_mut(par, f), self.map_mut(p, f)),
             Term::UnionDef(name, variants) => {
                 let mapped: Vec<_> = variants
                     .iter()
                     .map(|(vname, fields)| {
                         let mf: Vec<_> = fields
                             .iter()
-                            .map(|(fnm, fc)| (*fnm, self.map(fc, f)))
+                            .map(|(fnm, fc)| (*fnm, self.map_mut(fc, f)))
                             .collect();
                         (*vname, self.alloc_slice(&mf))
                     })
@@ -146,16 +156,19 @@ impl<'bump> TermArena<'bump> {
                 self.union_def(name, self.alloc_slice(&mapped))
             }
             Term::Variant(name, idx, payloads) => {
-                let mapped: Vec<_> = payloads.iter().map(|p| self.map(p, f)).collect();
+                let mapped: Vec<_> = payloads.iter().map(|p| self.map_mut(p, f)).collect();
                 self.variant(name, *idx, self.alloc_slice(&mapped))
             }
             Term::Match(scrut, branches) => {
-                let s = self.map(scrut, f);
+                let s = self.map_mut(scrut, f);
                 let mapped: Vec<_> = branches
                     .iter()
                     .map(|(idx, binds, body)| {
-                        let mb: Vec<_> = binds.iter().map(|(n, c)| (*n, self.map(c, f))).collect();
-                        (*idx, self.alloc_slice(&mb), self.map(body, f))
+                        let mb: Vec<_> = binds
+                            .iter()
+                            .map(|(n, c)| (*n, self.map_mut(c, f)))
+                            .collect();
+                        (*idx, self.alloc_slice(&mb), self.map_mut(body, f))
                     })
                     .collect();
                 self.match_(s, self.alloc_slice(&mapped))
@@ -163,15 +176,15 @@ impl<'bump> TermArena<'bump> {
             Term::StructDef(name, fields) => {
                 let mf: Vec<_> = fields
                     .iter()
-                    .map(|(fnm, fc)| (*fnm, self.map(fc, f)))
+                    .map(|(fnm, fc)| (*fnm, self.map_mut(fc, f)))
                     .collect();
                 self.struct_def(name, self.alloc_slice(&mf))
             }
             Term::StructCons(name, field_values) => {
-                let mapped: Vec<_> = field_values.iter().map(|v| self.map(v, f)).collect();
+                let mapped: Vec<_> = field_values.iter().map(|v| self.map_mut(v, f)).collect();
                 self.struct_cons(name, self.alloc_slice(&mapped))
             }
-            Term::StructProj(subject, idx) => self.struct_proj(self.map(subject, f), *idx),
+            Term::StructProj(subject, idx) => self.struct_proj(self.map_mut(subject, f), *idx),
             _ => t,
         }
     }

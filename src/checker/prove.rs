@@ -34,6 +34,7 @@ impl<'bump> TypeChecker<'bump> {
             None => goal,
         };
         let mut current_goal = instantiated_goal;
+        let mut local_names: Vec<&'bump str> = Vec::new();
         let mut frames: Vec<Frame<'bump>> = Vec::new();
 
         let n = tactics.len();
@@ -44,6 +45,7 @@ impl<'bump> TypeChecker<'bump> {
                     if !is_last {
                         return Err("`exact` must be the last tactic in a proof block".into());
                     }
+                    let proof_term = self.desugarer.desugar_with_names(proof_term, &local_names);
                     let full_proof = Self::wrap_frames(self.arena, proof_term, &frames);
                     return Ok((full_proof, current_ctx));
                 }
@@ -52,6 +54,7 @@ impl<'bump> TypeChecker<'bump> {
                         return Err("`apply` cannot be the last tactic (use `exact`)".into());
                     }
                     // Don't whnf f — that strips Annot which holds the type.
+                    let f = self.desugarer.desugar_with_names(f, &local_names);
                     let (dom, cod) = self.extract_pi_type(&current_ctx, f)?;
                     let goal_nf = self.evaluator.whnf(current_goal)?;
                     if !self.terms_compatible(cod, goal_nf) {
@@ -73,6 +76,7 @@ impl<'bump> TypeChecker<'bump> {
                         Term::Pi(n, a_dom, b_cod) => {
                             let var_name = name.unwrap_or(n);
                             current_ctx = current_ctx.extend(var_name, a_dom);
+                            local_names.insert(0, var_name);
                             frames.push(Frame::LamFrame);
                             current_goal = b_cod;
                         }
@@ -88,6 +92,7 @@ impl<'bump> TypeChecker<'bump> {
                     if is_last {
                         return Err("`have` cannot be the last tactic (use `exact`)".into());
                     }
+                    let lemma = self.desugarer.desugar_with_names(lemma, &local_names);
                     let lemma_val = self.evaluator.whnf(lemma)?;
                     current_ctx = current_ctx.add_theorem(name, lemma_val);
                 }
@@ -161,15 +166,6 @@ impl<'bump> TypeChecker<'bump> {
                 return Ok(pi);
             }
         }
-        // Named reference in context
-        if let Term::Builtin(name) | Term::Named(name) = t
-            && let Some(entry) = ctx.lookup_name(name)
-        {
-            let ty_nf = self.evaluator.whnf(entry.constraint)?;
-            if let Some(pi) = Self::as_pi(ty_nf) {
-                return Ok(pi);
-            }
-        }
         Err(format!(
             "apply: cannot infer Pi type for {}",
             PrettyPrinter::pretty(t)
@@ -212,6 +208,7 @@ impl<'bump> TypeChecker<'bump> {
                 PrettyPrinter::pretty(subject),
                 PrettyPrinter::pretty(pred)
             )),
+            _ if self.search_ctx_constraints(ctx, subject, pred) => Ok(()),
             _ if self.search_ctx(ctx, subject, pred) => Ok(()),
             _ => self.try_simple_derive(pred, ctx, subject),
         }
@@ -242,6 +239,37 @@ impl<'bump> TypeChecker<'bump> {
             .any(|thm| self.eval_eq(subject, thm, target))
     }
 
+    fn search_ctx_constraints(
+        &self,
+        ctx: &Context<'bump>,
+        subject: &'bump Term<'bump>,
+        target: &'bump Term<'bump>,
+    ) -> bool {
+        let Term::Var(i) = subject else {
+            return false;
+        };
+        let Some(constraint) = ctx.lookup(*i) else {
+            return false;
+        };
+        let Ok(constraint) = self.evaluator.whnf(constraint) else {
+            return false;
+        };
+        let Some(pred) = self.constraint_predicate(constraint) else {
+            return false;
+        };
+        self.eval_eq(subject, pred, target)
+    }
+
+    fn constraint_predicate(&self, constraint: &'bump Term<'bump>) -> Option<&'bump Term<'bump>> {
+        match constraint {
+            Term::Refine(_, _, pred) => Some(pred),
+            Term::Builtin(name) | Term::Named(name) => {
+                crate::checker::context::lookup_refine(name, self.table()).map(|(_, pred)| pred)
+            }
+            _ => None,
+        }
+    }
+
     fn eval_eq(
         &self,
         subject: &'bump Term<'bump>,
@@ -259,6 +287,9 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         subject: &'bump Term<'bump>,
     ) -> Result<(), String> {
+        if self.try_derive_nonnegative_add(pred, ctx, subject) {
+            return Ok(());
+        }
         let Some((a, b)) = self.try_match_neq(pred) else {
             return Err(format!(
                 "Cannot automatically verify that {} satisfies {} — provide a manual proof with `by`",
@@ -282,6 +313,62 @@ impl<'bump> TypeChecker<'bump> {
                 PrettyPrinter::pretty(pred)
             ))
         }
+    }
+
+    fn try_derive_nonnegative_add(
+        &self,
+        pred: &'bump Term<'bump>,
+        ctx: &Context<'bump>,
+        subject: &'bump Term<'bump>,
+    ) -> bool {
+        let Some((lhs, rhs)) = self.try_match_ge(pred) else {
+            return false;
+        };
+        if !matches!(lhs, Term::RefParam) || !matches!(rhs, Term::LitInt(0)) {
+            return false;
+        }
+        let Some((left, right)) = self.try_match_add(subject) else {
+            return false;
+        };
+        if matches!(right, Term::LitInt(n) if *n >= 0) {
+            return self.prove_auto(ctx, left, pred).is_ok();
+        }
+        if matches!(left, Term::LitInt(n) if *n >= 0) {
+            return self.prove_auto(ctx, right, pred).is_ok();
+        }
+        false
+    }
+
+    fn try_match_ge(
+        &self,
+        t: &'bump Term<'bump>,
+    ) -> Option<(&'bump Term<'bump>, &'bump Term<'bump>)> {
+        let Term::App(ge_app, b) = t else {
+            return None;
+        };
+        let Term::App(prim, a) = *ge_app else {
+            return None;
+        };
+        if !matches!(prim, Term::PrimOp(PrimOp::Ge)) {
+            return None;
+        }
+        Some((a, b))
+    }
+
+    fn try_match_add(
+        &self,
+        t: &'bump Term<'bump>,
+    ) -> Option<(&'bump Term<'bump>, &'bump Term<'bump>)> {
+        let Term::App(add_app, b) = t else {
+            return None;
+        };
+        let Term::App(prim, a) = *add_app else {
+            return None;
+        };
+        if !matches!(prim, Term::PrimOp(PrimOp::Add)) {
+            return None;
+        }
+        Some((a, b))
     }
 
     fn try_match_neq(
