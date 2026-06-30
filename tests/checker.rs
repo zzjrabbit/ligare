@@ -15,7 +15,7 @@ fn check_empty<'bump>(
     arena: &TermArena<'bump>,
     t: &'bump Term<'bump>,
     c: &'bump Term<'bump>,
-) -> Result<(), String> {
+) -> Result<(), ligare::diagnostic::Diagnostic> {
     check(arena, &empty_table(), &empty_ctx(), t, c)
 }
 
@@ -385,15 +385,15 @@ fn var_in_context_matches_type() {
         arena.builtin(s(&arena, "int")),
         &Context::empty(),
     );
-    assert_eq!(
+    assert!(
         check(
             &arena,
             &empty_table(),
             &ctx,
             arena.var(0),
             arena.builtin(s(&arena, "int"))
-        ),
-        Ok(())
+        )
+        .is_ok()
     );
 }
 
@@ -429,15 +429,15 @@ fn var_from_context_satisfies_refinement() {
         &empty_table(),
     );
     // Check that 5 has type Nat when Nat is in the table
-    assert_eq!(
+    assert!(
         check(
             &arena,
             &table,
             &empty_ctx(),
             arena.lit_int(5),
             arena.builtin(s(&arena, "Nat"))
-        ),
-        Ok(())
+        )
+        .is_ok()
     );
 }
 
@@ -793,15 +793,15 @@ fn if_branch_with_context() {
         arena.builtin(s(&arena, "int")),
         &Context::empty(),
     );
-    assert_eq!(
+    assert!(
         check(
             &arena,
             &empty_table(),
             &ctx,
             term,
             arena.builtin(s(&arena, "int"))
-        ),
-        Ok(())
+        )
+        .is_ok()
     );
 }
 
@@ -929,7 +929,7 @@ fn tactic_exact_true_passes() {
         arena.lit_int(42),
         tac_slice(&arena, &[Tactic::Exact(arena.lit_bool(true))]),
     );
-    assert_eq!(check(&arena, &table, &empty_ctx(), term, nat), Ok(()));
+    assert!(check(&arena, &table, &empty_ctx(), term, nat).is_ok());
 }
 
 /// `by exact false` on a refinement constraint must fail.
@@ -1331,15 +1331,15 @@ fn theorem_refinement_with_by_passes() {
         Some(arena.lit_int(5)),
         arena.alloc_slice(&[Tactic::Exact(arena.lit_bool(true))]),
     );
-    assert_eq!(
+    assert!(
         check(
             &arena,
             &table,
             &empty_ctx(),
             body,
             arena.builtin(s(&arena, "Nat"))
-        ),
-        Ok(())
+        )
+        .is_ok()
     );
 }
 

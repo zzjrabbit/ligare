@@ -9,6 +9,7 @@ use crate::checker::context::{ConstraintTable, Context, add_refine, empty_table,
 use crate::core::debruijn::Desugarer;
 use crate::core::pool::TermArena;
 use crate::core::syntax::{Name, Tactic, Term};
+use crate::diagnostic::Diagnostic;
 
 /// Result of looking up a variant constructor: (union_name, variant_index, field_specs).
 type VariantInfo<'bump> = (
@@ -163,7 +164,7 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         term: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let desugared = self.desugarer.desugar(term);
         match desugared {
             Term::Var(i) => self.check_var(ctx, *i, constraint),
@@ -269,12 +270,18 @@ impl<'bump> TypeChecker<'bump> {
                     // Struct projector used as a standalone function, or an
                     // unknown field on a known struct.
                     if self.lookup_struct_proj(name).is_some() {
-                        Err(format!("{} must be applied to a struct", name))
+                        Err(Diagnostic::new(format!(
+                            "{} must be applied to a struct",
+                            name
+                        )))
                     } else {
-                        Err(format!("unknown struct field projector: {}", name))
+                        Err(Diagnostic::new(format!(
+                            "unknown struct field projector: {}",
+                            name
+                        )))
                     }
                 } else {
-                    Err(format!("unbound: {}", name))
+                    Err(Diagnostic::new(format!("unbound: {}", name)))
                 }
             }
             _ => self.check_by_constraint(ctx, desugared, constraint),
@@ -312,7 +319,7 @@ pub fn check<'bump>(
     ctx: &Context<'bump>,
     term: &'bump Term<'bump>,
     constraint: &'bump Term<'bump>,
-) -> Result<(), String> {
+) -> Result<(), Diagnostic> {
     let checker = TypeChecker {
         arena,
         evaluator: WhnfEvaluator::new(arena),

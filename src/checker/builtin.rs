@@ -11,9 +11,10 @@ use crate::config::{
     BUILTIN_PROOF, BUILTIN_PROP, BUILTIN_STR, BUILTIN_THEOREM,
 };
 use crate::core::syntax::{Term, Universe};
+use crate::diagnostic::Diagnostic;
 use crate::pretty::PrettyPrinter;
 
-pub type BuiltinChecker = fn(&Term<'_>) -> Result<(), String>;
+pub type BuiltinChecker = fn(&Term<'_>) -> Result<(), Diagnostic>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogicKind {
@@ -29,30 +30,39 @@ pub struct BuiltinEntry {
     pub logic_kind: Option<LogicKind>,
 }
 
-fn check_int(t: &Term<'_>) -> Result<(), String> {
+fn check_int(t: &Term<'_>) -> Result<(), Diagnostic> {
     if matches!(t, Term::LitInt(_)) {
         Ok(())
     } else {
-        Err(format!("expected int, got {}", PrettyPrinter::pretty(t)))
+        Err(Diagnostic::new(format!(
+            "expected int, got {}",
+            PrettyPrinter::pretty(t)
+        )))
     }
 }
 
-fn check_bool(t: &Term<'_>) -> Result<(), String> {
+fn check_bool(t: &Term<'_>) -> Result<(), Diagnostic> {
     if matches!(t, Term::LitBool(_)) {
         Ok(())
     } else {
-        Err(format!("expected bool, got {}", PrettyPrinter::pretty(t)))
+        Err(Diagnostic::new(format!(
+            "expected bool, got {}",
+            PrettyPrinter::pretty(t)
+        )))
     }
 }
 
-fn check_str(t: &Term<'_>) -> Result<(), String> {
+fn check_str(t: &Term<'_>) -> Result<(), Diagnostic> {
     match t {
         Term::LitStr(_) => Ok(()),
-        _ => Err(format!("expected str, got {}", PrettyPrinter::pretty(t))),
+        _ => Err(Diagnostic::new(format!(
+            "expected str, got {}",
+            PrettyPrinter::pretty(t)
+        ))),
     }
 }
 
-fn check_any(_t: &Term<'_>) -> Result<(), String> {
+fn check_any(_t: &Term<'_>) -> Result<(), Diagnostic> {
     Ok(())
 }
 

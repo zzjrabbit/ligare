@@ -6,6 +6,7 @@ use ligare::checker::context::{add_refine, empty_ctx, empty_table};
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
 use ligare::core::syntax::{PrimOp, Term};
+use ligare::diagnostic::Diagnostic;
 
 fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
     let b = leak_bump();
@@ -33,7 +34,7 @@ fn check_with<'bump>(
     refs: &[(&str, &'bump Term<'bump>, &'bump Term<'bump>)],
     t: &'bump Term<'bump>,
     c: &'bump Term<'bump>,
-) -> Result<(), String> {
+) -> Result<(), Diagnostic> {
     let table = refs
         .iter()
         .fold(empty_table(), |tbl, (n, p, pr)| add_refine(n, p, pr, &tbl));

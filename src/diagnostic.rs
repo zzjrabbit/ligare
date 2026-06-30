@@ -7,7 +7,7 @@ pub type Span = std::ops::Range<usize>;
 ///
 /// Replaces bare `String` errors in public-facing compiler APIs so callers
 /// can highlight the relevant source location without parsing error messages.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub message: String,
     pub span: Option<Span>,
@@ -84,3 +84,15 @@ impl std::fmt::Display for Diagnostic {
 }
 
 impl std::error::Error for Diagnostic {}
+
+impl From<String> for Diagnostic {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for Diagnostic {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}

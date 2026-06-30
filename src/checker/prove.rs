@@ -5,7 +5,14 @@ use crate::checker::context::Context;
 use crate::config::{AND_ELIM_LEFT, AND_INTRO, BUILTIN_AND};
 use crate::core::pool::TermArena;
 use crate::core::syntax::{PrimOp, Tactic, Term};
+use crate::diagnostic::Diagnostic;
 use crate::pretty::PrettyPrinter;
+
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        Diagnostic::new(format!($($arg)*))
+    };
+}
 
 /// Internal proof frame for tactic execution.
 enum Frame<'bump> {
@@ -27,7 +34,7 @@ impl<'bump> TypeChecker<'bump> {
         subject: Option<&'bump Term<'bump>>,
         goal: &'bump Term<'bump>,
         tactics: &'bump [Tactic<'bump>],
-    ) -> Result<(&'bump Term<'bump>, Context<'bump>), String> {
+    ) -> Result<(&'bump Term<'bump>, Context<'bump>), Diagnostic> {
         let mut current_ctx = ctx.clone();
         let instantiated_goal = match subject {
             Some(s) => self.subst_ref_param(s, goal),
@@ -43,7 +50,9 @@ impl<'bump> TypeChecker<'bump> {
             match tactic {
                 Tactic::Exact(proof_term) => {
                     if !is_last {
-                        return Err("`exact` must be the last tactic in a proof block".into());
+                        return Err(Diagnostic::new(
+                            "`exact` must be the last tactic in a proof block",
+                        ));
                     }
                     let proof_term = self.desugarer.desugar_with_names(proof_term, &local_names);
                     let full_proof = Self::wrap_frames(self.arena, proof_term, &frames);
@@ -51,14 +60,16 @@ impl<'bump> TypeChecker<'bump> {
                 }
                 Tactic::Apply(f) => {
                     if is_last {
-                        return Err("`apply` cannot be the last tactic (use `exact`)".into());
+                        return Err(Diagnostic::new(
+                            "`apply` cannot be the last tactic (use `exact`)",
+                        ));
                     }
                     // Don't whnf f — that strips Annot which holds the type.
                     let f = self.desugarer.desugar_with_names(f, &local_names);
                     let (dom, cod) = self.extract_pi_type(&current_ctx, f)?;
                     let goal_nf = self.evaluator.whnf(current_goal)?;
                     if !self.terms_compatible(cod, goal_nf) {
-                        return Err(format!(
+                        return Err(diag!(
                             "apply: function codomain {} does not match goal {}",
                             PrettyPrinter::pretty(cod),
                             PrettyPrinter::pretty(goal_nf)
@@ -69,7 +80,9 @@ impl<'bump> TypeChecker<'bump> {
                 }
                 Tactic::Intro(name) => {
                     if is_last {
-                        return Err("`intro` cannot be the last tactic (use `exact`)".into());
+                        return Err(Diagnostic::new(
+                            "`intro` cannot be the last tactic (use `exact`)",
+                        ));
                     }
                     let goal_nf = self.evaluator.whnf(current_goal)?;
                     match goal_nf {
@@ -81,7 +94,7 @@ impl<'bump> TypeChecker<'bump> {
                             current_goal = b_cod;
                         }
                         _ => {
-                            return Err(format!(
+                            return Err(diag!(
                                 "intro: goal {} is not Pi",
                                 PrettyPrinter::pretty(goal_nf)
                             ));
@@ -90,7 +103,9 @@ impl<'bump> TypeChecker<'bump> {
                 }
                 Tactic::Have(name, lemma) => {
                     if is_last {
-                        return Err("`have` cannot be the last tactic (use `exact`)".into());
+                        return Err(Diagnostic::new(
+                            "`have` cannot be the last tactic (use `exact`)",
+                        ));
                     }
                     let lemma = self.desugarer.desugar_with_names(lemma, &local_names);
                     let lemma_val = self.evaluator.whnf(lemma)?;
@@ -99,7 +114,7 @@ impl<'bump> TypeChecker<'bump> {
             }
         }
 
-        Err("Proof block must end with `exact`".into())
+        Err(Diagnostic::new("Proof block must end with `exact`"))
     }
 
     /// Execute tactics and verify the resulting proof against the goal.
@@ -109,13 +124,13 @@ impl<'bump> TypeChecker<'bump> {
         subject: Option<&'bump Term<'bump>>,
         goal: &'bump Term<'bump>,
         tactics: &'bump [Tactic<'bump>],
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let (proof, final_ctx) = self.build_proof_from_tactics(ctx, subject, goal, tactics)?;
         // Evaluate the constructed proof term.
         let proof_val = self.evaluator.whnf(proof)?;
         match proof_val {
             Term::LitBool(true) => Ok(()),
-            Term::LitBool(false) => Err("Proof term evaluates to false".into()),
+            Term::LitBool(false) => Err(Diagnostic::new("Proof term evaluates to false")),
             _ => {
                 // Non-boolean proof: check it against the instantiated goal.
                 let instantiated_goal = match subject {
@@ -150,7 +165,7 @@ impl<'bump> TypeChecker<'bump> {
         &self,
         ctx: &Context<'bump>,
         t: &'bump Term<'bump>,
-    ) -> Result<(&'bump Term<'bump>, &'bump Term<'bump>), String> {
+    ) -> Result<(&'bump Term<'bump>, &'bump Term<'bump>), Diagnostic> {
         // Direct annotation: `(body : Pi ...)`
         if let Term::Annot(_, ty) = t
             && let Some(pi) = Self::as_pi(ty)
@@ -166,7 +181,7 @@ impl<'bump> TypeChecker<'bump> {
                 return Ok(pi);
             }
         }
-        Err(format!(
+        Err(diag!(
             "apply: cannot infer Pi type for {}",
             PrettyPrinter::pretty(t)
         ))
@@ -198,12 +213,12 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         subject: &'bump Term<'bump>,
         pred: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let instantiated = self.subst_ref_param(subject, pred);
         let instantiated_val = self.evaluator.whnf(instantiated)?;
         match instantiated_val {
             Term::LitBool(true) => Ok(()),
-            Term::LitBool(false) => Err(format!(
+            Term::LitBool(false) => Err(diag!(
                 "Refinement predicate does not hold: {} does not satisfy {}",
                 PrettyPrinter::pretty(subject),
                 PrettyPrinter::pretty(pred)
@@ -286,12 +301,12 @@ impl<'bump> TypeChecker<'bump> {
         pred: &'bump Term<'bump>,
         ctx: &Context<'bump>,
         subject: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         if self.try_derive_nonnegative_add(pred, ctx, subject) {
             return Ok(());
         }
         let Some((a, b)) = self.try_match_neq(pred) else {
-            return Err(format!(
+            return Err(diag!(
                 "Cannot automatically verify that {} satisfies {} — provide a manual proof with `by`",
                 PrettyPrinter::pretty(subject),
                 PrettyPrinter::pretty(pred)
@@ -307,7 +322,7 @@ impl<'bump> TypeChecker<'bump> {
         if found {
             Ok(())
         } else {
-            Err(format!(
+            Err(diag!(
                 "Cannot prove that {} satisfies {} (inequality cannot be derived from context)",
                 PrettyPrinter::pretty(subject),
                 PrettyPrinter::pretty(pred)
@@ -436,7 +451,7 @@ impl<'bump> TypeChecker<'bump> {
         subject: &'bump Term<'bump>,
         goal: &'bump Term<'bump>,
         proof: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         if let Some((a, pa, b, pb)) = self.try_split_conj_proof(goal, proof) {
             self.prove_with(ctx, subject, a, pa)?;
             return self.prove_with(ctx, subject, b, pb);
@@ -446,10 +461,9 @@ impl<'bump> TypeChecker<'bump> {
             Term::Builtin(name) | Term::Named(name) if *name == AND_ELIM_LEFT => Ok(()),
             Term::LitBool(true) => Ok(()),
             Term::AutoProof => self.prove_auto(ctx, subject, goal),
-            _ => Err(
-                "This expression cannot be used as a proof — expected a proof term or `by` block"
-                    .to_string(),
-            ),
+            _ => Err(Diagnostic::new(
+                "This expression cannot be used as a proof — expected a proof term or `by` block",
+            )),
         }
     }
 }

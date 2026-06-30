@@ -7,9 +7,16 @@ use crate::checker::context::{
 };
 use crate::config::{BUILTIN_BOOL, BUILTIN_DATA};
 use crate::core::syntax::{MatchBranch, Name, PrimOp, Term, Universe};
+use crate::diagnostic::Diagnostic;
 use crate::pretty::PrettyPrinter;
 
 type VariantPayloadConstraints<'bump> = &'bump [&'bump [(Name<'bump>, &'bump Term<'bump>)]];
+
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        Diagnostic::new(format!($($arg)*))
+    };
+}
 
 impl<'bump> TypeChecker<'bump> {
     /// Returns true if the term represents the universal `data` constraint
@@ -28,13 +35,13 @@ impl<'bump> TypeChecker<'bump> {
         f: &'bump Term<'bump>,
         a: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         // Check if f is a variant constructor
         let f_dsg = self.desugarer.desugar(f);
         if let Term::Builtin(name) | Term::Named(name) = f_dsg {
             if let Some((uname, idx, field_specs)) = self.lookup_variant(name) {
                 if field_specs.len() != 1 {
-                    return Err(format!(
+                    return Err(diag!(
                         "Variant {} expects {} field(s), got 1",
                         name,
                         field_specs.len()
@@ -53,7 +60,7 @@ impl<'bump> TypeChecker<'bump> {
             // Check if f is a struct constructor (Name.mk)
             if let Some((sname, field_specs)) = self.lookup_struct_ctor(name) {
                 if field_specs.len() != 1 {
-                    return Err(format!(
+                    return Err(diag!(
                         "Struct constructor {}.mk expects {} field(s), got 1",
                         sname,
                         field_specs.len()
@@ -92,7 +99,7 @@ impl<'bump> TypeChecker<'bump> {
                     self.check_domain_match(result_constraint, constraint)?;
                     Ok(())
                 } else {
-                    Err(format!(
+                    Err(diag!(
                         "application head is not constrained by a Pi term: {}",
                         PrettyPrinter::pretty(pi_constraint)
                     ))
@@ -105,7 +112,7 @@ impl<'bump> TypeChecker<'bump> {
                     && self.builtins.checker(name).is_none()
                     && lookup_refine(name, &self.table).is_none()
                 {
-                    return Err(format!("unbound: {}", name));
+                    return Err(diag!("unbound: {}", name));
                 }
                 let f_val = self.evaluator.whnf(f_dsg)?;
                 let evald = self.evaluator.whnf(self.arena.app(f_val, a))?;
@@ -121,7 +128,7 @@ impl<'bump> TypeChecker<'bump> {
         first: &'bump Term<'bump>,
         second: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let int = self.arena.builtin(self.arena.alloc_str("int"));
         self.check(ctx, first, int)?;
         self.check(ctx, second, int)?;
@@ -170,7 +177,7 @@ impl<'bump> TypeChecker<'bump> {
         &self,
         ctx: &Context<'bump>,
         f: &'bump Term<'bump>,
-    ) -> Result<Option<&'bump Term<'bump>>, String> {
+    ) -> Result<Option<&'bump Term<'bump>>, Diagnostic> {
         let f_dsg = self.desugarer.desugar(f);
         match f_dsg {
             Term::Annot(_, ty) => Ok(Some(ty)),
@@ -204,16 +211,16 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         i: usize,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let expected = ctx
             .lookup(i)
-            .ok_or_else(|| format!("unbound term index {}", i))?;
+            .ok_or_else(|| diag!("unbound term index {}", i))?;
         let expected_val = self.evaluator.whnf(expected)?;
         let constraint_val = self.evaluator.whnf(constraint)?;
         if expected_val == constraint_val || self.is_refinement_of(expected_val, constraint_val) {
             Ok(())
         } else {
-            Err(format!(
+            Err(diag!(
                 "constraint mismatch: declared {}, required {}",
                 PrettyPrinter::pretty(expected_val),
                 PrettyPrinter::pretty(constraint_val)
@@ -228,7 +235,7 @@ impl<'bump> TypeChecker<'bump> {
         tbranch: &'bump Term<'bump>,
         fbranch: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let bool_name = self.arena.alloc_str(BUILTIN_BOOL);
         self.check(ctx, cond, self.arena.builtin(bool_name))?;
         let ctx_t = add_theorem("_", cond, ctx);
@@ -244,7 +251,7 @@ impl<'bump> TypeChecker<'bump> {
         scrutinee: &'bump Term<'bump>,
         branches: &'bump [MatchBranch<'bump>],
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let variant_constraints = self.match_variant_constraints(ctx, scrutinee)?;
         for (idx, binds, body) in branches.iter() {
             let mut branch_ctx = ctx.clone();
@@ -266,7 +273,7 @@ impl<'bump> TypeChecker<'bump> {
         &self,
         ctx: &Context<'bump>,
         scrutinee: &'bump Term<'bump>,
-    ) -> Result<Option<VariantPayloadConstraints<'bump>>, String> {
+    ) -> Result<Option<VariantPayloadConstraints<'bump>>, Diagnostic> {
         let scrutinee = self.desugarer.desugar(scrutinee);
         let union_name = match self.evaluator.whnf(scrutinee)? {
             Term::Variant(name, _, _) => Some(name),
@@ -299,7 +306,7 @@ impl<'bump> TypeChecker<'bump> {
         body: &'bump Term<'bump>,
         mconstr: Option<&'bump Term<'bump>>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let binding_constraint = if let Some(c) = mconstr {
             self.check(ctx, val, c)?;
             c
@@ -316,7 +323,7 @@ impl<'bump> TypeChecker<'bump> {
         &self,
         ctx: &Context<'bump>,
         term: &'bump Term<'bump>,
-    ) -> Result<&'bump Term<'bump>, String> {
+    ) -> Result<&'bump Term<'bump>, Diagnostic> {
         let desugared = self.desugarer.desugar(term);
         match desugared {
             Term::Annot(_, constraint) => Ok(constraint),
@@ -330,7 +337,7 @@ impl<'bump> TypeChecker<'bump> {
                 self.infer_struct_projection_constraint(ctx, subject, *idx)
             }
             Term::Builtin(name) | Term::Named(name) if self.is_struct_projector_name(name) => {
-                Err(format!("unknown struct field projector: {}", name))
+                Err(diag!("unknown struct field projector: {}", name))
             }
             Term::IfThenElse(_, tbranch, _) | Term::Match(_, [.., (_, _, tbranch)]) => {
                 self.infer_binding_constraint(ctx, tbranch)
@@ -338,7 +345,7 @@ impl<'bump> TypeChecker<'bump> {
             Term::App(f, _) => self.infer_app_constraint(ctx, f),
             Term::Var(i) => ctx
                 .lookup(*i)
-                .ok_or_else(|| format!("unbound term index {}", i)),
+                .ok_or_else(|| diag!("unbound term index {}", i)),
             _ => Ok(self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA))),
         }
     }
@@ -347,7 +354,7 @@ impl<'bump> TypeChecker<'bump> {
         &self,
         ctx: &Context<'bump>,
         f: &'bump Term<'bump>,
-    ) -> Result<&'bump Term<'bump>, String> {
+    ) -> Result<&'bump Term<'bump>, Diagnostic> {
         let f_dsg = self.desugarer.desugar(f);
         match f_dsg {
             Term::App(inner, _) if matches!(inner, Term::PrimOp(_)) => match inner {
@@ -368,12 +375,12 @@ impl<'bump> TypeChecker<'bump> {
                 }
             },
             Term::Builtin(name) | Term::Named(name) if self.is_struct_projector_name(name) => {
-                Err(format!("unknown struct field projector: {}", name))
+                Err(diag!("unknown struct field projector: {}", name))
             }
             _ => match self.infer_pi_constraint(ctx, f)? {
                 Some(ty) => match self.evaluator.whnf(ty)? {
                     Term::Pi(_, _, codomain) => Ok(codomain),
-                    other => Err(format!(
+                    other => Err(diag!(
                         "term is not constrained by a Pi term: {}",
                         PrettyPrinter::pretty(other)
                     )),
@@ -388,7 +395,7 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         subject: &'bump Term<'bump>,
         idx: usize,
-    ) -> Result<&'bump Term<'bump>, String> {
+    ) -> Result<&'bump Term<'bump>, Diagnostic> {
         let subject_val = self.evaluator.whnf(subject)?;
         if let Term::StructCons(sname, _) = subject_val {
             return self
@@ -397,11 +404,11 @@ impl<'bump> TypeChecker<'bump> {
                     Term::StructDef(_, fields) => fields.get(idx).map(|(_, c)| *c),
                     _ => None,
                 })
-                .ok_or_else(|| format!("struct {}: no field at index {}", sname, idx));
+                .ok_or_else(|| diag!("struct {}: no field at index {}", sname, idx));
         }
         if let Term::Var(i) = subject_val {
             let Some(ty) = ctx.lookup(*i) else {
-                return Err("term has no known struct constraint".to_string());
+                return Err(Diagnostic::new("term has no known struct constraint"));
             };
             let ty_nf = self.evaluator.whnf(ty)?;
             if let Term::Builtin(sname) | Term::Named(sname) = ty_nf
@@ -410,18 +417,18 @@ impl<'bump> TypeChecker<'bump> {
             {
                 return Ok(constraint);
             }
-            return Err("term has no known struct constraint".to_string());
+            return Err(Diagnostic::new("term has no known struct constraint"));
         }
         if matches!(
             subject_val,
             Term::LitInt(_) | Term::LitBool(_) | Term::LitStr(_) | Term::Lam(_)
         ) {
-            return Err(format!(
+            return Err(diag!(
                 "cannot project from {}: term is not a struct construction",
                 PrettyPrinter::pretty(subject_val)
             ));
         }
-        Err(format!(
+        Err(diag!(
             "cannot project field {} from {}: term has no known struct constraint",
             idx,
             PrettyPrinter::pretty(subject_val)
@@ -433,7 +440,7 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         term: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         if let Term::Refine(name, parent, p) = constraint {
             let new_table = add_refine(name, parent, p, &self.table);
             let checker = Self::with_table(self.arena, &new_table);
@@ -462,13 +469,14 @@ impl<'bump> TypeChecker<'bump> {
                         if uname == name {
                             Ok(())
                         } else {
-                            Err(format!(
+                            Err(diag!(
                                 "expected term constrained by {}, got variant of {}",
-                                name, uname
+                                name,
+                                uname
                             ))
                         }
                     } else {
-                        Err(format!(
+                        Err(diag!(
                             "expected term constrained by {}, got {}",
                             name,
                             PrettyPrinter::pretty(term)
@@ -480,20 +488,21 @@ impl<'bump> TypeChecker<'bump> {
                         if sname == name {
                             Ok(())
                         } else {
-                            Err(format!(
+                            Err(diag!(
                                 "expected term constrained by {}, got struct {}",
-                                name, sname
+                                name,
+                                sname
                             ))
                         }
                     } else {
-                        Err(format!(
+                        Err(diag!(
                             "expected term constrained by {}, got {}",
                             name,
                             PrettyPrinter::pretty(term)
                         ))
                     }
                 } else {
-                    Err(format!("unknown constraint: {}", name))
+                    Err(diag!("unknown constraint: {}", name))
                 }
             }
             Term::Pi("", a, b) => self.check_arrow(ctx, term, a, b),
@@ -506,7 +515,7 @@ impl<'bump> TypeChecker<'bump> {
                 if let Some(c) = ctx.lookup(*j) {
                     self.check(ctx, term, c)
                 } else {
-                    Err(format!("unbound constraint param at index {}", *j))
+                    Err(diag!("unbound constraint param at index {}", *j))
                 }
             }
             Term::App(app_and, a) => self.try_check_logical_op(ctx, term, app_and, a, norm),
@@ -517,13 +526,14 @@ impl<'bump> TypeChecker<'bump> {
                     if vname == uname {
                         Ok(())
                     } else {
-                        Err(format!(
+                        Err(diag!(
                             "expected term constrained by {}, got variant of {}",
-                            uname, vname
+                            uname,
+                            vname
                         ))
                     }
                 } else {
-                    Err(format!(
+                    Err(diag!(
                         "expected term constrained by {}, got {}",
                         uname,
                         PrettyPrinter::pretty(term)
@@ -535,13 +545,14 @@ impl<'bump> TypeChecker<'bump> {
                     if cname == sname {
                         Ok(())
                     } else {
-                        Err(format!(
+                        Err(diag!(
                             "expected term constrained by {}, got struct {}",
-                            sname, cname
+                            sname,
+                            cname
                         ))
                     }
                 } else {
-                    Err(format!(
+                    Err(diag!(
                         "expected term constrained by {}, got {}",
                         sname,
                         PrettyPrinter::pretty(term)
@@ -558,7 +569,7 @@ impl<'bump> TypeChecker<'bump> {
                     self.check(ctx, term, parent)?;
                     self.prove_auto(ctx, term, pred)
                 } else {
-                    Err(format!(
+                    Err(diag!(
                         "cannot use {} as a constraint",
                         PrettyPrinter::pretty(norm)
                     ))
@@ -574,7 +585,7 @@ impl<'bump> TypeChecker<'bump> {
         head: &'bump Term<'bump>,
         arg: &'bump Term<'bump>,
         norm: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         // Single-arg case: (not A) — vacuous operators always succeed.
         if let Term::Builtin(name) | Term::Named(name) = head {
             if self.builtins.logic_kind(name) == Some(LogicKind::Vacuous) {
@@ -620,20 +631,21 @@ impl<'bump> TypeChecker<'bump> {
         term: &'bump Term<'bump>,
         name: &str,
         _norm: &'bump Term<'bump>,
-    ) -> Option<Result<(), String>> {
+    ) -> Option<Result<(), Diagnostic>> {
         if self.lookup_union(name).is_some() {
             // Union constraint application — check if term is a Variant of this union
             if let Term::Variant(uname, _, _) = term {
                 if *uname == name {
                     Some(Ok(()))
                 } else {
-                    Some(Err(format!(
+                    Some(Err(diag!(
                         "expected term constrained by {}, got variant of {}",
-                        name, uname
+                        name,
+                        uname
                     )))
                 }
             } else {
-                Some(Err(format!(
+                Some(Err(diag!(
                     "expected term constrained by {}, got {}",
                     name,
                     PrettyPrinter::pretty(term)
@@ -645,13 +657,14 @@ impl<'bump> TypeChecker<'bump> {
                 if *sname == name {
                     Some(Ok(()))
                 } else {
-                    Some(Err(format!(
+                    Some(Err(diag!(
                         "expected term constrained by {}, got struct {}",
-                        name, sname
+                        name,
+                        sname
                     )))
                 }
             } else {
-                Some(Err(format!(
+                Some(Err(diag!(
                     "expected term constrained by {}, got {}",
                     name,
                     PrettyPrinter::pretty(term)
@@ -688,7 +701,7 @@ impl<'bump> TypeChecker<'bump> {
         t: &'bump Term<'bump>,
         a: &'bump Term<'bump>,
         b: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         self.check_pi_impl(ctx, t, a, b, None)
     }
 
@@ -699,7 +712,7 @@ impl<'bump> TypeChecker<'bump> {
         name: crate::core::syntax::Name<'bump>,
         a: &'bump Term<'bump>,
         b: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         self.check_pi_impl(ctx, t, a, b, Some(name))
     }
 
@@ -710,10 +723,10 @@ impl<'bump> TypeChecker<'bump> {
         a: &'bump Term<'bump>,
         b: &'bump Term<'bump>,
         name: Option<crate::core::syntax::Name<'bump>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let t_val = self.evaluator.whnf(t)?;
         let Term::Lam(body) = t_val else {
-            return Err(format!(
+            return Err(diag!(
                 "expected term constrained by Pi, got {}",
                 PrettyPrinter::pretty(t_val)
             ));
@@ -730,14 +743,14 @@ impl<'bump> TypeChecker<'bump> {
         &self,
         term: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Option<Result<(), String>> {
+    ) -> Option<Result<(), Diagnostic>> {
         let instantiated = self.subst_ref_param(term, constraint);
         let Ok(val) = self.evaluator.whnf(instantiated) else {
             return None;
         };
         match val {
             Term::LitBool(true) => Some(Ok(())),
-            Term::LitBool(false) => Some(Err(format!(
+            Term::LitBool(false) => Some(Err(diag!(
                 "Constraint does not hold: {} does not satisfy {}",
                 PrettyPrinter::pretty(term),
                 PrettyPrinter::pretty(constraint)
@@ -751,7 +764,7 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         term: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         if let Some(expanded) = expand_constraint(self.arena, &self.table, constraint) {
             return self.check(ctx, term, expanded);
         }
@@ -770,7 +783,7 @@ impl<'bump> TypeChecker<'bump> {
             return result;
         }
 
-        Err(format!(
+        Err(diag!(
             "cannot use {} as a constraint",
             PrettyPrinter::pretty(constraint)
         ))
@@ -781,7 +794,7 @@ impl<'bump> TypeChecker<'bump> {
         &self,
         annot: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let a = self.evaluator.whnf(annot)?;
         let c = self.evaluator.whnf(constraint)?;
         match (a, c) {
@@ -799,7 +812,7 @@ impl<'bump> TypeChecker<'bump> {
             }
             _ if Self::is_data_like(a) || Self::is_data_like(c) => Ok(()),
             _ if a == c => Ok(()),
-            _ => Err(format!(
+            _ => Err(diag!(
                 "constraint mismatch: expected {}, got {}",
                 PrettyPrinter::pretty(constraint),
                 PrettyPrinter::pretty(annot)
@@ -813,7 +826,7 @@ impl<'bump> TypeChecker<'bump> {
         &self,
         annot: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let a_val = self.evaluator.whnf(annot)?;
         let c_val = self.evaluator.whnf(constraint)?;
         // Compare Pi constraints ignoring parameter names (e.g. `Pi("x",A,B)` ≡ `Pi("",A,B)`)
@@ -825,7 +838,7 @@ impl<'bump> TypeChecker<'bump> {
         if ok {
             Ok(())
         } else {
-            Err(format!(
+            Err(diag!(
                 "argument constraint: expected {}, got {}",
                 PrettyPrinter::pretty(a_val),
                 PrettyPrinter::pretty(c_val)
@@ -910,16 +923,16 @@ impl<'bump> TypeChecker<'bump> {
         sname: Name<'bump>,
         field_values: &'bump [&'bump Term<'bump>],
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         // Look up the struct definition
         let (sdef, _) = self
             .lookup_struct(sname)
-            .ok_or_else(|| format!("unknown struct: {}", sname))?;
+            .ok_or_else(|| diag!("unknown struct: {}", sname))?;
         let Term::StructDef(_, fields) = sdef else {
-            return Err(format!("{} is not a struct", sname));
+            return Err(diag!("{} is not a struct", sname));
         };
         if field_values.len() != fields.len() {
-            return Err(format!(
+            return Err(diag!(
                 "{} expects {} field(s), got {}",
                 sname,
                 fields.len(),
@@ -928,8 +941,9 @@ impl<'bump> TypeChecker<'bump> {
         }
         // Check each field value against its constraint
         for (i, (fname, fconstraint)) in fields.iter().enumerate() {
-            self.check(ctx, field_values[i], fconstraint)
-                .map_err(|e| format!("struct {} field '{}': {}", sname, fname, e))?;
+            self.check(ctx, field_values[i], fconstraint).map_err(|e| {
+                Diagnostic::new(format!("struct {} field '{}': {}", sname, fname, e))
+            })?;
         }
         // Now check the constructed struct against the target constraint
         self.check_by_constraint(ctx, self.arena.struct_cons(sname, field_values), constraint)
@@ -943,18 +957,18 @@ impl<'bump> TypeChecker<'bump> {
         idx: usize,
         payloads: &'bump [&'bump Term<'bump>],
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         let (udef, type_params) = self
             .lookup_union(uname)
-            .ok_or_else(|| format!("unknown union: {}", uname))?;
+            .ok_or_else(|| diag!("unknown union: {}", uname))?;
         let Term::UnionDef(_, variants) = udef else {
-            return Err(format!("{} is not a union", uname));
+            return Err(diag!("{} is not a union", uname));
         };
         let (vname, fields) = variants
             .get(idx)
-            .ok_or_else(|| format!("union {}: no variant at index {}", uname, idx))?;
+            .ok_or_else(|| diag!("union {}: no variant at index {}", uname, idx))?;
         if payloads.len() != fields.len() {
-            return Err(format!(
+            return Err(diag!(
                 "variant {} expects {} field(s), got {}",
                 vname,
                 fields.len(),
@@ -965,8 +979,9 @@ impl<'bump> TypeChecker<'bump> {
             if self.is_generic_param(type_params, fconstraint) {
                 continue;
             }
-            self.check(ctx, payloads[i], fconstraint)
-                .map_err(|e| format!("variant {} field '{}': {}", vname, fname, e))?;
+            self.check(ctx, payloads[i], fconstraint).map_err(|e| {
+                Diagnostic::new(format!("variant {} field '{}': {}", vname, fname, e))
+            })?;
         }
         self.check_by_constraint(ctx, self.arena.variant(uname, idx, payloads), constraint)
     }
@@ -985,7 +1000,7 @@ impl<'bump> TypeChecker<'bump> {
         subject: &'bump Term<'bump>,
         idx: usize,
         constraint: &'bump Term<'bump>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Diagnostic> {
         // First try to evaluate the subject to see if it's a StructCons.
         let subject_val = self.evaluator.whnf(subject)?;
         if let Term::StructCons(sname, field_values) = subject_val {
@@ -993,7 +1008,7 @@ impl<'bump> TypeChecker<'bump> {
             if let Some(field_val) = field_values.get(idx) {
                 return self.check(ctx, field_val, constraint);
             } else {
-                return Err(format!("struct {}: no field at index {}", sname, idx));
+                return Err(diag!("struct {}: no field at index {}", sname, idx));
             }
         }
         // For variables, look up the constraint in the context
@@ -1009,19 +1024,19 @@ impl<'bump> TypeChecker<'bump> {
                     return self.check_domain_match(field_constraint, constraint);
                 }
             }
-            return Err("term has no known struct constraint".to_string());
+            return Err(Diagnostic::new("term has no known struct constraint"));
         }
         // Subject is a literal — reject
         if matches!(
             subject_val,
             Term::LitInt(_) | Term::LitBool(_) | Term::LitStr(_) | Term::Lam(_)
         ) {
-            return Err(format!(
+            return Err(diag!(
                 "cannot project from {}: term is not a struct construction",
                 PrettyPrinter::pretty(subject_val)
             ));
         }
-        Err(format!(
+        Err(diag!(
             "cannot project field {} from {}: term has no known struct constraint",
             idx,
             PrettyPrinter::pretty(subject_val)

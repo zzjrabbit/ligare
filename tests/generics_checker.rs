@@ -9,6 +9,7 @@ use ligare::checker::context::{empty_ctx, empty_table};
 use ligare::core::debruijn::{Desugarer, SubstitutionContext};
 use ligare::core::pool::TermArena;
 use ligare::core::syntax::{PrimOp, Term};
+use ligare::diagnostic::Diagnostic;
 
 fn a() -> (&'static bumpalo::Bump, TermArena<'static>) {
     let b = leak_bump();
@@ -19,7 +20,7 @@ fn check_empty<'bump>(
     arena: &TermArena<'bump>,
     t: &'bump Term<'bump>,
     c: &'bump Term<'bump>,
-) -> Result<(), String> {
+) -> Result<(), Diagnostic> {
     check(arena, &empty_table(), &empty_ctx(), t, c)
 }
 
