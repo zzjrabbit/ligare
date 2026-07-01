@@ -16,6 +16,15 @@ use crate::diagnostic::Diagnostic;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CType {
     Int64,
+    Int8,
+    Int16,
+    Int32,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    CInt,
+    CUInt,
     Str,
     /// Named union type (for tagged unions)
     Union(String),
@@ -27,6 +36,15 @@ impl CType {
     pub fn c_name(&self) -> String {
         match self {
             CType::Int64 => "int64_t".into(),
+            CType::Int8 => "int8_t".into(),
+            CType::Int16 => "int16_t".into(),
+            CType::Int32 => "int32_t".into(),
+            CType::UInt8 => "uint8_t".into(),
+            CType::UInt16 => "uint16_t".into(),
+            CType::UInt32 => "uint32_t".into(),
+            CType::UInt64 => "uint64_t".into(),
+            CType::CInt => "int".into(),
+            CType::CUInt => "unsigned int".into(),
             CType::Str => "const char*".into(),
             CType::Union(name) => name.clone(),
             CType::Struct(name) => name.clone(),
@@ -35,7 +53,16 @@ impl CType {
 
     pub fn c_default_value(&self) -> String {
         match self {
-            CType::Int64 => "0".into(),
+            CType::Int64
+            | CType::Int8
+            | CType::Int16
+            | CType::Int32
+            | CType::UInt8
+            | CType::UInt16
+            | CType::UInt32
+            | CType::UInt64
+            | CType::CInt
+            | CType::CUInt => "0".into(),
             CType::Str => "NULL".into(),
             CType::Union(name) | CType::Struct(name) => format!("({}){{0}}", name),
         }
@@ -205,9 +232,18 @@ pub fn constraint_to_ctype(
     struct_names: &HashSet<String>,
 ) -> Result<CType, Diagnostic> {
     match t {
-        Term::Builtin(name) if *name == "int" || *name == "bool" || *name == BUILTIN_UNIT => {
+        Term::Builtin(name) if *name == "int" || *name == "i64" || *name == "bool" || *name == BUILTIN_UNIT => {
             Ok(CType::Int64)
         }
+        Term::Builtin(name) if *name == "i8" => Ok(CType::Int8),
+        Term::Builtin(name) if *name == "i16" => Ok(CType::Int16),
+        Term::Builtin(name) if *name == "i32" => Ok(CType::Int32),
+        Term::Builtin(name) if *name == "u8" => Ok(CType::UInt8),
+        Term::Builtin(name) if *name == "u16" => Ok(CType::UInt16),
+        Term::Builtin(name) if *name == "u32" => Ok(CType::UInt32),
+        Term::Builtin(name) if *name == "u64" => Ok(CType::UInt64),
+        Term::Builtin(name) if *name == "c_int" => Ok(CType::CInt),
+        Term::Builtin(name) if *name == "c_uint" => Ok(CType::CUInt),
         Term::Builtin(name) if *name == "str" => Ok(CType::Str),
         Term::Builtin(name) | Term::Global(name) if struct_names.contains(&name.to_string()) => {
             Ok(CType::Struct(name.to_string()))

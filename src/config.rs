@@ -11,6 +11,16 @@ pub const UNIVERSE_PROOF: &str = "proof";
 // ── Builtin type names (also used as keywords / constraints) ──
 
 pub const BUILTIN_INT: &str = "int";
+pub const BUILTIN_I8: &str = "i8";
+pub const BUILTIN_I16: &str = "i16";
+pub const BUILTIN_I32: &str = "i32";
+pub const BUILTIN_I64: &str = "i64";
+pub const BUILTIN_U8: &str = "u8";
+pub const BUILTIN_U16: &str = "u16";
+pub const BUILTIN_U32: &str = "u32";
+pub const BUILTIN_U64: &str = "u64";
+pub const BUILTIN_C_INT: &str = "c_int";
+pub const BUILTIN_C_UINT: &str = "c_uint";
 pub const BUILTIN_BOOL: &str = "bool";
 pub const BUILTIN_STR: &str = "str";
 pub const BUILTIN_IO: &str = "IO";

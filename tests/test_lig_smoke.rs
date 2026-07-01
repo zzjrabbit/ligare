@@ -74,6 +74,65 @@ fn ffi_fixture_compiles_and_runs_with_expected_output() {
 }
 
 #[test]
+fn bare_top_level_expression_prints_from_generated_executable() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str("\"hello world\"\n")
+        .expect("bare expression should pass compile pipeline collection");
+    let codegen = compiler.codegen_input();
+    let generated = emit_c(
+        codegen.tops,
+        codegen.raw_defs,
+        codegen.fun_sigs,
+        codegen.union_types,
+        codegen.struct_types,
+    )
+    .expect("bare expression should emit final C");
+    assert!(generated.contains("printf(\"%s\\n\""), "{generated}");
+    match compile_and_run_c(&generated) {
+        Ok(stdout) => assert_eq!(stdout, "hello world\n"),
+        Err(CompileError::CompilerNotFound) => {
+            eprintln!("skipping native runtime output test: C compiler not found")
+        }
+        Err(err) => panic!("native runtime output test failed: {err}"),
+    }
+}
+
+#[test]
+fn ffi_puts_main_prints_from_generated_executable() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str(
+            "extern def puts (s : str) : IO c_int\n\
+             def main : IO c_int := unsafe { puts \"hello world\" }\n",
+        )
+        .expect("puts main should pass compile pipeline collection");
+    let codegen = compiler.codegen_input();
+    let generated = emit_c(
+        codegen.tops,
+        codegen.raw_defs,
+        codegen.fun_sigs,
+        codegen.union_types,
+        codegen.struct_types,
+    )
+    .expect("puts main should emit final C");
+    assert!(generated.contains("extern int puts(const char*);"), "{generated}");
+    assert!(
+        !generated.contains("const int main"),
+        "Ligare main must not be emitted as a global const:\n{generated}"
+    );
+    match compile_and_run_c(&generated) {
+        Ok(stdout) => assert_eq!(stdout, "hello world\n"),
+        Err(CompileError::CompilerNotFound) => {
+            eprintln!("skipping native puts main test: C compiler not found")
+        }
+        Err(err) => panic!("native puts main test failed: {err}\nC:\n{generated}"),
+    }
+}
+
+#[test]
 fn sdiv_refinement_parameter_checks_from_source() {
     process_ok(
         "def sdiv (a : int) (b : int where (x => x /= 0)) := a / b\n\

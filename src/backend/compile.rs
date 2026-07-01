@@ -4,6 +4,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static TEMP_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Errors that can occur during compilation.
 #[derive(Debug)]
@@ -115,15 +118,14 @@ fn resolve_output(output_path: &Path) -> Result<PathBuf, std::io::Error> {
 fn temp_file(ext: &str) -> Result<PathBuf, CompileError> {
     let mut dir = std::env::temp_dir();
     let pid = std::process::id();
-    let mut counter: u32 = 0;
     loop {
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!("ligare_{pid}_{counter}.{ext}");
         let path = dir.join(&name);
         if !path.exists() {
             return Ok(path);
         }
-        counter = counter.wrapping_add(1);
-        if counter == 0 {
+        if counter == u32::MAX {
             dir = std::env::current_dir().map_err(CompileError::Io)?;
         }
     }

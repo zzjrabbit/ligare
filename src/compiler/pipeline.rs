@@ -199,10 +199,15 @@ impl<'bump> Compiler<'bump> {
                     let erased = eraser.erase(desugared);
                     Ok(Some(TopLevel::TLDef(name, params, m_ret, erased, span)))
                 }
-                TopLevel::TLEval(term, span) | TopLevel::TLExpr(term, span) => {
+                TopLevel::TLEval(term, span) => {
                     let desugared = self.checker.desugar_with_context(term)?;
                     let resolved = self.subst_top_level(desugared);
                     Ok(Some(TopLevel::TLEval(eraser.erase(resolved), span)))
+                }
+                TopLevel::TLExpr(term, span) => {
+                    let desugared = self.checker.desugar_with_context(term)?;
+                    let resolved = self.subst_top_level(desugared);
+                    Ok(Some(TopLevel::TLExpr(eraser.erase(resolved), span)))
                 }
                 TopLevel::TLTheorem(name, _, body, span) => {
                     let resolved_body = self.try_resolve_all(body)?;

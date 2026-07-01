@@ -183,7 +183,16 @@ impl<'a> CEmitter<'a> {
     fn emit_printf(&self, out: &mut String, expr: &str, ctype: &CType) {
         match ctype {
             CType::Str => out.push_str(&format!("    printf(\"%s\\n\", {});\n", expr)),
-            CType::Int64 => {
+            CType::Int64
+            | CType::Int8
+            | CType::Int16
+            | CType::Int32
+            | CType::UInt8
+            | CType::UInt16
+            | CType::UInt32
+            | CType::UInt64
+            | CType::CInt
+            | CType::CUInt => {
                 out.push_str(&format!("    printf(\"%ld\\n\", (int64_t)({}));\n", expr))
             }
             CType::Union(_) => out.push_str(&format!("    printf(\"%d\\n\", ({}).tag);\n", expr)),
@@ -253,6 +262,7 @@ impl<'a> CEmitter<'a> {
             if let TopLevel::TLDef(name, params, _m_ret, body, _) = top
                 && params.is_empty()
                 && self.name_resolver.count_lams(body) == 0
+                && *name != "main"
             {
                 out.push_str(&self.emit_def(name, params, body)?);
                 out.push('\n');
@@ -267,7 +277,9 @@ impl<'a> CEmitter<'a> {
 
         for raw_def in raw_defs {
             if let TopLevel::TLDef(name, params, _m_ret, body, _) = raw_def {
-                if params.is_empty() && self.name_resolver.count_lams(body) == 0 {
+                if *name == "main"
+                    || params.is_empty() && self.name_resolver.count_lams(body) == 0
+                {
                     continue;
                 }
                 if called_names.contains(*name) {
@@ -279,6 +291,27 @@ impl<'a> CEmitter<'a> {
 
         out.push_str("int main(void) {\n");
         let mut match_counter: u32 = 0;
+        if let Some(main_body) = self.runtime_main_body(tops) {
+            let mut ctx = EmitCtx::new();
+            let value = self.expr_emitter.emit_expr(
+                main_body,
+                &mut ctx,
+                self.type_analyzer.union_map(),
+                self.type_analyzer.struct_map(),
+            )?;
+            match value.expr {
+                CExpr::Match(plan) => {
+                    let block = self.match_emitter.emit(
+                        &plan,
+                        match_counter,
+                        self.type_analyzer.union_map(),
+                    );
+                    match_counter += 1;
+                    out.push_str(&block);
+                }
+                CExpr::Code(code) => out.push_str(&format!("    (void)({});\n", code.as_str())),
+            }
+        }
         for term in outputs {
             let mut ctx = EmitCtx::new();
             let value = self.expr_emitter.emit_expr(
@@ -304,6 +337,20 @@ impl<'a> CEmitter<'a> {
         }
         out.push_str("    return 0;\n}\n");
         Ok(out)
+    }
+
+    fn runtime_main_body<'t>(&self, tops: &'t [TopLevel<'_>]) -> Option<&'t Term<'t>> {
+        tops.iter().find_map(|top| {
+            if let TopLevel::TLDef(name, params, _ret, body, _) = top
+                && *name == "main"
+                && params.is_empty()
+                && self.name_resolver.count_lams(body) == 0
+            {
+                Some(*body)
+            } else {
+                None
+            }
+        })
     }
 }
 
