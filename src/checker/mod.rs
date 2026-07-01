@@ -33,6 +33,10 @@ pub struct TypeChecker<'bump> {
     pub(crate) union_table: Vec<(Name<'bump>, &'bump Term<'bump>, &'bump [Name<'bump>])>,
     /// Registry of struct definitions: maps struct name → (StructDef term, param_names)
     pub(crate) struct_table: Vec<(Name<'bump>, &'bump Term<'bump>, &'bump [Name<'bump>])>,
+    /// External C function signatures.
+    pub(crate) extern_table: Vec<(Name<'bump>, &'bump Term<'bump>)>,
+    /// Whether the current check is inside an explicit unsafe expression.
+    pub(crate) unsafe_depth: usize,
 }
 
 impl<'bump> TypeChecker<'bump> {
@@ -44,6 +48,8 @@ impl<'bump> TypeChecker<'bump> {
             table: empty_table(),
             union_table: Vec::new(),
             struct_table: Vec::new(),
+            extern_table: Vec::new(),
+            unsafe_depth: 0,
         }
     }
 
@@ -83,6 +89,18 @@ impl<'bump> TypeChecker<'bump> {
         type_params: &'bump [Name<'bump>],
     ) {
         self.struct_table.insert(0, (name, def, type_params));
+    }
+
+    /// Add an external C function signature.
+    pub fn add_extern(&mut self, name: Name<'bump>, signature: &'bump Term<'bump>) {
+        self.extern_table.insert(0, (name, signature));
+    }
+
+    pub(crate) fn lookup_extern(&self, name: &str) -> Option<&'bump Term<'bump>> {
+        self.extern_table
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, sig)| *sig)
     }
 
     /// Look up a variant constructor name → (union_name, variant_index, field_specs).
@@ -186,6 +204,11 @@ impl<'bump> TypeChecker<'bump> {
     ) -> Result<(), Diagnostic> {
         let desugared = self.desugar_with_context(term)?;
         match desugared {
+            Term::Unsafe(inner) => {
+                let mut checker = self.clone_for_unsafe();
+                checker.unsafe_depth += 1;
+                checker.check(ctx, inner, constraint)
+            }
             Term::Var(i) => self.check_var(ctx, *i, constraint),
             Term::Annot(t, c) => {
                 if let (Term::Pi(..), Term::Pi(..)) = (c, constraint) {
@@ -275,6 +298,15 @@ impl<'bump> TypeChecker<'bump> {
             // refinement (Nat).  If neither, check if it's a variant constructor
             // or a struct constructor / projector.
             Term::Builtin(name) | Term::Global(name) => {
+                if self.checker_extern_requires_unsafe(name) {
+                    return Err(Diagnostic::new(format!(
+                        "call to external function `{}` requires an unsafe context",
+                        name
+                    )));
+                }
+                if let Some(sig) = self.lookup_extern(name) {
+                    return self.check_domain_match(sig, constraint);
+                }
                 if self.builtins.checker(name).is_some()
                     || lookup_refine(name, &self.table).is_some()
                 {
@@ -317,6 +349,10 @@ impl<'bump> TypeChecker<'bump> {
         self.lookup_struct(struct_name).is_some()
     }
 
+    fn checker_extern_requires_unsafe(&self, name: &str) -> bool {
+        self.lookup_extern(name).is_some() && self.unsafe_depth == 0
+    }
+
     /// Create a temporary checker with a different table (for sub-checks).
     pub(crate) fn with_table(
         arena: &'bump TermArena<'bump>,
@@ -329,6 +365,21 @@ impl<'bump> TypeChecker<'bump> {
             table: table.clone(),
             union_table: Vec::new(),
             struct_table: Vec::new(),
+            extern_table: Vec::new(),
+            unsafe_depth: 0,
+        }
+    }
+
+    fn clone_for_unsafe(&self) -> Self {
+        Self {
+            arena: self.arena,
+            evaluator: WhnfEvaluator::new(self.arena),
+            builtins: self.builtins.clone(),
+            table: self.table.clone(),
+            union_table: self.union_table.clone(),
+            struct_table: self.struct_table.clone(),
+            extern_table: self.extern_table.clone(),
+            unsafe_depth: self.unsafe_depth,
         }
     }
 }
@@ -348,6 +399,8 @@ pub fn check<'bump>(
         table: table.clone(),
         union_table: Vec::new(),
         struct_table: Vec::new(),
+        extern_table: Vec::new(),
+        unsafe_depth: 0,
     };
     checker.check(ctx, term, constraint)
 }

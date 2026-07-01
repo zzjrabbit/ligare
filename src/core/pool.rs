@@ -202,6 +202,7 @@ impl<'bump> TermArena<'bump> {
                     .collect();
                 self.do_(self.alloc_slice(&mapped))
             }
+            Term::Unsafe(inner) => self.unsafe_(self.map_mut(inner, f)),
             Term::StructDef(name, fields) => {
                 let mf: Vec<_> = fields
                     .iter()
@@ -395,6 +396,10 @@ impl<'bump> TermArena<'bump> {
 
     pub fn do_(&self, stmts: &'bump [DoStmt<'bump>]) -> &'bump Term<'bump> {
         self.alloc(Term::Do(stmts))
+    }
+
+    pub fn unsafe_(&self, inner: &'bump Term<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::Unsafe(inner))
     }
 
     pub fn struct_def(

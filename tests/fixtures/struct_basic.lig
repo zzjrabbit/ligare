@@ -16,7 +16,7 @@ def origin : Point := Point.mk 0 0
 #check Point.y origin : int
 
 -- Show projection result
-#show Point.x (Point.mk 7 8)
+#eval Point.x (Point.mk 7 8)
 
 -- Function taking struct param
 def get_x (p : Point) : int := Point.x p
@@ -29,7 +29,7 @@ def Person : prop := struct
 
 def alice : Person := Person.mk "Alice" 30
 #check Person.name alice : str
-#show Person.name alice
+#eval Person.name alice
 
 -- Struct with bool
 def Flag : prop := struct

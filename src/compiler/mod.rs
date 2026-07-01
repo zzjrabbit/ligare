@@ -247,6 +247,9 @@ impl<'bump> Compiler<'bump> {
             TopLevel::TLDef(name, params, m_ret, body, span) => {
                 self.process_def(name, params, m_ret, body, span)?;
             }
+            TopLevel::TLExternDef(name, params, ret, span) => {
+                self.process_extern_def(name, params, ret, span)?;
+            }
             TopLevel::TLCheck(term, constraint, span) => {
                 self.process_check(term, constraint, span)?;
             }
@@ -257,8 +260,8 @@ impl<'bump> Compiler<'bump> {
                 self.process_top_level((*inner).clone())?;
             }
             TopLevel::TLUse(..) => {}
-            TopLevel::TLShow(term, span) => {
-                self.process_eval_like(term, span, "show")?;
+            TopLevel::TLEval(term, span) => {
+                self.process_eval_like(term, span, "eval")?;
             }
             TopLevel::TLExpr(term, span) => {
                 self.process_eval_like(term, span, "eval")?;
@@ -308,6 +311,45 @@ impl<'bump> Compiler<'bump> {
             println!("[defined] {}", name);
         }
         self.env.insert(name, body);
+        Ok(())
+    }
+
+    fn process_extern_def(
+        &mut self,
+        name: Name<'bump>,
+        params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+        ret: &'bump Term<'bump>,
+        span: std::ops::Range<usize>,
+    ) -> Result<(), Diagnostic> {
+        for (pname, constraint) in params {
+            if constraint.is_none() {
+                return Err(Diagnostic::with_span(
+                    format!("extern parameter `{pname}` requires an explicit constraint"),
+                    span,
+                ));
+            }
+        }
+        let names: Vec<_> = params.iter().rev().map(|(pn, _)| *pn).collect();
+        let ret = self.checker.desugar_with_names_context(ret, &names)?;
+        let signature =
+            params
+                .iter()
+                .enumerate()
+                .rev()
+                .try_fold(ret, |cod, (idx, &(pn, mc))| {
+                    let dom_env: Vec<_> = params[..idx].iter().rev().map(|(n, _)| *n).collect();
+                    let dom = self
+                        .checker
+                        .desugar_with_names_context(mc.expect("checked above"), &dom_env)?;
+                    Ok::<_, Diagnostic>(self.arena.pi(pn, dom, cod))
+                })?;
+        let symbol = self.arena.global(name);
+        let typed_symbol = self.arena.annot(symbol, signature);
+        self.checker.add_extern(name, signature);
+        self.env.insert(name, typed_symbol);
+        if !self.quiet {
+            println!("[extern] {}", name);
+        }
         Ok(())
     }
 
@@ -494,6 +536,7 @@ impl<'bump> Compiler<'bump> {
     fn contains_do(term: &Term<'_>) -> bool {
         match term {
             Term::Do(_) => true,
+            Term::Unsafe(inner) => Self::contains_do(inner),
             Term::App(f, a) => Self::contains_do(f) || Self::contains_do(a),
             Term::NamedLam(_, body) | Term::Lam(body) => Self::contains_do(body),
             Term::Pi(_, a, b) => Self::contains_do(a) || Self::contains_do(b),

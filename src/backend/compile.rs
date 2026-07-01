@@ -14,6 +14,10 @@ pub enum CompileError {
         status: std::process::ExitStatus,
         stderr: String,
     },
+    RunFailed {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
 }
 
 impl std::fmt::Display for CompileError {
@@ -23,6 +27,9 @@ impl std::fmt::Display for CompileError {
             CompileError::CompilerNotFound => write!(f, "compiler not found in PATH"),
             CompileError::CompileFailed { status, stderr } => {
                 write!(f, "compilation failed ({}): {}", status, stderr)
+            }
+            CompileError::RunFailed { status, stderr } => {
+                write!(f, "eval execution failed ({}): {}", status, stderr)
             }
         }
     }
@@ -69,6 +76,25 @@ pub fn compile_c(c_source: &str, output_path: &Path) -> Result<PathBuf, CompileE
     let actual = find_output(&output_abs);
     print_diag(&status.stdout);
     Ok(actual)
+}
+
+/// Compile C source into a temporary executable, run it, and return stdout.
+pub fn compile_and_run_c(c_source: &str) -> Result<String, CompileError> {
+    let exe = temp_file("eval")?;
+    let _guard = TempGuard(exe.clone());
+    let actual = compile_c(c_source, &exe)?;
+    let output = Command::new(&actual).output().map_err(CompileError::Io)?;
+    if !output.status.success() {
+        return Err(CompileError::RunFailed {
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        eprintln!("{}", stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 // ── helpers ──

@@ -4,7 +4,7 @@
 //! compiler pipeline without changing implementation behavior.
 
 use bumpalo::Bump;
-use ligare::backend::c::emit_c;
+use ligare::backend::c::{emit_c, emit_eval_c};
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
 use ligare::front::parser::parse_program;
@@ -54,6 +54,23 @@ fn collect_c(source: &str) -> String {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn collect_eval_c(source: &str) -> String {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str(source)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    emit_eval_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap()
 }
 
 // Parser nesting and boundary cases.
@@ -174,14 +191,14 @@ fn nested_destructuring_uses_inner_projection() {
     assert_process_ok(
         "def Point : prop := struct\n  x : int\n  y : int\n\
          def Segment : prop := struct\n  start : Point\n  end : Point\n\
-         #show let Segment{start, end} := Segment.mk (Point.mk 1 2) (Point.mk 3 4) in Point.x start + Point.y end\n",
+         #eval let Segment{start, end} := Segment.mk (Point.mk 1 2) (Point.mk 3 4) in Point.x start + Point.y end\n",
     );
 }
 
 #[test]
 fn destructuring_rejects_missing_field() {
     assert_process_err(
-        "def Point : prop := struct\n  x : int\n  y : int\n#show let Point{x, z} := Point.mk 1 2 in x\n",
+        "def Point : prop := struct\n  x : int\n  y : int\n#eval let Point{x, z} := Point.mk 1 2 in x\n",
         "field z is not part of Point",
     );
 }
@@ -318,25 +335,25 @@ fn generic_union_nested_instance_checks() {
 
 #[test]
 fn codegen_nested_structs_include_referenced_types_and_fields() {
-    let c = collect_c(
-        "def Point : prop := struct\n  x : int\n  y : int\n\
+    let source = "def Point : prop := struct\n  x : int\n  y : int\n\
          def Segment : prop := struct\n  start : Point\n  end : Point\n\
-         def seg : Segment := Segment.mk (Point.mk 1 2) (Point.mk 3 4)\n#show Point.x (Segment.start seg)\n",
-    );
+         def seg : Segment := Segment.mk (Point.mk 1 2) (Point.mk 3 4)\n#eval Point.x (Segment.start seg)\n";
+    let c = collect_c(source);
+    let eval_c = collect_eval_c(source);
     assert!(c.contains("typedef struct Point"), "{c}");
     assert!(c.contains("typedef struct Segment"), "{c}");
     assert!(c.contains("Point start;"), "{c}");
     assert!(c.contains("Point end;"), "{c}");
-    assert!(c.contains(".start"), "{c}");
-    assert!(c.contains(".x"), "{c}");
+    assert!(eval_c.contains(".start"), "{eval_c}");
+    assert!(eval_c.contains(".x"), "{eval_c}");
 }
 
 #[test]
 fn codegen_nested_union_match_uses_multiple_switches() {
-    let c = collect_c(
+    let c = collect_eval_c(
         "def Option : prop := union\n  | None\n  | Some of (val : int)\n\
          def Outer : prop := union\n  | Empty\n  | Wrapped of (opt : Option)\n\
-         #show match Wrapped (Some 9) with | Empty => 0 | Wrapped opt => match opt with | None => -1 | Some x => x\n",
+         #eval match Wrapped (Some 9) with | Empty => 0 | Wrapped opt => match opt with | None => -1 | Some x => x\n",
     );
     let switch_count = c.matches("switch").count();
     assert!(
@@ -352,11 +369,13 @@ fn codegen_wide_struct_contains_all_fields() {
         .map(|i| format!("  f{i} : int\n"))
         .collect::<String>();
     let args = (0..12).map(|i| i.to_string()).collect::<Vec<_>>().join(" ");
-    let c = collect_c(&format!(
-        "def Wide : prop := struct\n{fields}def w : Wide := Wide.mk {args}\n#show Wide.f11 w\n"
-    ));
+    let source = format!(
+        "def Wide : prop := struct\n{fields}def w : Wide := Wide.mk {args}\n#eval Wide.f11 w\n"
+    );
+    let c = collect_c(&source);
+    let eval_c = collect_eval_c(&source);
     for i in 0..12 {
         assert!(c.contains(&format!("int64_t f{i};")), "missing f{i}:\n{c}");
     }
-    assert!(c.contains(".f11"), "{c}");
+    assert!(eval_c.contains(".f11"), "{eval_c}");
 }

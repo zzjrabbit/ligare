@@ -1,7 +1,7 @@
 //! Integration tests for struct types (product types) and field projection.
 
 use bumpalo::Bump;
-use ligare::backend::c::emit_c;
+use ligare::backend::c::{emit_c, emit_eval_c};
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
 
@@ -163,7 +163,7 @@ fn struct_second_field_projection() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-        "def Point : prop := struct\n  x : int\n  y : int\n#show Point.y (Point.mk 1 42)\n",
+        "def Point : prop := struct\n  x : int\n  y : int\n#eval Point.y (Point.mk 1 42)\n",
     );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
@@ -185,7 +185,7 @@ fn struct_show_construction() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-        "def Point : prop := struct\n  x : int\n  y : int\n#show Point.mk 10 20\n",
+        "def Point : prop := struct\n  x : int\n  y : int\n#eval Point.mk 10 20\n",
     );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
@@ -195,7 +195,7 @@ fn struct_show_projection() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-        "def Point : prop := struct\n  x : int\n  y : int\n#show Point.x (Point.mk 7 8)\n",
+        "def Point : prop := struct\n  x : int\n  y : int\n#eval Point.x (Point.mk 7 8)\n",
     );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
@@ -205,7 +205,7 @@ fn struct_named_value_projection() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-        "def Point : prop := struct\n  x : int\n  y : int\ndef p : Point := Point.mk 5 6\n#show Point.x p\n",
+        "def Point : prop := struct\n  x : int\n  y : int\ndef p : Point := Point.mk 5 6\n#eval Point.x p\n",
     );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
@@ -259,7 +259,7 @@ fn struct_field_comparison() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-        "def Point : prop := struct\n  x : int\n  y : int\ndef origin : Point := Point.mk 0 0\n#show Point.x origin == 0\n",
+        "def Point : prop := struct\n  x : int\n  y : int\ndef origin : Point := Point.mk 0 0\n#eval Point.x origin == 0\n",
     );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
@@ -297,7 +297,7 @@ fn codegen_struct_construction() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Point : prop := struct\n  x : int\n  y : int\ndef p : Point := Point.mk 3 4\n#show p\n",
+            "def Point : prop := struct\n  x : int\n  y : int\ndef p : Point := Point.mk 3 4\n#eval p\n",
         )
         .unwrap();
     let c = emit_c(
@@ -317,17 +317,18 @@ fn codegen_struct_projection() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Point : prop := struct\n  x : int\n  y : int\n#show Point.x (Point.mk 7 8)\n",
+            "def Point : prop := struct\n  x : int\n  y : int\n#eval Point.x (Point.mk 7 8)\n",
         )
         .unwrap();
-    let c = emit_c(
+    let c = emit_eval_c(
         compiler.tops(),
         compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
     )
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains(".x"), "missing field name .x in codegen:\n{c}");
 }
 
@@ -337,17 +338,18 @@ fn codegen_struct_projection_uses_real_field_name() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Point : prop := struct\n  x : int\n  y : int\n#show Point.y (Point.mk 1 42)\n",
+            "def Point : prop := struct\n  x : int\n  y : int\n#eval Point.y (Point.mk 1 42)\n",
         )
         .unwrap();
-    let c = emit_c(
+    let c = emit_eval_c(
         compiler.tops(),
         compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
     )
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains(".y"), "missing real field name .y:\n{c}");
     assert!(
         !c.contains("_f"),
@@ -477,7 +479,7 @@ fn let_destruct_basic() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-            "def Point : prop := struct\n  x : int\n  y : int\n#show let Point{x, y} := Point.mk 3 4 in x + y\n",
+            "def Point : prop := struct\n  x : int\n  y : int\n#eval let Point{x, y} := Point.mk 3 4 in x + y\n",
         );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
@@ -487,7 +489,7 @@ fn let_destruct_single_field() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-            "def Wrapper : prop := struct\n  inner : int\n#show let Wrapper{inner} := Wrapper.mk 42 in inner\n",
+            "def Wrapper : prop := struct\n  inner : int\n#eval let Wrapper{inner} := Wrapper.mk 42 in inner\n",
         );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
@@ -497,7 +499,7 @@ fn let_destruct_named_value() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-            "def Point : prop := struct\n  x : int\n  y : int\ndef p : Point := Point.mk 10 20\n#show let Point{x, y} := p in x * y\n",
+            "def Point : prop := struct\n  x : int\n  y : int\ndef p : Point := Point.mk 10 20\n#eval let Point{x, y} := p in x * y\n",
         );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
@@ -507,7 +509,7 @@ fn let_destruct_three_fields() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     let result = compiler.process_file_str(
-            "def Triple : prop := struct\n  a : int\n  b : int\n  c : int\n#show let Triple{a, b, c} := Triple.mk 1 2 3 in a + b + c\n",
+            "def Triple : prop := struct\n  a : int\n  b : int\n  c : int\n#eval let Triple{a, b, c} := Triple.mk 1 2 3 in a + b + c\n",
         );
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }

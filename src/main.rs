@@ -4,8 +4,8 @@ use std::process;
 use bumpalo::Bump;
 use clap::Parser;
 
-use ligare::backend::c::emit_c;
-use ligare::backend::compile::compile_c;
+use ligare::backend::c::{emit_c, emit_eval_c};
+use ligare::backend::compile::{compile_and_run_c, compile_c};
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
 
@@ -62,6 +62,31 @@ fn run_codegen(cli: &Cli, bump: &Bump, arena: &TermArena<'_>) {
     }
 
     let codegen = compiler.codegen_input();
+    if cli.output.is_some() {
+        let eval_source = match emit_eval_c(
+            codegen.tops,
+            codegen.raw_defs,
+            codegen.fun_sigs,
+            codegen.union_types,
+            codegen.struct_types,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Eval code generation error: {e}");
+                process::exit(1);
+            }
+        };
+        if let Some(eval_source) = eval_source {
+            match compile_and_run_c(&eval_source) {
+                Ok(stdout) => print!("{stdout}"),
+                Err(e) => {
+                    eprintln!("Eval compilation error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+    }
+
     let c_source = match emit_c(
         codegen.tops,
         codegen.raw_defs,

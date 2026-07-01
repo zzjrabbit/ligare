@@ -17,6 +17,6 @@ def to_int (c : Color) : int :=
   | Blue  => 3
 
 -- Test zero-arg variants
-#show describe Red
-#show describe Green
-#show to_int Blue
+#eval describe Red
+#eval describe Green
+#eval to_int Blue

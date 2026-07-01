@@ -147,6 +147,7 @@ impl<'a> ExpressionEmitter<'a> {
             Term::App(_, _) => self.emit_app(term, ctx, union_map, struct_map),
 
             Term::Annot(inner, _) => self.emit_expr(inner, ctx, union_map, struct_map),
+            Term::Unsafe(inner) => self.emit_expr(inner, ctx, union_map, struct_map),
 
             Term::Builtin(name) | Term::Global(name) => {
                 if *name == BUILTIN_UNIT {
@@ -162,7 +163,14 @@ impl<'a> ExpressionEmitter<'a> {
                             "Cannot determine C type for `{name}`; missing function signature"
                         ))
                     })?;
-                Ok(CValue::code(self.names.escape(name), ty))
+                let code = self
+                    .fun_sigs
+                    .iter()
+                    .find(|(n, _)| *n == *name)
+                    .filter(|(_, sig)| sig.param_types.is_empty())
+                    .map(|_| format!("{}()", self.names.escape(name)))
+                    .unwrap_or_else(|| self.names.escape(name));
+                Ok(CValue::code(code, ty))
             }
 
             Term::UnionDef(..) => Ok(CValue::code(String::new(), CType::Int64)),
@@ -534,6 +542,10 @@ impl<'a> ExpressionEmitter<'a> {
             _ => {
                 let raw_function = match term {
                     Term::Builtin(name) | Term::Global(name) => Some((*name).to_string()),
+                    Term::Annot(inner, _) => match inner {
+                        Term::Builtin(name) | Term::Global(name) => Some((*name).to_string()),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 let value = self.emit_expr(term, ctx, union_map, struct_map)?;

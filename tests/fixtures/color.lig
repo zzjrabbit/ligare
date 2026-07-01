@@ -9,6 +9,6 @@ def to_int (c : Color) : int :=
   | Green => 2
   | Blue  => 3
 
-#show to_int Red
-#show to_int Green
-#show to_int Blue
+#eval to_int Red
+#eval to_int Green
+#eval to_int Blue

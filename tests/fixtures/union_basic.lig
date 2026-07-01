@@ -14,16 +14,16 @@ def Option : prop := union
 #check None : Option
 
 -- Match on concrete variant
-#show match Red with
+#eval match Red with
   | Red   => 42
   | Green => 0
   | Blue  => 0
 
 -- Match on Option
-#show match Some 5 with
+#eval match Some 5 with
   | None   => -1
   | Some x => x
 
-#show match None with
+#eval match None with
   | None   => 0
   | Some x => 1

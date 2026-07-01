@@ -1,7 +1,7 @@
 //! Unit tests for IR types and C codegen edge cases.
 
 use bumpalo::Bump;
-use ligare::backend::c::emit_c;
+use ligare::backend::c::{emit_c, emit_eval_c};
 use ligare::backend::ir::{CType, FunSig, constraint_to_ctype};
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
@@ -125,7 +125,7 @@ fn codegen_match_with_str_payload() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Msg : prop := union\n  | Text of (s : str)\n  | Code of (n : int)\n#show match Text \"hi\" with | Text s => s | Code n => \"err\"\n",
+            "def Msg : prop := union\n  | Text of (s : str)\n  | Code of (n : int)\n#eval match Text \"hi\" with | Text s => s | Code n => \"err\"\n",
         )
         .unwrap();
     let c = emit_c(
@@ -147,7 +147,7 @@ fn codegen_multiple_unions() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def A : prop := union\n  | A1\n  | A2\ndef B : prop := union\n  | B1\n  | B2\ndef a : A := A1\ndef b : B := B2\n#show a\n#show b\n",
+            "def A : prop := union\n  | A1\n  | A2\ndef B : prop := union\n  | B1\n  | B2\ndef a : A := A1\ndef b : B := B2\n#eval a\n#eval b\n",
         )
         .unwrap();
     let c = emit_c(
@@ -172,7 +172,7 @@ fn codegen_function_with_match_body() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Color : prop := union\n  | Red\n  | Green\ndef f (c : Color) : int := match c with | Red => 1 | Green => 2\n#show f Red\n",
+            "def Color : prop := union\n  | Red\n  | Green\ndef f (c : Color) : int := match c with | Red => 1 | Green => 2\n#eval f Red\n",
         )
         .unwrap();
     let c = emit_c(
@@ -195,7 +195,7 @@ fn codegen_wildcard_match_no_decl() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Opt : prop := union\n  | None\n  | Some of (val : int)\n#show match Some 7 with | None => 0 | Some _ => 1\n",
+            "def Opt : prop := union\n  | None\n  | Some of (val : int)\n#eval match Some 7 with | None => 0 | Some _ => 1\n",
         )
         .unwrap();
     let c = emit_c(
@@ -221,7 +221,7 @@ fn codegen_constant_constructed_from_match() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Color : prop := union\n  | Red\n  | Green\ndef x : Color := Red\n#show x\n",
+            "def Color : prop := union\n  | Red\n  | Green\ndef x : Color := Red\n#eval x\n",
         )
         .unwrap();
     let c = emit_c(
@@ -232,8 +232,21 @@ fn codegen_constant_constructed_from_match() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    let eval_c = emit_eval_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains("const Color x"), "missing const:\n{c}");
-    assert!(c.contains("printf"), "missing printf:\n{c}");
+    assert!(
+        !c.contains("printf"),
+        "final C should not print evals:\n{c}"
+    );
+    assert!(eval_c.contains("printf"), "missing eval printf:\n{eval_c}");
 }
 
 // ── eval_with_self: recursive functions ──
@@ -360,4 +373,59 @@ fn diagnostic_display_includes_source_context() {
     assert!(rendered.contains("<str>:2:1"), "{rendered}");
     assert!(rendered.contains("#check true : int"), "{rendered}");
     assert!(rendered.contains("^"), "{rendered}");
+}
+
+#[test]
+fn codegen_extern_call_is_direct_c_call() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str(
+            "extern def c_abs (x : int) : int\n\
+             def main : int := unsafe { c_abs 7 }\n\
+             main\n",
+        )
+        .unwrap();
+    let codegen = compiler.codegen_input();
+    let c = emit_c(
+        codegen.tops,
+        codegen.raw_defs,
+        codegen.fun_sigs,
+        codegen.union_types,
+        codegen.struct_types,
+    )
+    .unwrap();
+    assert!(
+        c.contains("extern int64_t c_abs(int64_t);"),
+        "missing extern prototype:\n{c}"
+    );
+    assert!(c.contains("c_abs(7)"), "missing direct call:\n{c}");
+    assert!(
+        !c.contains("int64_t c_abs(int64_t) {"),
+        "extern should not emit a wrapper definition:\n{c}"
+    );
+}
+
+#[test]
+fn codegen_io_extern_uses_inner_c_repr() {
+    let (bump, arena) = setup();
+    let mut compiler = Compiler::new(bump, &arena);
+    compiler
+        .collect_file_str(
+            "extern def c_read : IO int\n\
+             def main : IO int := do { x <- unsafe { c_read }; x }\n\
+             main\n",
+        )
+        .unwrap();
+    let codegen = compiler.codegen_input();
+    let c = emit_c(
+        codegen.tops,
+        codegen.raw_defs,
+        codegen.fun_sigs,
+        codegen.union_types,
+        codegen.struct_types,
+    )
+    .unwrap();
+    assert!(c.contains("extern int64_t c_read();"), "{c}");
+    assert!(c.contains("c_read()"), "{c}");
 }

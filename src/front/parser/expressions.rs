@@ -33,6 +33,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             Some(Token::KwMatch) => self.parse_match_expr(),
             Some(Token::KwLet) => self.parse_let_expr(),
             Some(Token::KwDo) => self.parse_do_expr(),
+            Some(Token::KwUnsafe) => self.parse_unsafe_expr(),
             Some(Token::KwFunc) => self.parse_func_expr(),
             Some(Token::LParen) => {
                 let saved = self.pos;
@@ -277,6 +278,14 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok(self.desugar_def(name, &params, m_ret, body))
     }
 
+    fn parse_unsafe_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
+        self.expect(&Token::KwUnsafe)?;
+        self.expect(&Token::LBrace)?;
+        let inner = self.parse_expr_until(|tokens, i| matches!(tokens[i].0, Token::RBrace))?;
+        self.expect(&Token::RBrace)?;
+        Ok(self.arena.unsafe_(inner))
+    }
+
     fn parse_dep_arrow_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         self.expect(&Token::LParen)?;
         let x = self.parse_ident()?;
@@ -321,6 +330,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 | Token::Minus
                 | Token::KwAuto
                 | Token::KwDo
+                | Token::KwUnsafe
                 | Token::AndIntro
                 | Token::AndElimLeft
                 | Token::And
@@ -376,14 +386,14 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 | Token::Semi
                 | Token::KwDef
                 | Token::HashCheck
-                | Token::HashShow
+                | Token::HashEval
         )
     }
 
     pub(super) fn is_struct_field_constraint_delim(tokens: &[SpannedToken], i: usize) -> bool {
         if matches!(
             tokens[i].0,
-            Token::KwDef | Token::HashCheck | Token::HashShow | Token::ColonEq
+            Token::KwDef | Token::HashCheck | Token::HashEval | Token::ColonEq
         ) {
             return true;
         }
@@ -574,6 +584,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             Some(Token::Backslash) | Some(Token::Lambda) => self.parse_lam(),
             Some(Token::KwFun) => self.parse_fun_lam(),
             Some(Token::KwDo) => self.parse_do_expr(),
+            Some(Token::KwUnsafe) => self.parse_unsafe_expr(),
             Some(Token::Minus) => {
                 self.advance();
                 let t = self.parse_atom()?;

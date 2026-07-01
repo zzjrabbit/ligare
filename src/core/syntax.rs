@@ -162,6 +162,8 @@ pub enum Term<'bump> {
     NamedMatch(&'bump Term<'bump>, &'bump [NamedMatchBranch<'bump>]),
     /// Parser-level sequential effect block. Desugared to `Let` before checking/codegen.
     Do(&'bump [DoStmt<'bump>]),
+    /// Explicit unsafe boundary. It does not change the term's constraint or effect.
+    Unsafe(&'bump Term<'bump>),
     /// Struct type definition (in `prop`): (name, [(field_name, constraint)])
     StructDef(Name<'bump>, &'bump [(Name<'bump>, &'bump Term<'bump>)]),
     /// Struct value construction (in `data`): (struct_name, field_values in order)

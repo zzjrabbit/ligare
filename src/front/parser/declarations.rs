@@ -11,6 +11,36 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         Ok((name, params_slice, m_ret, body))
     }
 
+    pub(super) fn parse_extern_def(
+        &mut self,
+    ) -> Result<(
+        Name<'bump>,
+        &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+        &'bump Term<'bump>,
+    ), ParseError> {
+        self.expect(&Token::KwDef)?;
+        let name = self.parse_decl_ident()?;
+        let params = self.parse_many_curried_params();
+        let ret = self
+            .parse_constraint_until(|tokens, i| {
+                matches!(
+                    tokens[i].0,
+                    Token::KwDef
+                        | Token::KwExtern
+                        | Token::HashCheck
+                        | Token::HashEval
+                        | Token::KwTheorem
+                        | Token::KwPub
+                        | Token::KwUse
+                )
+            })
+            .ok_or_else(|| ParseError {
+                message: "extern def requires an explicit return constraint".into(),
+                span: self.current_span(),
+            })?;
+        Ok((name, self.arena.alloc_slice(&params), ret))
+    }
+
     pub(super) fn desugar_def(
         &self,
         _name: Name<'bump>,
@@ -183,7 +213,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 | Some((Token::Colon, _))
                 | Some((Token::KwDef, _))
                 | Some((Token::HashCheck, _))
-                | Some((Token::HashShow, _)) => break,
+                | Some((Token::HashEval, _)) => break,
                 _ => {}
             }
             let tactic = self.parse_tactic()?;

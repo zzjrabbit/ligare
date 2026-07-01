@@ -42,6 +42,7 @@ impl<'bump> Eraser<'bump> {
                 self.arena.if_then_else(ec, et, ef)
             }
             Term::Annot(inner, _) => self.erase(inner),
+            Term::Unsafe(inner) => self.erase(inner),
             Term::ByProof(Some(inner), _) => self.erase(inner),
             Term::ByProof(None, _) | Term::AutoProof => self.unit(),
             Term::App(f, a) => {

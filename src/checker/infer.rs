@@ -36,6 +36,14 @@ impl<'bump> TypeChecker<'bump> {
         a: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
     ) -> Result<(), Diagnostic> {
+        if let Some(name) = self.extern_head_name(f)?
+            && self.unsafe_depth == 0
+        {
+            return Err(diag!(
+                "call to external function `{}` requires an unsafe context",
+                name
+            ));
+        }
         // Check if f is a variant constructor
         let f_dsg = self.desugar_with_context(f)?;
         if let Term::Builtin(name) | Term::Global(name) = f_dsg {
@@ -80,6 +88,12 @@ impl<'bump> TypeChecker<'bump> {
                 let proj = self.arena.struct_proj(a, idx);
                 return self.check(ctx, proj, constraint);
             }
+            if self.lookup_extern(name).is_some() && self.unsafe_depth == 0 {
+                return Err(diag!(
+                    "call to external function `{}` requires an unsafe context",
+                    name
+                ));
+            }
         }
         if let Term::App(prim, first) = f_dsg
             && let Term::PrimOp(op) = prim
@@ -117,6 +131,24 @@ impl<'bump> TypeChecker<'bump> {
                 let f_val = self.evaluator.whnf(f_dsg)?;
                 let evald = self.evaluator.whnf(self.arena.app(f_val, a))?;
                 self.check_by_constraint(ctx, evald, constraint)
+            }
+        }
+    }
+
+    fn extern_head_name(
+        &self,
+        term: &'bump Term<'bump>,
+    ) -> Result<Option<Name<'bump>>, Diagnostic> {
+        let mut head = self.desugar_with_context(term)?;
+        loop {
+            match head {
+                Term::App(f, _) => head = f,
+                Term::Annot(inner, _) => head = inner,
+                Term::Unsafe(inner) => head = inner,
+                Term::Builtin(name) | Term::Global(name) if self.lookup_extern(name).is_some() => {
+                    return Ok(Some(*name));
+                }
+                _ => return Ok(None),
             }
         }
     }
@@ -200,6 +232,7 @@ impl<'bump> TypeChecker<'bump> {
                 let f_val = self.evaluator.whnf(f_dsg)?;
                 match f_val {
                     Term::Var(i) => Ok(ctx.lookup(*i)),
+                    Term::Builtin(name) | Term::Global(name) => Ok(self.lookup_extern(name)),
                     _ => Ok(None),
                 }
             }
@@ -353,6 +386,11 @@ impl<'bump> TypeChecker<'bump> {
             Term::StructCons(sname, _) | Term::Variant(sname, _, _) => {
                 Ok(self.arena.builtin(sname))
             }
+            Term::Unsafe(inner) => self.infer_binding_constraint(ctx, inner),
+            Term::Builtin(name) | Term::Global(name) if self.lookup_extern(name).is_some() => {
+                self.lookup_extern(name)
+                    .ok_or_else(|| diag!("missing external function signature: {}", name))
+            }
             Term::StructProj(subject, idx) => {
                 self.infer_struct_projection_constraint(ctx, subject, *idx)
             }
@@ -396,6 +434,10 @@ impl<'bump> TypeChecker<'bump> {
             },
             Term::Builtin(name) | Term::Global(name) if self.is_struct_projector_name(name) => {
                 Err(diag!("unknown struct field projector: {}", name))
+            }
+            Term::Builtin(name) | Term::Global(name) if self.lookup_extern(name).is_some() => {
+                self.lookup_extern(name)
+                    .ok_or_else(|| diag!("missing external function signature: {}", name))
             }
             _ => match self.infer_pi_constraint(ctx, f)? {
                 Some(ty) => match self.evaluator.whnf(ty)? {

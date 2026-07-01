@@ -105,6 +105,33 @@ impl<'bump> Compiler<'bump> {
         }
 
         for top in tops {
+            if let TopLevel::TLExternDef(name, params, ret, span) = top {
+                let names: Vec<_> = params.iter().rev().map(|(pn, _)| *pn).collect();
+                let core_params = params
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (pn, mc))| {
+                        let dom_env: Vec<_> = params[..idx].iter().rev().map(|(n, _)| *n).collect();
+                        Ok((
+                            *pn,
+                            mc.map(|t| self.checker.desugar_with_names_context(t, &dom_env))
+                                .map(|r| r.map(|t| self.normalize_codegen_constraint(t)))
+                                .transpose()?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                let core_ret = self
+                    .checker
+                    .desugar_with_names_context(ret, &names)
+                    .map(|t| self.normalize_codegen_constraint(t))?;
+                state.raw_defs.push(TopLevel::TLExternDef(
+                    name,
+                    self.arena.alloc_slice(&core_params),
+                    core_ret,
+                    span.clone(),
+                ));
+                continue;
+            }
             if let TopLevel::TLDef(name, params, m_ret, body_term, span) = top {
                 if matches!(body_term, Term::UnionDef(..) | Term::StructDef(..)) {
                     continue;
@@ -172,16 +199,17 @@ impl<'bump> Compiler<'bump> {
                     let erased = eraser.erase(desugared);
                     Ok(Some(TopLevel::TLDef(name, params, m_ret, erased, span)))
                 }
-                TopLevel::TLShow(term, span) | TopLevel::TLExpr(term, span) => {
+                TopLevel::TLEval(term, span) | TopLevel::TLExpr(term, span) => {
                     let desugared = self.checker.desugar_with_context(term)?;
                     let resolved = self.subst_top_level(desugared);
-                    Ok(Some(TopLevel::TLShow(eraser.erase(resolved), span)))
+                    Ok(Some(TopLevel::TLEval(eraser.erase(resolved), span)))
                 }
                 TopLevel::TLTheorem(name, _, body, span) => {
                     let resolved_body = self.try_resolve_all(body)?;
                     let erased = eraser.erase(resolved_body);
                     Ok(Some(TopLevel::TLDef(name, &[], None, erased, span)))
                 }
+                TopLevel::TLExternDef(..) => Ok(None),
                 TopLevel::TLUse(..) | TopLevel::TLPublic(_) => Ok(None),
                 TopLevel::TLCheck(_, _, _) => Ok(None),
             })
@@ -243,6 +271,7 @@ impl<'bump> Compiler<'bump> {
             Term::Annot(inner, constraint) => self
                 .arena
                 .annot(inner, self.normalize_codegen_constraint(constraint)),
+            Term::Unsafe(inner) => self.arena.unsafe_(self.normalize_codegen_constraint(inner)),
             _ => term,
         }
     }

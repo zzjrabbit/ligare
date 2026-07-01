@@ -20,12 +20,12 @@ def sum (p : Point) : int := Point.x p + Point.y p
 
 #check add p p : Point
 #check scale p 2 : Point
-#show sum p
+#eval sum p
 
 -- Origin test
 def origin : Point := Point.mk 0 0
-#show sum origin
+#eval sum origin
 
 -- Distance comparison
-#show Point.x p > 0
-#show Point.x p == 3
+#eval Point.x p > 0
+#eval Point.x p == 3

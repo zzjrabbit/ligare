@@ -213,6 +213,12 @@ impl<'bump> Compiler<'bump> {
                 self.replace_type_param_vars_at(subject, type_args, type_param_indices, depth),
                 *idx,
             ),
+            Term::Unsafe(inner) => self.arena.unsafe_(self.replace_type_param_vars_at(
+                inner,
+                type_args,
+                type_param_indices,
+                depth,
+            )),
             Term::Named(_) | Term::NamedLam(..) | Term::NamedMatch(..) => {
                 panic!("parser-level term reached generic instantiation before desugaring")
             }

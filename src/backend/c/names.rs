@@ -184,6 +184,12 @@ impl NameResolver {
             .collect()
     }
 
+    pub fn is_extern_name<'bump>(&self, name: &str, raw_defs: &[TopLevel<'bump>]) -> bool {
+        raw_defs.iter().any(|top| {
+            matches!(top, TopLevel::TLExternDef(extern_name, ..) if *extern_name == name)
+        })
+    }
+
     /// Recursively walk a desugared term looking for global symbols that
     /// match known function definitions.
     /// nodes that match known function definitions.
@@ -238,6 +244,7 @@ impl NameResolver {
             Term::Named(_) | Term::NamedLam(..) | Term::NamedMatch(..) | Term::Do(_) => {
                 panic!("parser-level term reached C name collection before desugaring")
             }
+            Term::Unsafe(inner) => self.collect_names_in_term(inner, def_names, called),
             Term::StructCons(_, field_values) => {
                 for v in *field_values {
                     self.collect_names_in_term(v, def_names, called);

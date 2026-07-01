@@ -13,7 +13,7 @@ def is_some (o : Option) : int :=
   | None   => 0
   | Some _ => 1
 
-#show unwrap_or (Some 42) (-1)
-#show unwrap_or None 0
-#show is_some (Some 5)
-#show is_some None
+#eval unwrap_or (Some 42) (-1)
+#eval unwrap_or None 0
+#eval is_some (Some 5)
+#eval is_some None

@@ -33,9 +33,25 @@ fn emit(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
     emitter.generate(tops, tops, &[], &[]).unwrap()
 }
 
+fn emit_eval(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
+    let emitter = CEmitter::new(&[], &[], fun_sigs).unwrap();
+    emitter
+        .generate_eval(tops, tops, &[], &[])
+        .unwrap()
+        .unwrap()
+}
+
 fn emit_err(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
     let emitter = CEmitter::new(&[], &[], fun_sigs).unwrap();
     emitter.generate(tops, tops, &[], &[]).unwrap_err().message
+}
+
+fn emit_eval_err(tops: &[TopLevel<'_>], fun_sigs: &[(&str, FunSig)]) -> String {
+    let emitter = CEmitter::new(&[], &[], fun_sigs).unwrap();
+    emitter
+        .generate_eval(tops, tops, &[], &[])
+        .unwrap_err()
+        .message
 }
 
 fn emit_with_types(
@@ -51,7 +67,7 @@ fn emit_with_types(
         .unwrap()
 }
 
-fn emit_err_with_types(
+fn emit_eval_err_with_types(
     tops: &[TopLevel<'_>],
     raw_defs: &[TopLevel<'_>],
     fun_sigs: &[(&str, FunSig)],
@@ -60,7 +76,7 @@ fn emit_err_with_types(
 ) -> String {
     let emitter = CEmitter::new(struct_types, union_types, fun_sigs).unwrap();
     emitter
-        .generate(tops, raw_defs, struct_types, union_types)
+        .generate_eval(tops, raw_defs, struct_types, union_types)
         .unwrap_err()
         .message
 }
@@ -70,7 +86,7 @@ fn emit_err_with_types(
 #[test]
 fn int_literal_uses_ld() {
     let (_b, arena) = setup();
-    let c = emit(&[TopLevel::TLShow(arena.lit_int(42), 0..0)], &[]);
+    let c = emit_eval(&[TopLevel::TLEval(arena.lit_int(42), 0..0)], &[]);
     assert!(c.contains("42"));
     assert!(c.contains("%ld"));
 }
@@ -78,8 +94,8 @@ fn int_literal_uses_ld() {
 #[test]
 fn str_literal_uses_s() {
     let (_b, arena) = setup();
-    let c = emit(
-        &[TopLevel::TLShow(arena.lit_str(arena.alloc_str("hi")), 0..0)],
+    let c = emit_eval(
+        &[TopLevel::TLEval(arena.lit_str(arena.alloc_str("hi")), 0..0)],
         &[],
     );
     assert!(c.contains("\"hi\""));
@@ -89,8 +105,8 @@ fn str_literal_uses_s() {
 #[test]
 fn str_literal_is_c_escaped() {
     let (_b, arena) = setup();
-    let c = emit(
-        &[TopLevel::TLShow(
+    let c = emit_eval(
+        &[TopLevel::TLEval(
             arena.lit_str(arena.alloc_str("a\"b\\c\n")),
             0..0,
         )],
@@ -102,8 +118,8 @@ fn str_literal_is_c_escaped() {
 #[test]
 fn str_literal_control_escape_is_bounded() {
     let (_b, arena) = setup();
-    let c = emit(
-        &[TopLevel::TLShow(
+    let c = emit_eval(
+        &[TopLevel::TLEval(
             arena.lit_str(arena.alloc_str("a\u{1f}f")),
             0..0,
         )],
@@ -115,8 +131,17 @@ fn str_literal_control_escape_is_bounded() {
 #[test]
 fn bool_literal_emits_0_or_1() {
     let (_b, arena) = setup();
-    let c = emit(&[TopLevel::TLShow(arena.lit_bool(true), 0..0)], &[]);
+    let c = emit_eval(&[TopLevel::TLEval(arena.lit_bool(true), 0..0)], &[]);
     assert!(c.contains("(int64_t)(1)"));
+}
+
+#[test]
+fn final_c_ignores_eval_outputs() {
+    let (_b, arena) = setup();
+    let c = emit(&[TopLevel::TLEval(arena.lit_int(42), 0..0)], &[]);
+    assert!(c.contains("int main(void)"));
+    assert!(!c.contains("printf"));
+    assert!(!c.contains("%ld"));
 }
 
 // ── Constants ──
@@ -272,9 +297,9 @@ fn call_to_function_uses_fun_sig_return_type() {
         param_types: vec![],
         ret_type: CType::Str,
     };
-    let show = TopLevel::TLShow(arena.builtin(fn_name), 0..0);
+    let show = TopLevel::TLEval(arena.builtin(fn_name), 0..0);
     let tops = &[def, show];
-    let c = emit(tops, &[(fn_name, sig)]);
+    let c = emit_eval(tops, &[(fn_name, sig)]);
     assert!(c.contains("%s"));
     assert!(c.contains("const char* greet"));
 }
@@ -284,8 +309,8 @@ fn emit_undefined_func_call_errors() {
     let (_b, arena) = setup();
     let n = arena.alloc_str("s");
     let call = arena.app(arena.builtin(n), arena.lit_str(arena.alloc_str("hi")));
-    let tops = &[TopLevel::TLShow(call, 0..0)];
-    let err = emit_err(tops, &[]);
+    let tops = &[TopLevel::TLEval(call, 0..0)];
+    let err = emit_eval_err(tops, &[]);
     assert!(err.contains("missing function signature"));
 }
 
@@ -298,7 +323,7 @@ fn emit_let_str_printf_format() {
         arena.var(0),
         None,
     );
-    let c = emit(&[TopLevel::TLShow(term, 0..0)], &[]);
+    let c = emit_eval(&[TopLevel::TLEval(term, 0..0)], &[]);
     assert!(c.contains("%s"));
     assert!(c.contains("const char* s"));
 }
@@ -315,10 +340,10 @@ fn emit_multiple_defs_and_outputs() {
             arena.lit_str(arena.alloc_str("two")),
             0..0,
         ),
-        TopLevel::TLShow(arena.lit_int(3), 0..0),
-        TopLevel::TLShow(arena.lit_str(arena.alloc_str("four")), 0..0),
+        TopLevel::TLEval(arena.lit_int(3), 0..0),
+        TopLevel::TLEval(arena.lit_str(arena.alloc_str("four")), 0..0),
     ];
-    let c = emit(tops, &[]);
+    let c = emit_eval(tops, &[]);
     assert!(c.contains("const int64_t a = 1;"));
     assert!(c.contains("const char* b = \"two\";"));
     assert!(c.contains("%ld"));
@@ -422,8 +447,8 @@ fn unknown_union_variant_errors() {
     let (_b, arena) = setup();
     let missing_name = arena.alloc_str("Missing");
     let term = arena.variant(missing_name, 0, arena.alloc_slice(&[]));
-    let tops = &[TopLevel::TLShow(term, 0..0)];
-    let err = emit_err_with_types(tops, tops, &[], &[], &[]);
+    let tops = &[TopLevel::TLEval(term, 0..0)];
+    let err = emit_eval_err_with_types(tops, tops, &[], &[], &[]);
     assert!(err.contains("unknown union `Missing`"), "{err}");
 }
 
@@ -450,8 +475,8 @@ fn union_variant_payload_count_errors() {
         arena.bump().alloc([(nat_name, nat_udef)]);
 
     let malformed = arena.variant(nat_name, 1, arena.alloc_slice(&[]));
-    let tops = &[TopLevel::TLShow(malformed, 0..0)];
-    let err = emit_err_with_types(tops, tops, &[], union_types, &[]);
+    let tops = &[TopLevel::TLEval(malformed, 0..0)];
+    let err = emit_eval_err_with_types(tops, tops, &[], union_types, &[]);
     assert!(
         err.contains("Variant `Nat.Succ` expects 1 payload(s), got 0"),
         "{err}"
@@ -476,8 +501,8 @@ fn struct_constructor_field_count_errors() {
     let struct_types: &[(&str, &crate::core::syntax::Term)] =
         arena.bump().alloc([(pair_name, pair_def)]);
     let malformed = arena.struct_cons(pair_name, arena.alloc_slice(&[arena.lit_int(1)]));
-    let tops = &[TopLevel::TLShow(malformed, 0..0)];
-    let err = emit_err_with_types(tops, tops, &[], &[], struct_types);
+    let tops = &[TopLevel::TLEval(malformed, 0..0)];
+    let err = emit_eval_err_with_types(tops, tops, &[], &[], struct_types);
     assert!(
         err.contains("Struct `Pair` expects 2 field(s), got 1"),
         "{err}"

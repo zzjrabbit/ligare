@@ -51,6 +51,7 @@ impl<'a> SemanticQueries<'a> {
                 .and_then(|constraint| self.universe(ctx, constraint))
                 .or(Some(Universe::UData)),
             Term::Annot(t, _) => self.universe(ctx, t),
+            Term::Unsafe(inner) => self.universe(ctx, inner),
             Term::ByProof(Some(t), _) => self.universe(ctx, t),
             Term::ByProof(None, _) => Some(Universe::UProof),
             Term::Let(_, _, body, _) => self.universe(ctx, body),

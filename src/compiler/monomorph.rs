@@ -189,7 +189,7 @@ impl<'bump> Compiler<'bump> {
 
     fn rewrite_top(&self, top: TopLevel<'bump>, state: &mut MonoState<'bump>) -> TopLevel<'bump> {
         match top {
-            TopLevel::TLShow(t, s) => TopLevel::TLShow(self.rewrite_term(t, state), s),
+            TopLevel::TLEval(t, s) => TopLevel::TLEval(self.rewrite_term(t, state), s),
             TopLevel::TLExpr(t, s) => TopLevel::TLExpr(self.rewrite_term(t, state), s),
             TopLevel::TLDef(n, p, r, b, s) => {
                 if p.iter()
@@ -201,6 +201,11 @@ impl<'bump> Compiler<'bump> {
                 let ret = r.map(|t| self.rewrite_type_constraint(t, state));
                 let body = self.rewrite_term(b, state);
                 TopLevel::TLDef(n, params, ret, body, s)
+            }
+            TopLevel::TLExternDef(n, p, r, s) => {
+                let params = self.rewrite_params(p, state);
+                let ret = self.rewrite_type_constraint(r, state);
+                TopLevel::TLExternDef(n, params, ret, s)
             }
             TopLevel::TLCheck(t, c, s) => TopLevel::TLCheck(t, c, s),
             TopLevel::TLTheorem(n, p, b, s) => {
@@ -653,6 +658,10 @@ impl<'bump> Compiler<'bump> {
             {
                 let sig = FunSig::from_func(params, *ret, body, &union_names, &struct_names)?;
                 fun_sigs.push((*name, sig));
+            } else if let TopLevel::TLExternDef(name, params, ret, _) = top {
+                let sig =
+                    FunSig::from_extern(params, ret, &union_names, &struct_names)?;
+                fun_sigs.push((*name, sig));
             }
         }
         codegen.fun_sigs = fun_sigs;
@@ -671,6 +680,7 @@ impl<'bump> Compiler<'bump> {
         matches!(
             top,
             TopLevel::TLDef(_, params, _, _, _)
+                | TopLevel::TLExternDef(_, params, _, _)
                 if params
                     .iter()
                     .any(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))

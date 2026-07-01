@@ -30,6 +30,15 @@ pub trait CodeGenerator {
         struct_types: &[(&str, &Term<'_>)],
         union_types: &[(&str, &Term<'_>)],
     ) -> Result<String, Diagnostic>;
+
+    /// Generate an eval-only helper source file.
+    fn generate_eval(
+        &self,
+        tops: &[TopLevel<'_>],
+        raw_defs: &[TopLevel<'_>],
+        struct_types: &[(&str, &Term<'_>)],
+        union_types: &[(&str, &Term<'_>)],
+    ) -> Result<Option<String>, Diagnostic>;
 }
 
 /// The C code emitter — orchestrates all sub-components.
@@ -181,33 +190,65 @@ impl<'a> CEmitter<'a> {
             CType::Struct(_) => out.push_str("    printf(\"<struct>\\n\");\n"),
         }
     }
-}
 
-impl<'a> CodeGenerator for CEmitter<'a> {
-    fn generate(
+    fn collect_outputs<'t>(
+        &self,
+        tops: &'t [TopLevel<'_>],
+        include_eval: bool,
+        include_expr: bool,
+    ) -> Vec<&'t Term<'t>> {
+        let mut outputs = Vec::new();
+        for top in tops {
+            match top {
+                TopLevel::TLEval(term, _) if include_eval => outputs.push(*term),
+                TopLevel::TLExpr(term, _) if include_expr => outputs.push(*term),
+                _ => {}
+            }
+        }
+        outputs
+    }
+
+    fn generate_with_outputs(
         &self,
         tops: &[TopLevel<'_>],
         raw_defs: &[TopLevel<'_>],
         struct_types: &[(&str, &Term<'_>)],
         union_types: &[(&str, &Term<'_>)],
+        outputs: &[&Term<'_>],
     ) -> Result<String, Diagnostic> {
         let mut out =
             String::from("#include <stdio.h>\n#include <stdint.h>\n#include <stddef.h>\n\n");
 
-        // Emit type declarations via TypeAnalyzer
         self.type_analyzer
             .emit_type_declarations(&mut out, struct_types, union_types)?;
 
-        // Collect output expressions
-        let mut outputs: Vec<&Term<'_>> = Vec::new();
-        for top in tops {
-            match top {
-                TopLevel::TLShow(term, _) | TopLevel::TLExpr(term, _) => outputs.push(term),
-                _ => {}
+        for (name, sig) in self.fun_sigs {
+            if self
+                .name_resolver
+                .is_extern_name(name, raw_defs)
+            {
+                let params = sig
+                    .param_types
+                    .iter()
+                    .map(CType::c_name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "extern {} {}({});\n",
+                    sig.ret_type.c_name(),
+                    self.name_resolver.escape(name),
+                    params
+                ));
             }
         }
+        if self
+            .fun_sigs
+            .iter()
+            .any(|(name, _)| self.name_resolver.is_extern_name(name, raw_defs))
+        {
+            out.push('\n');
+        }
 
-        // Emit constants unconditionally
         for top in tops {
             if let TopLevel::TLDef(name, params, _m_ret, body, _) = top
                 && params.is_empty()
@@ -218,11 +259,10 @@ impl<'a> CodeGenerator for CEmitter<'a> {
             }
         }
 
-        // On-demand codegen for functions
         let called_names: HashSet<String> = if outputs.is_empty() {
             self.name_resolver.all_def_names(raw_defs)
         } else {
-            self.name_resolver.collect_called_names(&outputs, raw_defs)
+            self.name_resolver.collect_called_names(outputs, raw_defs)
         };
 
         for raw_def in raw_defs {
@@ -237,37 +277,60 @@ impl<'a> CodeGenerator for CEmitter<'a> {
             }
         }
 
-        // Emit main function
-        if !outputs.is_empty() {
-            out.push_str("int main(void) {\n");
-            let mut match_counter: u32 = 0;
-            for term in &outputs {
-                let mut ctx = EmitCtx::new();
-                let value = self.expr_emitter.emit_expr(
-                    term,
-                    &mut ctx,
-                    self.type_analyzer.union_map(),
-                    self.type_analyzer.struct_map(),
-                )?;
-                match value.expr {
-                    CExpr::Match(plan) => {
-                        let block = self.match_emitter.emit(
-                            &plan,
-                            match_counter,
-                            self.type_analyzer.union_map(),
-                        );
-                        match_counter += 1;
-                        out.push_str(&block);
-                        let r_var = self.name_resolver.result_temp(match_counter - 1);
-                        self.emit_printf(&mut out, &r_var, &value.ctype);
-                    }
-                    CExpr::Code(code) => self.emit_printf(&mut out, code.as_str(), &value.ctype),
+        out.push_str("int main(void) {\n");
+        let mut match_counter: u32 = 0;
+        for term in outputs {
+            let mut ctx = EmitCtx::new();
+            let value = self.expr_emitter.emit_expr(
+                term,
+                &mut ctx,
+                self.type_analyzer.union_map(),
+                self.type_analyzer.struct_map(),
+            )?;
+            match value.expr {
+                CExpr::Match(plan) => {
+                    let block = self.match_emitter.emit(
+                        &plan,
+                        match_counter,
+                        self.type_analyzer.union_map(),
+                    );
+                    match_counter += 1;
+                    out.push_str(&block);
+                    let r_var = self.name_resolver.result_temp(match_counter - 1);
+                    self.emit_printf(&mut out, &r_var, &value.ctype);
                 }
+                CExpr::Code(code) => self.emit_printf(&mut out, code.as_str(), &value.ctype),
             }
-            out.push_str("    return 0;\n}\n");
-        } else {
-            out.push_str("int main(void) {\n    return 0;\n}\n");
         }
+        out.push_str("    return 0;\n}\n");
         Ok(out)
+    }
+}
+
+impl<'a> CodeGenerator for CEmitter<'a> {
+    fn generate(
+        &self,
+        tops: &[TopLevel<'_>],
+        raw_defs: &[TopLevel<'_>],
+        struct_types: &[(&str, &Term<'_>)],
+        union_types: &[(&str, &Term<'_>)],
+    ) -> Result<String, Diagnostic> {
+        let outputs = self.collect_outputs(tops, false, true);
+        self.generate_with_outputs(tops, raw_defs, struct_types, union_types, &outputs)
+    }
+
+    fn generate_eval(
+        &self,
+        tops: &[TopLevel<'_>],
+        raw_defs: &[TopLevel<'_>],
+        struct_types: &[(&str, &Term<'_>)],
+        union_types: &[(&str, &Term<'_>)],
+    ) -> Result<Option<String>, Diagnostic> {
+        let outputs = self.collect_outputs(tops, true, false);
+        if outputs.is_empty() {
+            return Ok(None);
+        }
+        self.generate_with_outputs(tops, raw_defs, struct_types, union_types, &outputs)
+            .map(Some)
     }
 }

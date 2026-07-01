@@ -88,6 +88,30 @@ impl FunSig {
             ret_type,
         })
     }
+
+    pub fn from_extern(
+        params: &[(crate::core::syntax::Name<'_>, Option<&Term<'_>>)],
+        ret: &Term<'_>,
+        union_names: &HashSet<String>,
+        struct_names: &HashSet<String>,
+    ) -> Result<Self, Diagnostic> {
+        let param_types: Vec<CType> = params
+            .iter()
+            .map(|(name, mc)| {
+                let Some(c) = mc else {
+                    return Err(Diagnostic::new(format!(
+                        "Cannot infer C type for extern parameter `{name}` without an explicit constraint"
+                    )));
+                };
+                constraint_to_ctype(c, union_names, struct_names)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ret_type = constraint_to_ctype(ret, union_names, struct_names)?;
+        Ok(FunSig {
+            param_types,
+            ret_type,
+        })
+    }
 }
 
 /// Infer the C return type from a term body, given the parameter C types
@@ -109,6 +133,7 @@ fn infer_ret_ctype(
         Term::LitStr(_) => Ok(CType::Str),
         Term::Annot(inner, c) => constraint_to_ctype(c, union_names, struct_names)
             .or_else(|_| infer_ret_ctype(inner, param_types, union_names, struct_names)),
+        Term::Unsafe(inner) => infer_ret_ctype(inner, param_types, union_names, struct_names),
         Term::App(f, _) if is_primop_app(f) => Ok(CType::Int64),
         Term::IfThenElse(_, then_term, else_term) => {
             let then_ty = infer_ret_ctype(then_term, param_types, union_names, struct_names)?;
@@ -198,6 +223,11 @@ pub fn constraint_to_ctype(
         // Handle monomorphized generic type applications like
         // `Option int` → Union("Option__int") when that instance exists.
         Term::App(head, _) => {
+            if let Term::App(io_head, inner) = t
+                && matches!(io_head, Term::Builtin(name) | Term::Global(name) if *name == BUILTIN_IO)
+            {
+                return constraint_to_ctype(inner, union_names, struct_names);
+            }
             if let Term::Builtin(name) | Term::Global(name) = *head
                 && *name == BUILTIN_IO
             {

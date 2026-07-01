@@ -152,7 +152,7 @@ Ligare supports interactive proof construction via `by` blocks with tactics, ins
 
 **Applying a proof immediately**  
 ```ligare
-#show (by
+#eval (by
   intro
   exact 0) 5
 ```
@@ -410,7 +410,7 @@ Ligare programs consist of a sequence of top-level commands:
 | `def <name> <params>? : <type>? := <body>` | Define a named term or function |
 | `theorem <name> : <type> := <body>` | Define a named theorem (type-checked, then available as a term) |
 | `#check <expr> : <type>` | Type-check an expression against a constraint |
-| `#show <expr>` | Evaluate an expression and display the result |
+| `#eval <expr>` | Evaluate an expression and display the result |
 
 **Example program**  
 ```ligare
@@ -420,7 +420,7 @@ theorem x_is_nat : nat := x by
   exact true
 
 #check x : int
-#show x
+#eval x
 ```
 
 ## 13. Compilation and Erasure

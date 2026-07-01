@@ -125,6 +125,7 @@ impl PrettyPrinter {
                     .collect();
                 format!("do {{ {} }}", ss.join("; "))
             }
+            Term::Unsafe(inner) => format!("unsafe {{ {} }}", Self::pretty(inner)),
             Term::StructDef(name, fields) => {
                 let fs: Vec<String> = fields
                     .iter()
@@ -169,6 +170,7 @@ impl PrettyPrinter {
             | Term::Global(_)
             | Term::NamedLam(_, _)
             | Term::Var(_)
+            | Term::Unsafe(_)
             | Term::RefParam
             | Term::AutoProof => format!("-{}", inner),
             _ => format!("-({})", inner),

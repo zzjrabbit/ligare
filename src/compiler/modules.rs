@@ -354,6 +354,21 @@ impl<'bump> Compiler<'bump> {
                     let body = self.rewrite_module_term(body, &imports, &own_names, &mut scope);
                     out.push(TopLevel::TLDef(qname, params, ret, body, span.clone()));
                 }
+                TopLevel::TLExternDef(name, params, ret, span) => {
+                    let qname = self.arena.alloc_str(&module.id.join_symbol(name));
+                    let mut scope = RewriteScope::default();
+                    for (pn, _) in params.iter().rev() {
+                        scope.push(pn);
+                    }
+                    let params = self.rewrite_module_params(
+                        params,
+                        &imports,
+                        &own_names,
+                        &mut RewriteScope::default(),
+                    );
+                    let ret = self.rewrite_module_term(ret, &imports, &own_names, &mut scope);
+                    out.push(TopLevel::TLExternDef(qname, params, ret, span.clone()));
+                }
                 TopLevel::TLTheorem(name, prop, body, span) => {
                     let qname = self.arena.alloc_str(&module.id.join_symbol(name));
                     let prop = self.rewrite_module_term(
@@ -387,8 +402,8 @@ impl<'bump> Compiler<'bump> {
                         span.clone(),
                     ));
                 }
-                TopLevel::TLShow(term, span) => {
-                    out.push(TopLevel::TLShow(
+                TopLevel::TLEval(term, span) => {
+                    out.push(TopLevel::TLEval(
                         self.rewrite_module_term(
                             term,
                             &imports,
@@ -599,6 +614,9 @@ impl<'bump> Compiler<'bump> {
                     .collect::<Vec<_>>();
                 self.arena.do_(self.arena.alloc_slice(&stmts))
             }
+            Term::Unsafe(inner) => self.arena.unsafe_(self.rewrite_module_term(
+                inner, imports, own_names, scope,
+            )),
             _ => term,
         }
     }
@@ -666,7 +684,9 @@ fn declared_names<'bump>(tops: &[TopLevel<'bump>], public_only: bool) -> HashSet
                 return None;
             }
             match top {
-                TopLevel::TLDef(name, ..) | TopLevel::TLTheorem(name, ..) => Some(name.to_string()),
+                TopLevel::TLDef(name, ..)
+                | TopLevel::TLExternDef(name, ..)
+                | TopLevel::TLTheorem(name, ..) => Some(name.to_string()),
                 _ => None,
             }
         })

@@ -10,6 +10,6 @@ def two   : Nat := Succ (Succ Zero)
 #check Zero : Nat
 #check Succ (Succ Zero) : Nat
 
-#show match two with
+#eval match two with
   | Zero    => 0
   | Succ _  => 1

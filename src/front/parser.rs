@@ -36,17 +36,24 @@ pub enum TopLevel<'bump> {
         &'bump Term<'bump>,
         Span,
     ),
+    /// External C function declaration: name, params, return constraint, span.
+    TLExternDef(
+        Name<'bump>,
+        &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+        &'bump Term<'bump>,
+        Span,
+    ),
     TLTheorem(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>, Span),
     TLUse(&'bump [UseTree<'bump>], Visibility, Span),
     TLPublic(&'bump TopLevel<'bump>),
     TLCheck(&'bump Term<'bump>, &'bump Term<'bump>, Span),
-    TLShow(&'bump Term<'bump>, Span),
+    TLEval(&'bump Term<'bump>, Span),
     TLExpr(&'bump Term<'bump>, Span),
 }
 
 pub(super) const KEYWORDS: &[&str] = &[
     "let", "in", "if", "then", "else", "true", "false", "by", "fun", "func", "where", "def", "do",
-    "auto", "theorem", "pub", "use", "as",
+    "extern", "unsafe", "auto", "theorem", "pub", "use", "as",
 ];
 
 /// Names that represent language builtins (not user-defined).

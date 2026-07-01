@@ -52,6 +52,7 @@ impl<'bump> WhnfEvaluator<'bump> {
             Term::Let(_name, val, body, _mconstr) => self.whnf(self.sub.beta(body, val)),
             Term::IfThenElse(cond, tbranch, fbranch) => self.whnf_if(cond, tbranch, fbranch),
             Term::Annot(inner, _) => self.whnf(inner),
+            Term::Unsafe(inner) => self.whnf(inner),
             Term::ByProof(inner, tactics) => {
                 if let Some(inner) = inner {
                     self.whnf(inner)

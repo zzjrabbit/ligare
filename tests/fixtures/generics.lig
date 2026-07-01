@@ -9,7 +9,7 @@ def id (A : prop) (x : A) : A := x
 #check id str "hello" : str
 
 -- Show evaluation
-#show id int 42
+#eval id int 42
 
 -- Generic constant function (K combinator)
 def konst (A : prop) (B : prop) (x : A) (y : B) : A := x
@@ -39,7 +39,7 @@ def unit (A : prop) : int := 0
 
 -- Nested generic applications
 #check id int (id int 7) : int
-#show id int 100
+#eval id int 100
 
 -- ── Generic Option type ──
 
@@ -65,4 +65,4 @@ def unwrap (A : prop) (opt : Option A) (default : A) : A :=
   | None => default
   | Some x => x
 
-#show unwrap int (Some 42) 0
+#eval unwrap int (Some 42) 0

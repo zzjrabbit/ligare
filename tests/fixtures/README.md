@@ -5,7 +5,7 @@ Struct type feature tour:
 - Point, Person, Flag, Wrapper struct definitions
 - Construction via `Name.mk`
 - Field projection via `Name.field`
-- `#check` + `#show` with structs and fields
+- `#check` + `#eval` with structs and fields
 
 ## struct_point.lig
 Struct arithmetic:
@@ -17,13 +17,13 @@ Struct arithmetic:
 Nested types:
 - Struct inside union variant payload (Shape)
 - Union inside struct field (Config)
-- Mixed construction and `#show`
+- Mixed construction and `#eval`
 
 ## color.lig
 Non-recursive union demo (full pipeline: parse → check → C codegen):
 - Enum-style union (Color)
 - Pattern matching function (`to_int`)
-- `#show` expressions compiled to native executable
+- `#eval` expressions compiled to native executable
 
 ## nat_peano.lig
 Recursive Peano naturals (interpreter only):
@@ -34,7 +34,7 @@ Recursive Peano naturals (interpreter only):
 ## union_basic.lig
 Union type feature tour:
 - Enum + payload variants
-- `#check` + `#show` with match
+- `#check` + `#eval` with match
 
 ## union_single.lig
 Minimal smoke test: single union definition.
@@ -44,6 +44,14 @@ Color enum union type.
 
 ## union_option.lig
 Option type with payload and matching.
+
+## ffi.lig
+FFI fixture:
+- External pure C function (`ffi_abs`)
+- External IO C function (`ffi_read`)
+- Required `unsafe { ... }` call sites
+- IO value unwrapped in a `do` block
+- Full compile-and-run test expects output `7` then `8`
 
 ## Running
 

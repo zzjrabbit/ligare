@@ -35,6 +35,10 @@ pub enum Token {
     KwWhere,
     #[token("def")]
     KwDef,
+    #[token("extern")]
+    KwExtern,
+    #[token("unsafe")]
+    KwUnsafe,
     #[token("auto")]
     KwAuto,
     #[token("exact")]
@@ -71,8 +75,8 @@ pub enum Token {
     // Directives
     #[token("#check")]
     HashCheck,
-    #[token("#show")]
-    HashShow,
+    #[token("#eval")]
+    HashEval,
 
     // Nestable block comment (Lean 4 style: /- ... -/)
     #[token("/-", nestable_block_comment)]

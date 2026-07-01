@@ -4,7 +4,7 @@ def x : Nat := 10
 def sdiv (a : int) (b : int where (x => x /= 0)) := a / b
 def fib (n : int) : int := if n < 2 then n else fib (n-1) + fib (n-2)
 #check fib 20 : int
-#show fib 10
+#eval fib 10
 #check sdiv 1 1 : int
 
 -- Proof block (Lean 4-style `by` syntax with newlines):
@@ -24,7 +24,7 @@ def fib (n : int) : int := if n < 2 then n else fib (n-1) + fib (n-2)
   exact 0) : int -> int
 
 -- Applied immediately (identity function, always returns 0):
-#show (by
+#eval (by
   intro
   exact 0) 5
 
@@ -50,7 +50,7 @@ def some_fn (s : str) := s
 -- String literal tests
 #check some_fn some_sth : str
 #check "hello" : data
-#show some_fn some_sth
+#eval some_fn some_sth
 
 -- Struct types
 def Point : prop := struct
@@ -62,16 +62,16 @@ def Point : prop := struct
 def p : Point := Point.mk 10 20
 #check Point.x p : int
 #check Point.y p : int
-#show Point.x p
+#eval Point.x p
 
 -- Struct arithmetic
 def add (a : Point) (b : Point) : Point :=
   Point.mk (Point.x a + Point.x b) (Point.y a + Point.y b)
 
-#show Point.x (add p p)
+#eval Point.x (add p p)
 
 -- Destructuring let
 def dist_sq (pt : Point) : int :=
   let Point{x, y} := pt in x * x + y * y
 
-#show dist_sq p
+#eval dist_sq p

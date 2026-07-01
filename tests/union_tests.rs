@@ -2,7 +2,7 @@
 //! These tests exercise the full parse → check → eval pipeline.
 
 use bumpalo::Bump;
-use ligare::backend::c::emit_c;
+use ligare::backend::c::{emit_c, emit_eval_c};
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
 
@@ -68,7 +68,7 @@ fn eval_match() {
     assert!(
         compiler
             .process_file_str(
-                "def Color : prop := union\n  | Red\n  | Green\n  | Blue\n#show match Red with | Red => 42 | Green => 0 | Blue => 0\n"
+                "def Color : prop := union\n  | Red\n  | Green\n  | Blue\n#eval match Red with | Red => 42 | Green => 0 | Blue => 0\n"
             )
             .is_ok()
     );
@@ -81,7 +81,7 @@ fn match_with_binding_eval() {
     assert!(
         compiler
             .process_file_str(
-                "def Option : prop := union\n  | None\n  | Some of (val : int)\n#show match Some 5 with | None => -1 | Some x => x\n"
+                "def Option : prop := union\n  | None\n  | Some of (val : int)\n#eval match Some 5 with | None => -1 | Some x => x\n"
             )
             .is_ok()
     );
@@ -94,7 +94,7 @@ fn match_none_eval() {
     assert!(
         compiler
             .process_file_str(
-                "def Option : prop := union\n  | None\n  | Some of (val : int)\n#show match None with | None => 0 | Some x => 1\n"
+                "def Option : prop := union\n  | None\n  | Some of (val : int)\n#eval match None with | None => 0 | Some x => 1\n"
             )
             .is_ok()
     );
@@ -192,7 +192,7 @@ fn match_with_bound_var_eval() {
     assert!(
         compiler
             .process_file_str(
-                "def Option : prop := union\n  | None\n  | Some of (val : int)\n#show match Some 42 with | None => -1 | Some x => x + 1\n"
+                "def Option : prop := union\n  | None\n  | Some of (val : int)\n#eval match Some 42 with | None => -1 | Some x => x + 1\n"
             )
             .is_ok()
     );
@@ -218,7 +218,7 @@ fn match_single_variant_union() {
     assert!(
         compiler
             .process_file_str(
-                "def Singleton : prop := union\n  | Only\n#show match Only with | Only => 99\n"
+                "def Singleton : prop := union\n  | Only\n#eval match Only with | Only => 99\n"
             )
             .is_ok()
     );
@@ -271,17 +271,18 @@ fn codegen_match_with_binding_emits_decl() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Option : prop := union\n  | None\n  | Some of (val : int)\n#show match Some 42 with | None => -1 | Some x => x\n",
+            "def Option : prop := union\n  | None\n  | Some of (val : int)\n#eval match Some 42 with | None => -1 | Some x => x\n",
         )
         .unwrap();
-    let c = emit_c(
+    let c = emit_eval_c(
         compiler.tops(),
         compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
     )
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains("int64_t x ="), "missing bind decl:\n{c}");
     assert!(
         c.contains("_s0.data.Some.val"),
@@ -295,17 +296,18 @@ fn codegen_multiple_matches_unique_vars() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Color : prop := union\n  | Red\n  | Green\n#show match Red with | Red => 1 | Green => 2\n#show match Green with | Red => 10 | Green => 20\n",
+            "def Color : prop := union\n  | Red\n  | Green\n#eval match Red with | Red => 1 | Green => 2\n#eval match Green with | Red => 10 | Green => 20\n",
         )
         .unwrap();
-    let c = emit_c(
+    let c = emit_eval_c(
         compiler.tops(),
         compiler.raw_defs(),
         compiler.fun_sigs(),
         &compiler.union_types,
         &compiler.struct_types,
     )
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains("_s0"), "missing _s0:\n{c}");
     assert!(c.contains("_s1"), "missing _s1:\n{c}");
     assert!(c.contains("_r0"), "missing _r0:\n{c}");
@@ -318,7 +320,7 @@ fn codegen_function_returning_union() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Option : prop := union\n  | None\n  | Some of (val : int)\ndef some_val : Option := Some 42\n#show some_val\n",
+            "def Option : prop := union\n  | None\n  | Some of (val : int)\ndef some_val : Option := Some 42\n#eval some_val\n",
         )
         .unwrap();
     let c = emit_c(
@@ -342,7 +344,7 @@ fn codegen_tagged_union_typedef() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Shape : prop := union\n  | Circle\n  | Square\n  | Triangle\ndef s : Shape := Square\ndef c : Shape := Circle\n#show s\n#show c\n",
+            "def Shape : prop := union\n  | Circle\n  | Square\n  | Triangle\ndef s : Shape := Square\ndef c : Shape := Circle\n#eval s\n#eval c\n",
         )
         .unwrap();
     let c = emit_c(

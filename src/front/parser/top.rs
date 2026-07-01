@@ -44,6 +44,13 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             return Ok(TopLevel::TLUse(uses, visibility, start_span));
         }
 
+        if self.peek_token() == Some(Token::KwExtern) {
+            self.advance();
+            let (name, params, ret) = self.parse_extern_def()?;
+            let top = TopLevel::TLExternDef(name, params, ret, start_span);
+            return Ok(self.with_visibility(top, visibility));
+        }
+
         if self.peek_token() == Some(Token::KwTheorem) {
             self.advance();
             let name = self.parse_ident()?;
@@ -92,9 +99,9 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             return Ok(TopLevel::TLCheck(term, constraint, start_span));
         }
 
-        if self.peek_token() == Some(Token::HashShow) {
+        if self.peek_token() == Some(Token::HashEval) {
             self.advance();
-            return Ok(TopLevel::TLShow(self.parse_expr()?, start_span));
+            return Ok(TopLevel::TLEval(self.parse_expr()?, start_span));
         }
 
         Ok(TopLevel::TLExpr(self.parse_expr()?, start_span))
@@ -113,10 +120,11 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 Token::RBrace => braces = braces.saturating_sub(1),
                 Token::KwDef
                 | Token::HashCheck
-                | Token::HashShow
+                | Token::HashEval
                 | Token::KwTheorem
                 | Token::KwPub
                 | Token::KwUse
+                | Token::KwExtern
                     if parens == 0 && braces == 0 =>
                 {
                     break;

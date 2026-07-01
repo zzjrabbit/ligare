@@ -89,7 +89,7 @@ fn generic_type_param_domain_only() {
 fn generic_id_eval() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
-    let result = compiler.process_file_str("def id (A : prop) (x : A) : A := x\n#show id int 42\n");
+    let result = compiler.process_file_str("def id (A : prop) (x : A) : A := x\n#eval id int 42\n");
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
 
@@ -264,7 +264,7 @@ fn codegen_generic_id_monomorphizes_int() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     compiler
-        .collect_file_str("def id (A : prop) (x : A) : A := x\n#show id int 42\n")
+        .collect_file_str("def id (A : prop) (x : A) : A := x\n#eval id int 42\n")
         .unwrap();
     let c = ligare::backend::c::emit_c(
         compiler.tops(),
@@ -274,8 +274,17 @@ fn codegen_generic_id_monomorphizes_int() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    let eval_c = ligare::backend::c::emit_eval_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains("int64_t id__int(int64_t x)"), "{c}");
-    assert!(c.contains("id__int(42)"), "{c}");
+    assert!(eval_c.contains("id__int(42)"), "{eval_c}");
 }
 
 #[test]
@@ -283,7 +292,7 @@ fn codegen_generic_id_monomorphizes_str() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);
     compiler
-        .collect_file_str("def id (A : prop) (x : A) : A := x\n#show id str \"hi\"\n")
+        .collect_file_str("def id (A : prop) (x : A) : A := x\n#eval id str \"hi\"\n")
         .unwrap();
     let c = ligare::backend::c::emit_c(
         compiler.tops(),
@@ -293,8 +302,17 @@ fn codegen_generic_id_monomorphizes_str() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    let eval_c = ligare::backend::c::emit_eval_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains("const char* id__str(const char* x)"), "{c}");
-    assert!(c.contains("id__str(\"hi\")"), "{c}");
+    assert!(eval_c.contains("id__str(\"hi\")"), "{eval_c}");
 }
 
 #[test]
@@ -303,7 +321,7 @@ fn codegen_generic_const_monomorphizes() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def konst (A : prop) (B : prop) (x : A) (y : B) : A := x\n#show konst int bool 42 true\n",
+            "def konst (A : prop) (B : prop) (x : A) (y : B) : A := x\n#eval konst int bool 42 true\n",
         )
         .unwrap();
     let c = ligare::backend::c::emit_c(
@@ -314,11 +332,20 @@ fn codegen_generic_const_monomorphizes() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    let eval_c = ligare::backend::c::emit_eval_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(
         c.contains("int64_t konst__int__bool(int64_t x, int64_t y)"),
         "{c}"
     );
-    assert!(c.contains("konst__int__bool(42, 1)"), "{c}");
+    assert!(eval_c.contains("konst__int__bool(42, 1)"), "{eval_c}");
 }
 
 #[test]
@@ -327,7 +354,7 @@ fn codegen_generic_three_type_params_monomorphizes() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def triple (A : prop) (B : prop) (C : prop) (a : A) (b : B) (c : C) : A := a\n#show triple int bool str 1 true \"hi\"\n",
+            "def triple (A : prop) (B : prop) (C : prop) (a : A) (b : B) (c : C) : A := a\n#eval triple int bool str 1 true \"hi\"\n",
         )
         .unwrap();
     let c = ligare::backend::c::emit_c(
@@ -338,8 +365,20 @@ fn codegen_generic_three_type_params_monomorphizes() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    let eval_c = ligare::backend::c::emit_eval_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains("int64_t triple__int__bool__str("), "{c}");
-    assert!(c.contains("triple__int__bool__str(1, 1, \"hi\")"), "{c}");
+    assert!(
+        eval_c.contains("triple__int__bool__str(1, 1, \"hi\")"),
+        "{eval_c}"
+    );
 }
 
 // ── Generic union codegen ──
@@ -371,7 +410,7 @@ fn codegen_generic_union_monomorphizes_used_instance() {
     let mut compiler = Compiler::new(bump, &arena);
     compiler
         .collect_file_str(
-            "def Option (A : prop) : prop := union\n  | None\n  | Some of (val : A)\ndef unwrap (A : prop) (opt : Option A) (default : A) : A :=\n  match opt with\n  | None => default\n  | Some x => x\n#show unwrap int (Some 42) 0\n",
+            "def Option (A : prop) : prop := union\n  | None\n  | Some of (val : A)\ndef unwrap (A : prop) (opt : Option A) (default : A) : A :=\n  match opt with\n  | None => default\n  | Some x => x\n#eval unwrap int (Some 42) 0\n",
         )
         .unwrap();
     let c = ligare::backend::c::emit_c(
@@ -382,9 +421,18 @@ fn codegen_generic_union_monomorphizes_used_instance() {
         &compiler.struct_types,
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    let eval_c = ligare::backend::c::emit_eval_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+    .unwrap();
     assert!(c.contains("typedef struct Option__int"), "{c}");
     assert!(c.contains("int64_t unwrap__int(Option__int opt"), "{c}");
-    assert!(c.contains("unwrap__int(((Option__int)"), "{c}");
+    assert!(eval_c.contains("unwrap__int(((Option__int)"), "{eval_c}");
 }
 
 // ── Generic struct codegen ──

@@ -31,4 +31,4 @@ def Config : prop := struct
 
 -- Show struct with union field
 def cfg : Config := Config.mk "test" (Some 42)
-#show Config.name cfg
+#eval Config.name cfg

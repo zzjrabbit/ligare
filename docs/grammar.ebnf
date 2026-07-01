@@ -34,7 +34,7 @@ Entry       ::= "main.lig" must contain "pub" "def" "main" ":" "IO" "Unit" ":=" 
 TopLevel    ::= Def
               | Use
               | Check
-              | Show
+              | Eval
               | Expr
 
 Def         ::= [ "pub" ] "def" Ident Params [ ":" Expr ] ":=" Expr
@@ -51,7 +51,7 @@ Path        ::= Ident "::" Ident { "::" Ident }
 
 Check       ::= "#check" Expr [ ":" Expr ]
 
-Show        ::= "#show" Expr
+Eval        ::= "#eval" Expr
 
 (* ── Definitions ────────────────────────────────────────────────── *)
 
@@ -133,7 +133,7 @@ Tactic      ::= "exact" Expr
               | Expr                    (* implicit "exact" *)
 
 Tactic terminators (tokens that end the tactic block):
-  ":="  "in"  "then"  "else"  ")"  "}"  ":"  "def"  "#check"  "#show"
+  ":="  "in"  "then"  "else"  ")"  "}"  ":"  "def"  "#check"  "#eval"
 
 (* ── Identifiers ────────────────────────────────────────────────── *)
 

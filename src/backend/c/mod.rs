@@ -57,3 +57,15 @@ pub fn emit_c(
     let emitter = CEmitter::new(struct_types, union_types, fun_sigs)?;
     emitter.generate(tops, raw_defs, struct_types, union_types)
 }
+
+/// Produce a temporary eval-only C source file, if the program contains `#eval`.
+pub fn emit_eval_c(
+    tops: &[TopLevel<'_>],
+    raw_defs: &[TopLevel<'_>],
+    fun_sigs: &[(&str, FunSig)],
+    union_types: &[(&str, &Term<'_>)],
+    struct_types: &[(&str, &Term<'_>)],
+) -> Result<Option<String>, Diagnostic> {
+    let emitter = CEmitter::new(struct_types, union_types, fun_sigs)?;
+    emitter.generate_eval(tops, raw_defs, struct_types, union_types)
+}

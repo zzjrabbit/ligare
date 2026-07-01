@@ -135,6 +135,66 @@ fn do_bind_rhs_must_have_effect_constraint() {
 }
 
 #[test]
+fn extern_call_requires_unsafe_context() {
+    let (b, arena) = a();
+    let mut compiler = Compiler::new(b, &arena);
+    let err = compiler
+        .process_file_str(
+            "extern def c_abs (x : int) : int\n\
+             def bad : int := c_abs 1\n",
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("external function") && err.contains("unsafe"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn pure_extern_call_checks_inside_unsafe() {
+    let (b, arena) = a();
+    let mut compiler = Compiler::new(b, &arena);
+    assert_eq!(
+        compiler.process_file_str(
+            "extern def c_abs (x : int) : int\n\
+             def ok : int := unsafe { c_abs 1 }\n",
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn io_extern_propagates_effect() {
+    let (b, arena) = a();
+    let mut compiler = Compiler::new(b, &arena);
+    let err = compiler
+        .process_file_str(
+            "extern def c_read : IO int\n\
+             def bad : int := unsafe { c_read }\n",
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("constraint mismatch") || err.contains("failed"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn io_extern_can_be_unwrapped_in_do_block() {
+    let (b, arena) = a();
+    let mut compiler = Compiler::new(b, &arena);
+    assert_eq!(
+        compiler.process_file_str(
+            "extern def c_read : IO int\n\
+             def main : IO int := do { x <- unsafe { c_read }; x }\n",
+        ),
+        Ok(())
+    );
+}
+
+#[test]
 fn int_fails_for_bool() {
     let (_b, arena) = a();
     assert!(check_empty(&arena, &Term::LitInt(5), arena.builtin(s(&arena, "bool"))).is_err());

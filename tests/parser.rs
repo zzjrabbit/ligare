@@ -420,22 +420,22 @@ fn program_with_expr() {
 #[test]
 fn program_with_show() {
     let (b, arena) = a();
-    let result = parse_program("def x : int := 5\n#show x", b, &arena);
+    let result = parse_program("def x : int := 5\n#eval x", b, &arena);
     assert!(result.is_ok());
     let tops = result.unwrap();
     assert_eq!(tops.len(), 2);
     assert!(matches!(tops[0], TopLevel::TLDef(..)));
-    assert!(matches!(tops[1], TopLevel::TLShow(..)));
+    assert!(matches!(tops[1], TopLevel::TLEval(..)));
 }
 
 #[test]
 fn show_simple_expr() {
     let (b, arena) = a();
-    let result = parse_program("#show 1 + 2", b, &arena);
+    let result = parse_program("#eval 1 + 2", b, &arena);
     assert!(result.is_ok());
     let tops = result.unwrap();
     assert_eq!(tops.len(), 1);
-    assert!(matches!(tops[0], TopLevel::TLShow(..)));
+    assert!(matches!(tops[0], TopLevel::TLEval(..)));
 }
 
 #[test]

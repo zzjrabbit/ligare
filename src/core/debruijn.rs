@@ -346,6 +346,9 @@ impl<'arena, 'bump> Desugarer<'arena, 'bump> {
                 })?;
                 self.desugar_do(stmts, env, resolver, effect)?
             }
+            Term::Unsafe(inner) => self.arena.unsafe_(self.try_desugar_with_env(
+                inner, env, resolver, effect,
+            )?),
 
             // ── Leaf / no-name-binding nodes ──
             Term::Var(_)
@@ -605,6 +608,7 @@ impl<'bump> SubstitutionContext<'bump> {
             Term::StructProj(subject, idx) => {
                 self.arena.struct_proj(recurse(subject, cutoff), *idx)
             }
+            Term::Unsafe(inner) => self.arena.unsafe_(recurse(inner, cutoff)),
             // Leaf nodes — returned unchanged (Var handled by callers)
             _ => t,
         }
@@ -737,6 +741,7 @@ fn shift_term<'bump>(
             shift_term(arena, d, cutoff, inner),
             shift_term(arena, d, cutoff, ct),
         ),
+        Term::Unsafe(inner) => arena.unsafe_(shift_term(arena, d, cutoff, inner)),
         // All other nodes: return unchanged (no Var children that need shifting
         // beyond what's already covered by recursive cases, or leaf nodes).
         _ => t,
