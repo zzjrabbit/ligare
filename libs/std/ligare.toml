@@ -1,8 +1,5 @@
 [package]
 name = "std"
-entry = "src/lib.lig"
+version = "0.1.0"
 
 [dependencies]
-
-[exports]
-modules = ["io"]

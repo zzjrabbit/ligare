@@ -310,6 +310,19 @@ fn parse_use_batch_alias_and_pub() {
 }
 
 #[test]
+fn parse_pub_mod_declaration() {
+    let (b, arena) = a();
+    let tops = parse_program("pub mod io\n", b, &arena).unwrap();
+    match &tops[0] {
+        TopLevel::TLPublic(inner) => match **inner {
+            TopLevel::TLMod(name, _) => assert_eq!(name, "io"),
+            ref other => panic!("unexpected public top-level: {other:?}"),
+        },
+        other => panic!("unexpected top-level: {other:?}"),
+    }
+}
+
+#[test]
 fn refine_expression() {
     let (b, arena) = a();
     assert_eq!(

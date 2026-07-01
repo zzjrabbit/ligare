@@ -55,6 +55,8 @@ pub enum Token {
     KwPub,
     #[token("use")]
     KwUse,
+    #[token("mod")]
+    KwMod,
     #[token("as")]
     KwAs,
 

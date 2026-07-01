@@ -213,7 +213,7 @@ impl<'bump> Compiler<'bump> {
                 let b = self.rewrite_term(b, state);
                 TopLevel::TLTheorem(n, p, b, s)
             }
-            TopLevel::TLUse(..) => top,
+            TopLevel::TLUse(..) | TopLevel::TLMod(..) => top,
             TopLevel::TLPublic(inner) => {
                 let rewritten = self.rewrite_top((*inner).clone(), state);
                 TopLevel::TLPublic(self.arena.bump().alloc(rewritten))

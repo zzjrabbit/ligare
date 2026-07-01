@@ -215,7 +215,7 @@ impl<'bump> Compiler<'bump> {
                     Ok(Some(TopLevel::TLDef(name, &[], None, erased, span)))
                 }
                 TopLevel::TLExternDef(..) => Ok(None),
-                TopLevel::TLUse(..) | TopLevel::TLPublic(_) => Ok(None),
+                TopLevel::TLUse(..) | TopLevel::TLMod(..) | TopLevel::TLPublic(_) => Ok(None),
                 TopLevel::TLCheck(_, _, _) => Ok(None),
             })
             .collect::<Result<Vec<_>, Diagnostic>>()?

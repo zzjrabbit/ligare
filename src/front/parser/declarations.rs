@@ -35,6 +35,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                         | Token::KwTheorem
                         | Token::KwPub
                         | Token::KwUse
+                        | Token::KwMod
                 )
             })
             .ok_or_else(|| ParseError {

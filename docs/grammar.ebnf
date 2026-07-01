@@ -33,6 +33,7 @@ Entry       ::= "main.lig" must contain "pub" "def" "main" ":" "IO" "Unit" ":=" 
 
 TopLevel    ::= Def
               | Use
+              | Mod
               | Check
               | Eval
               | Expr
@@ -41,6 +42,8 @@ Def         ::= [ "pub" ] "def" Ident Params [ ":" Expr ] ":=" Expr
               | [ "pub" ] "def" Ident                   ":=" Expr
 
 Use         ::= [ "pub" ] "use" UseItem { "," UseItem }
+
+Mod         ::= [ "pub" ] "mod" Ident
 
 UseItem     ::= Path [ "as" Ident ]
               | Path "::" "{" UseLeaf { "," UseLeaf } "}"
@@ -157,7 +160,8 @@ Tactic terminators (tokens that end the tactic block):
 Ident       ::= [a-zA-Z_][a-zA-Z0-9_]*
 
 (* Reserved words (cannot be used as identifiers):
-     let  in  if  then  else  true  false  by  func  where  def  auto *)
+     let  in  if  then  else  true  false  by  func  where  def  auto
+     pub  use  mod *)
 
 (* ── Types (subset of expressions used as type constraints) ─────── *)
 

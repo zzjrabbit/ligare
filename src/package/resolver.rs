@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::compiler::modules::{PackageModuleGraph, PackageModuleInfo};
+use crate::compiler::modules::{
+    PackageModuleGraph, PackageModuleInfo, parse_module_surface, public_module_paths,
+};
 use crate::diagnostic::Diagnostic;
 
 use super::git::{dep_cache_dir, ensure_git_checkout, git_commit, latest_git_tag};
@@ -55,14 +57,20 @@ pub fn resolve_project(root: &Path, update: UpdateMode) -> Result<ResolvedProjec
                 .iter()
                 .map(|dep| dep.name.clone())
                 .collect::<HashSet<_>>();
+            let root = module_root(&package.root, &package.manifest.entry);
+            let entry = package.root.join(&package.manifest.entry);
+            let mut public_modules =
+                public_module_paths(&parse_module_surface(&package.root, &entry)?);
+            public_modules.insert(vec!["main".to_string()]);
             let info = PackageModuleInfo {
-                root: module_root(&package.root, &package.manifest.entry),
+                root,
+                entry,
                 deps,
-                public_modules: package.manifest.public_modules.into_iter().collect(),
+                public_modules,
             };
-            (name, info)
+            Ok((name, info))
         })
-        .collect();
+        .collect::<Result<HashMap<_, _>, Diagnostic>>()?;
     Ok(ResolvedProject {
         root: root.to_path_buf(),
         manifest,
@@ -184,18 +192,18 @@ impl Resolver {
             return Ok(version.clone());
         }
         if matches!(self.update, UpdateMode::Latest) {
-            return latest_git_tag(url).or_else(|_| {
-                dep.version.clone().ok_or_else(|| {
-                    Diagnostic::new(format!("dependency `{}` has no version", dep.name))
+            return latest_git_tag(url)
+                .or_else(|_| {
+                    dep.version
+                        .clone()
+                        .ok_or_else(|| Diagnostic::new("no version"))
                 })
-            });
+                .or_else(|_| Ok("HEAD".to_string()));
         }
         if let Some(locked) = self.root_lock.deps.get(&dep.name) {
             return Ok(locked.version.clone());
         }
-        dep.version
-            .clone()
-            .ok_or_else(|| Diagnostic::new(format!("dependency `{}` has no version", dep.name)))
+        Ok(dep.version.clone().unwrap_or_else(|| "HEAD".to_string()))
     }
 }
 

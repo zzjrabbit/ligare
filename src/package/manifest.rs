@@ -10,9 +10,17 @@ pub const MANIFEST_NAMES: &[&str] = &["ligare.toml"];
 #[derive(Clone, Debug)]
 pub struct Manifest {
     pub name: String,
+    pub version: String,
+    pub package_type: PackageType,
     pub entry: PathBuf,
     pub public_modules: Vec<Vec<String>>,
     pub dependencies: Vec<Dependency>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageType {
+    Lib,
+    Binary,
 }
 
 #[derive(Clone, Debug)]
@@ -78,9 +86,16 @@ fn parse_manifest(content: &str, path: &Path) -> Result<Manifest, Diagnostic> {
         .and_then(Value::as_table)
         .ok_or_else(|| manifest_error(path, 0, "manifest requires `[package]`"))?;
     let name = required_string(package, "name", path)?;
-    let entry = optional_string(package, "entry")
+    let version = optional_string(package, "version").unwrap_or_else(|| "0.1.0".to_string());
+    let explicit_package_type = optional_string(package, "type")
+        .map(|value| parse_package_type(&value, path))
+        .transpose()?;
+    let explicit_entry = optional_string(package, "entry");
+    let entry = explicit_entry
+        .as_deref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("src/main.lig"));
+        .unwrap_or_else(|| default_entry(path, explicit_package_type));
+    let package_type = explicit_package_type.unwrap_or_else(|| infer_package_type(path, &entry));
 
     let mut public_modules = Vec::new();
     if let Some(exports) = root.get("exports") {
@@ -114,6 +129,8 @@ fn parse_manifest(content: &str, path: &Path) -> Result<Manifest, Diagnostic> {
     let dependencies = parse_dependencies(root.get("dependencies"), path)?;
     Ok(Manifest {
         name,
+        version,
+        package_type,
         entry,
         public_modules,
         dependencies,
@@ -210,6 +227,49 @@ fn optional_string(table: &toml::map::Map<String, Value>, key: &str) -> Option<S
         .get(key)
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn parse_package_type(value: &str, path: &Path) -> Result<PackageType, Diagnostic> {
+    match value {
+        "lib" => Ok(PackageType::Lib),
+        "binary" => Ok(PackageType::Binary),
+        other => Err(manifest_error(
+            path,
+            0,
+            &format!("unknown package type `{other}`; expected `lib` or `binary`"),
+        )),
+    }
+}
+
+fn default_entry(manifest_path: &Path, package_type: Option<PackageType>) -> PathBuf {
+    match package_type {
+        Some(PackageType::Lib) => PathBuf::from("src/lib.lig"),
+        Some(PackageType::Binary) => PathBuf::from("src/main.lig"),
+        None if default_binary_entry_exists(manifest_path) => PathBuf::from("src/main.lig"),
+        None => PathBuf::from("src/lib.lig"),
+    }
+}
+
+fn infer_package_type(manifest_path: &Path, entry: &Path) -> PackageType {
+    match entry.file_name().and_then(|name| name.to_str()) {
+        Some("lib.lig") => return PackageType::Lib,
+        Some("main.lig") => return PackageType::Binary,
+        _ => {}
+    }
+
+    if default_binary_entry_exists(manifest_path) && entry == Path::new("src/main.lig") {
+        return PackageType::Binary;
+    }
+
+    PackageType::Lib
+}
+
+fn default_binary_entry_exists(manifest_path: &Path) -> bool {
+    manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("src/main.lig")
+        .exists()
 }
 
 fn parse_module_path(value: &str, path: &Path, line: usize) -> Result<Vec<String>, Diagnostic> {

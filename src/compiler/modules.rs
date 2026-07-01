@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use bumpalo::Bump;
+
+use crate::core::pool::TermArena;
 use crate::core::syntax::{Name, Tactic, Term};
 use crate::diagnostic::Diagnostic;
 use crate::front::parser::{TopLevel, UseTree, Visibility, parse_program};
@@ -16,6 +19,7 @@ pub struct PackageModuleGraph {
 #[derive(Clone, Debug)]
 pub struct PackageModuleInfo {
     pub root: PathBuf,
+    pub entry: PathBuf,
     pub deps: HashSet<String>,
     pub public_modules: HashSet<Vec<String>>,
 }
@@ -34,30 +38,32 @@ impl ModuleId {
         }
     }
 
-    fn from_path(package: Option<String>, root: &Path, file: &Path) -> Result<Self, Diagnostic> {
-        let rel = file.strip_prefix(root).map_err(|_| {
-            Diagnostic::new(format!(
-                "module file `{}` is not under module root `{}`",
-                file.display(),
-                root.display()
-            ))
-        })?;
-        let mut path = rel
-            .with_extension("")
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        if path == ["main"] {
-            path.clear();
-        }
-        Ok(Self { package, path })
-    }
-
     fn package(package: &str, path: Vec<String>) -> Self {
         Self {
             package: Some(package.to_string()),
             path,
         }
+    }
+
+    fn child(&self, name: &str) -> Self {
+        let mut path = self.path.clone();
+        path.push(name.to_string());
+        Self {
+            package: self.package.clone(),
+            path,
+        }
+    }
+
+    fn parent(&self) -> Option<Self> {
+        if self.path.is_empty() {
+            return None;
+        }
+        let mut path = self.path.clone();
+        path.pop();
+        Some(Self {
+            package: self.package.clone(),
+            path,
+        })
     }
 
     fn join_symbol(&self, name: &str) -> String {
@@ -140,6 +146,24 @@ struct ParsedModule<'bump> {
     tops: Vec<TopLevel<'bump>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ParsedModuleSurface {
+    pub path: Vec<String>,
+    pub public: bool,
+    pub children: Vec<ParsedModuleSurface>,
+}
+
+pub fn parse_module_surface(
+    root: &Path,
+    entry_path: &Path,
+) -> Result<Vec<ParsedModuleSurface>, Diagnostic> {
+    let module_root = entry_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.to_path_buf());
+    parse_module_surface_at(&module_root, entry_path, Vec::new())
+}
+
 struct ModuleEnv<'bump> {
     exports: HashMap<ModuleId, HashMap<String, String>>,
     rewritten: HashMap<ModuleId, Vec<TopLevel<'bump>>>,
@@ -175,7 +199,10 @@ pub(crate) fn is_module_entry(file: &str) -> bool {
 pub(crate) fn source_uses_modules(source: &str) -> bool {
     source.lines().any(|line| {
         let line = line.trim_start();
-        line.starts_with("use ") || line.starts_with("pub use ")
+        line.starts_with("use ")
+            || line.starts_with("pub use ")
+            || line.starts_with("mod ")
+            || line.starts_with("pub mod ")
     })
 }
 
@@ -219,7 +246,7 @@ impl<'bump> Compiler<'bump> {
         entry: &Path,
         graph: PackageModuleGraph,
     ) -> Result<(), Diagnostic> {
-        let env = self.load_project_module_graph(root, entry, graph)?;
+        let env = self.load_project_module_graph(root, entry, graph, true)?;
         for id in env.order {
             let tops = env.rewritten.get(&id).cloned().unwrap_or_default();
             for top in tops {
@@ -236,7 +263,7 @@ impl<'bump> Compiler<'bump> {
         graph: PackageModuleGraph,
     ) -> Result<(), Diagnostic> {
         self.quiet = true;
-        let env = self.load_project_module_graph(root, entry, graph)?;
+        let env = self.load_project_module_graph(root, entry, graph, true)?;
         for id in env.order {
             let content = env.rewritten.get(&id).cloned().unwrap_or_default();
             for top in &content {
@@ -256,13 +283,40 @@ impl<'bump> Compiler<'bump> {
         self.validate_module_main()
     }
 
+    pub fn collect_project_lib_entry(
+        &mut self,
+        root: &Path,
+        entry: &Path,
+        graph: PackageModuleGraph,
+    ) -> Result<(), Diagnostic> {
+        self.quiet = true;
+        let env = self.load_project_module_graph(root, entry, graph, false)?;
+        for id in env.order {
+            let content = env.rewritten.get(&id).cloned().unwrap_or_default();
+            for top in &content {
+                self.process_top_level(top.clone())?;
+            }
+            let codegen = self.collect_codegen_state(&content)?;
+            let monomorphized = self.monomorphize_for_codegen(content, codegen)?;
+            let eraser =
+                crate::checker::erase::Eraser::new(self.arena, self.checker.builtins.clone());
+            let erased = self.erase_and_collect_tops(monomorphized.tops, &eraser)?;
+            self.raw_defs.extend(monomorphized.codegen.raw_defs);
+            self.fun_sigs.extend(monomorphized.codegen.fun_sigs);
+            self.union_types.extend(monomorphized.codegen.union_types);
+            self.struct_types.extend(monomorphized.codegen.struct_types);
+            self.tops.extend(erased.tops);
+        }
+        Ok(())
+    }
+
     fn load_module_graph(&self, entry: &str) -> Result<ModuleEnv<'bump>, Diagnostic> {
         let entry_path = PathBuf::from(entry);
         let root = entry_path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        self.load_project_module_graph(&root, &entry_path, PackageModuleGraph::default())
+        self.load_project_module_graph(&root, &entry_path, PackageModuleGraph::default(), true)
     }
 
     fn load_project_module_graph(
@@ -270,6 +324,7 @@ impl<'bump> Compiler<'bump> {
         root: &Path,
         entry_path: &Path,
         graph: PackageModuleGraph,
+        require_main: bool,
     ) -> Result<ModuleEnv<'bump>, Diagnostic> {
         let module_root = entry_path
             .parent()
@@ -287,7 +342,7 @@ impl<'bump> Compiler<'bump> {
         let root_module = parsed
             .get(&entry_id)
             .ok_or_else(|| Diagnostic::new("entry module was not loaded"))?;
-        if entry_id == ModuleId::root() && !has_public_main(&root_module.tops) {
+        if require_main && entry_id == ModuleId::root() && !has_public_main(&root_module.tops) {
             return Err(Diagnostic::new(format!(
                 "entry module `{}` must define `pub main : IO Unit`",
                 entry_path.display()
@@ -313,17 +368,6 @@ impl<'bump> Compiler<'bump> {
         Ok(env)
     }
 
-    fn load_module(
-        &self,
-        root: &Path,
-        file: PathBuf,
-        graph: &PackageModuleGraph,
-        parsed: &mut HashMap<ModuleId, ParsedModule<'bump>>,
-    ) -> Result<ModuleId, Diagnostic> {
-        let id = ModuleId::from_path(None, root, &file)?;
-        self.load_module_as(root, file, id, graph, parsed)
-    }
-
     fn load_module_as(
         &self,
         root: &Path,
@@ -347,22 +391,55 @@ impl<'bump> Compiler<'bump> {
                 tops: tops.clone(),
             },
         );
+        for module in declared_module_deps(&id, &tops) {
+            self.ensure_declared_module_loaded(root, &module, graph, parsed)?;
+        }
         for module in import_deps(&id, &tops, graph)? {
-            let (dep_root, dep_file) = module_file(root, &module, graph)?;
-            if !dep_file.exists() {
-                return Err(Diagnostic::new(format!(
-                    "module not found: {} at {}",
-                    display_module(&module),
-                    dep_file.display()
-                )));
-            }
-            if module.package.is_some() {
-                self.load_module_as(&dep_root, dep_file, module, graph, parsed)?;
-            } else {
-                self.load_module(&dep_root, dep_file, graph, parsed)?;
-            }
+            self.ensure_declared_module_loaded(root, &module, graph, parsed)?;
         }
         Ok(id)
+    }
+
+    fn ensure_declared_module_loaded(
+        &self,
+        root: &Path,
+        module: &ModuleId,
+        graph: &PackageModuleGraph,
+        parsed: &mut HashMap<ModuleId, ParsedModule<'bump>>,
+    ) -> Result<(), Diagnostic> {
+        if parsed.contains_key(module) {
+            return Ok(());
+        }
+
+        if module.path == ["main"] {
+            let (module_root, file) = module_file(root, module, graph)?;
+            self.load_module_as(&module_root, file, module.clone(), graph, parsed)?;
+            return Ok(());
+        }
+
+        let Some(parent) = module.parent() else {
+            let (module_root, file) = module_file(root, module, graph)?;
+            self.load_module_as(&module_root, file, module.clone(), graph, parsed)?;
+            return Ok(());
+        };
+        self.ensure_declared_module_loaded(root, &parent, graph, parsed)?;
+        let leaf = module
+            .path
+            .last()
+            .ok_or_else(|| Diagnostic::new("module path cannot be empty"))?;
+        let parent_module = parsed.get(&parent).ok_or_else(|| {
+            Diagnostic::new(format!("module not found: {}", display_module(&parent)))
+        })?;
+        if !declares_module(&parent_module.tops, leaf) {
+            return Err(Diagnostic::new(format!(
+                "module `{}` is not declared by parent module `{}`",
+                display_module(module),
+                display_module(&parent)
+            )));
+        }
+        let (module_root, file) = module_file(root, module, graph)?;
+        self.load_module_as(&module_root, file, module.clone(), graph, parsed)
+            .map(|_| ())
     }
 
     fn collect_exports(
@@ -443,7 +520,10 @@ impl<'bump> Compiler<'bump> {
         let module = parsed
             .get(id)
             .ok_or_else(|| Diagnostic::new(format!("module not found: {}", display_module(id))))?;
-        for dep in import_deps(id, &module.tops, graph)? {
+        for dep in declared_module_deps(id, &module.tops)
+            .into_iter()
+            .chain(import_deps(id, &module.tops, graph)?)
+        {
             let (_dep_root, dep_file) = module_file(root, &dep, graph)?;
             if !parsed.contains_key(&dep) || !dep_file.exists() {
                 return Err(Diagnostic::new(format!(
@@ -588,7 +668,7 @@ impl<'bump> Compiler<'bump> {
                         span.clone(),
                     ));
                 }
-                TopLevel::TLUse(..) | TopLevel::TLPublic(_) => {}
+                TopLevel::TLUse(..) | TopLevel::TLMod(..) | TopLevel::TLPublic(_) => {}
             }
         }
         Ok(out)
@@ -842,6 +922,92 @@ fn import_deps<'bump>(
     Ok(deps)
 }
 
+fn declared_module_deps<'bump>(current: &ModuleId, tops: &[TopLevel<'bump>]) -> Vec<ModuleId> {
+    let mut deps = Vec::new();
+    let mut seen = HashSet::new();
+    for top in tops {
+        let (top, _) = unwrap_public(top);
+        if let TopLevel::TLMod(name, _) = top {
+            let dep = current.child(name);
+            if seen.insert(dep.clone()) {
+                deps.push(dep);
+            }
+        }
+    }
+    deps
+}
+
+fn declares_module<'bump>(tops: &[TopLevel<'bump>], name: &str) -> bool {
+    tops.iter().any(|top| {
+        let (top, _) = unwrap_public(top);
+        matches!(top, TopLevel::TLMod(module_name, _) if *module_name == name)
+    })
+}
+
+fn parse_module_surface_at(
+    module_root: &Path,
+    file: &Path,
+    path: Vec<String>,
+) -> Result<Vec<ParsedModuleSurface>, Diagnostic> {
+    let file_str = file.to_string_lossy().into_owned();
+    let source = read_source_file(&file_str)?;
+    let bump = Bump::new();
+    let arena = TermArena::new(&bump);
+    let tops = parse_program(&source, &bump, &arena)
+        .map_err(|e| Diagnostic::with_span(format!("parse error: {}", e.message), e.span))
+        .map_err(|d| d.with_source(&file_str, &source))?;
+    let mut surfaces = Vec::new();
+    for top in &tops {
+        let (top, public) = unwrap_public(top);
+        let TopLevel::TLMod(name, _) = top else {
+            continue;
+        };
+        let mut child_path = path.clone();
+        child_path.push(name.to_string());
+        let child_id = ModuleId {
+            package: None,
+            path: child_path.clone(),
+        };
+        let child_file = module_path(module_root, &child_id)?;
+        if !child_file.exists() {
+            return Err(Diagnostic::new(format!(
+                "module not found: {} at {}",
+                display_module(&child_id),
+                child_file.display()
+            )));
+        }
+        let children = parse_module_surface_at(module_root, &child_file, child_path.clone())?;
+        surfaces.push(ParsedModuleSurface {
+            path: child_path,
+            public,
+            children,
+        });
+    }
+    Ok(surfaces)
+}
+
+pub fn public_module_paths(surface: &[ParsedModuleSurface]) -> HashSet<Vec<String>> {
+    let mut paths = HashSet::new();
+    for module in surface {
+        collect_public_module_paths(module, true, &mut paths);
+    }
+    paths
+}
+
+fn collect_public_module_paths(
+    module: &ParsedModuleSurface,
+    parent_public: bool,
+    paths: &mut HashSet<Vec<String>>,
+) {
+    let public = parent_public && module.public;
+    if public {
+        paths.insert(module.path.clone());
+    }
+    for child in &module.children {
+        collect_public_module_paths(child, public, paths);
+    }
+}
+
 fn declared_symbols<'bump>(
     tops: &[TopLevel<'bump>],
     module: &ModuleId,
@@ -887,27 +1053,41 @@ fn module_file(
     graph: &PackageModuleGraph,
 ) -> Result<(PathBuf, PathBuf), Diagnostic> {
     let module_root = if let Some(package) = &module.package {
-        graph
-            .packages
-            .get(package)
-            .map(|info| info.root.clone())
-            .ok_or_else(|| {
-                Diagnostic::new(format!("package dependency `{package}` was not resolved"))
-            })?
+        let info = graph.packages.get(package).ok_or_else(|| {
+            Diagnostic::new(format!("package dependency `{package}` was not resolved"))
+        })?;
+        if module.path.is_empty() {
+            return Ok((info.root.clone(), info.entry.clone()));
+        }
+        info.root.clone()
     } else {
         root.to_path_buf()
     };
-    let path = module_path(&module_root, module);
+    let path = module_path(&module_root, module)?;
     Ok((module_root, path))
 }
 
-fn module_path(root: &Path, module: &ModuleId) -> PathBuf {
+fn module_path(root: &Path, module: &ModuleId) -> Result<PathBuf, Diagnostic> {
+    if module.path.is_empty() {
+        return Ok(root.join("main.lig"));
+    }
     let mut path = root.to_path_buf();
     for part in &module.path {
         path.push(part);
     }
-    path.set_extension("lig");
-    path
+    let file = path.with_extension("lig");
+    let folder_mod = path.join("mod.lig");
+    match (file.exists(), folder_mod.exists()) {
+        (true, false) => Ok(file),
+        (false, true) => Ok(folder_mod),
+        (true, true) => Err(Diagnostic::new(format!(
+            "ambiguous module `{}`: both `{}` and `{}` exist",
+            display_module(module),
+            file.display(),
+            folder_mod.display()
+        ))),
+        (false, false) => Ok(file),
+    }
 }
 
 fn display_module(module: &ModuleId) -> String {

@@ -57,7 +57,7 @@ fn single_level_import_codegen_uses_prefixed_c_name() {
     write(
         &root,
         "main.lig",
-        "use nat::add\npub def main : IO Unit := let _ := add 2 3 in Unit\n",
+        "mod nat\nuse nat::add\npub def main : IO Unit := let _ := add 2 3 in Unit\n",
     );
     let compiler = collect(&root).unwrap();
     let c = emit_c(
@@ -74,6 +74,7 @@ fn single_level_import_codegen_uses_prefixed_c_name() {
 #[test]
 fn nested_batch_import_and_alias() {
     let root = temp_project();
+    write(&root, "data/mod.lig", "pub mod nat\n");
     write(
         &root,
         "data/nat.lig",
@@ -82,7 +83,7 @@ fn nested_batch_import_and_alias() {
     write(
         &root,
         "main.lig",
-        "use data::nat::{add as plus, one}\npub def main : IO Unit := let _ := plus one 2 in Unit\n",
+        "mod data\nuse data::nat::{add as plus, one}\npub def main : IO Unit := let _ := plus one 2 in Unit\n",
     );
     let compiler = collect(&root).unwrap();
     assert!(compiler.raw_defs().iter().any(|top| {
@@ -104,11 +105,14 @@ fn non_main_file_with_import_uses_module_pipeline() {
     write(
         &root,
         "test.lig",
-        "use libs::std::lib::put_str\n\
+        "mod libs\n\
+         use libs::std::lib::put_str\n\
          pub def main : IO Unit := do\n\
            let _ = put_str \"hello world\"\n\
            Unit\n",
     );
+    write(&root, "libs/mod.lig", "pub mod std\n");
+    write(&root, "libs/std/mod.lig", "pub mod lib\n");
     let bump = Box::leak(Box::new(Bump::new()));
     let arena = Box::leak(Box::new(TermArena::new(bump)));
     let mut compiler = Compiler::new(bump, arena);
@@ -134,11 +138,12 @@ fn non_main_file_with_import_uses_module_pipeline() {
 #[test]
 fn private_access_is_rejected() {
     let root = temp_project();
+    write(&root, "data/mod.lig", "pub mod nat\n");
     write(&root, "data/nat.lig", "def hidden : int := 1\n");
     write(
         &root,
         "main.lig",
-        "use data::nat::hidden\npub def main : IO Unit := hidden\n",
+        "mod data\nuse data::nat::hidden\npub def main : IO Unit := hidden\n",
     );
     assert_module_error(&root, "private or unknown symbol");
 }
@@ -151,11 +156,12 @@ fn re_export_allows_import_from_facade() {
         "data/nat.lig",
         "pub def add (a : int) (b : int) : int := a + b\n",
     );
+    write(&root, "data/mod.lig", "pub mod nat\n");
     write(&root, "prelude.lig", "pub use data::nat::add\n");
     write(
         &root,
         "main.lig",
-        "use prelude::add\npub def main : IO Unit := let _ := add 1 2 in Unit\n",
+        "mod data\nmod prelude\nuse prelude::add\npub def main : IO Unit := let _ := add 1 2 in Unit\n",
     );
     collect(&root).unwrap();
 }
@@ -163,9 +169,13 @@ fn re_export_allows_import_from_facade() {
 #[test]
 fn cycle_dependency_reports_error() {
     let root = temp_project();
-    write(&root, "a.lig", "use b::y\npub def x : int := y\n");
-    write(&root, "b.lig", "use a::x\npub def y : int := x\n");
-    write(&root, "main.lig", "use a::x\npub def main : IO Unit := x\n");
+    write(&root, "a.lig", "mod b\nuse a::b::y\npub def x : int := y\n");
+    write(&root, "a/b.lig", "use a::x\npub def y : int := x\n");
+    write(
+        &root,
+        "main.lig",
+        "mod a\nuse a::x\npub def main : IO Unit := x\n",
+    );
     assert_module_error(&root, "cyclic module dependency");
 }
 
@@ -177,7 +187,7 @@ fn missing_module_reports_error() {
         "main.lig",
         "use nope::x\npub def main : IO Unit := x\n",
     );
-    assert_module_error(&root, "module not found");
+    assert_module_error(&root, "not declared by parent module");
 }
 
 #[test]
@@ -185,4 +195,31 @@ fn entry_requires_public_main() {
     let root = temp_project();
     write(&root, "main.lig", "def main : IO Unit := 0\n");
     assert_module_error(&root, "must define `pub main");
+}
+
+#[test]
+fn folder_module_uses_mod_lig() {
+    let root = temp_project();
+    write(&root, "math/mod.lig", "pub def one : int := 1\n");
+    write(
+        &root,
+        "main.lig",
+        "mod math\nuse math::one\npub def main : IO Unit := let _ := one in Unit\n",
+    );
+    let compiler = collect(&root).unwrap();
+    assert!(compiler.raw_defs().iter().any(|top| {
+        matches!(top, ligare::front::parser::TopLevel::TLDef(name, ..) if *name == "math::one")
+    }));
+}
+
+#[test]
+fn imported_module_must_be_declared_by_parent() {
+    let root = temp_project();
+    write(&root, "math.lig", "pub def one : int := 1\n");
+    write(
+        &root,
+        "main.lig",
+        "use math::one\npub def main : IO Unit := let _ := one in Unit\n",
+    );
+    assert_module_error(&root, "not declared by parent module");
 }

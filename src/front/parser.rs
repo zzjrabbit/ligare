@@ -45,6 +45,7 @@ pub enum TopLevel<'bump> {
     ),
     TLTheorem(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>, Span),
     TLUse(&'bump [UseTree<'bump>], Visibility, Span),
+    TLMod(Name<'bump>, Span),
     TLPublic(&'bump TopLevel<'bump>),
     TLCheck(&'bump Term<'bump>, &'bump Term<'bump>, Span),
     TLEval(&'bump Term<'bump>, Span),
@@ -53,7 +54,7 @@ pub enum TopLevel<'bump> {
 
 pub(super) const KEYWORDS: &[&str] = &[
     "let", "in", "if", "then", "else", "true", "false", "by", "fun", "func", "where", "def", "do",
-    "extern", "unsafe", "auto", "theorem", "pub", "use", "as",
+    "extern", "unsafe", "auto", "theorem", "pub", "use", "mod", "as",
 ];
 
 /// Names that represent language builtins (not user-defined).

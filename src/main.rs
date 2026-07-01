@@ -8,7 +8,7 @@ use ligare::backend::c::{emit_c, emit_eval_c};
 use ligare::backend::compile::{compile_and_run_c, compile_c};
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
-use ligare::package::{UpdateMode, find_manifest_root, resolve_project, write_lock};
+use ligare::package::{PackageType, UpdateMode, find_manifest_root, resolve_project, write_lock};
 
 #[derive(Parser)]
 #[command(
@@ -110,18 +110,23 @@ fn run_build(path: &PathBuf, cli: &Cli) {
     let arena = TermArena::new(&bump);
     let mut compiler = Compiler::new(&bump, &arena);
     let entry = root.join(&project.manifest.entry);
-    let output = build_output_path(&root, &project.manifest.name, cli);
-    let result = if cli.emit_c || output.is_some() {
-        compiler.collect_project_entry(&root, &entry, project.graph)
-    } else {
-        compiler.process_project_entry(&root, &entry, project.graph)
+    let result = match project.manifest.package_type {
+        PackageType::Lib => compiler.collect_project_lib_entry(&root, &entry, project.graph),
+        PackageType::Binary => compiler.collect_project_entry(&root, &entry, project.graph),
     };
     if let Err(e) = result {
         eprintln!("{}", e);
         process::exit(1);
     }
-    if cli.emit_c || output.is_some() {
-        emit_or_compile_to(&compiler, output.as_deref());
+    match project.manifest.package_type {
+        PackageType::Lib => emit_library_to(
+            &compiler,
+            build_library_output_path(&root, &project.manifest.name, cli).as_deref(),
+        ),
+        PackageType::Binary => {
+            let output = build_binary_output_path(&root, &project.manifest.name, cli);
+            emit_or_compile_to(&compiler, output.as_deref());
+        }
     }
 }
 
@@ -240,7 +245,39 @@ fn emit_or_compile_to(compiler: &Compiler<'_>, output: Option<&Path>) {
     }
 }
 
-fn build_output_path(root: &Path, package_name: &str, cli: &Cli) -> Option<PathBuf> {
+fn emit_library_to(compiler: &Compiler<'_>, output: Option<&Path>) {
+    let codegen = compiler.codegen_input();
+    let c_source = match emit_c(
+        codegen.tops,
+        codegen.raw_defs,
+        codegen.fun_sigs,
+        codegen.union_types,
+        codegen.struct_types,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Code generation error: {e}");
+            process::exit(1);
+        }
+    };
+    let Some(output) = output else {
+        print!("{c_source}");
+        return;
+    };
+    if let Some(parent) = output.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("cannot create output directory `{}`: {e}", parent.display());
+        process::exit(1);
+    }
+    if let Err(e) = std::fs::write(output, c_source) {
+        eprintln!("cannot write `{}`: {e}", output.display());
+        process::exit(1);
+    }
+    eprintln!("Wrote {}", output.display());
+}
+
+fn build_binary_output_path(root: &Path, package_name: &str, cli: &Cli) -> Option<PathBuf> {
     if cli.emit_c {
         None
     } else {
@@ -248,6 +285,18 @@ fn build_output_path(root: &Path, package_name: &str, cli: &Cli) -> Option<PathB
             cli.output
                 .clone()
                 .unwrap_or_else(|| root.join("target").join(package_binary_name(package_name))),
+        )
+    }
+}
+
+fn build_library_output_path(root: &Path, package_name: &str, cli: &Cli) -> Option<PathBuf> {
+    if cli.emit_c {
+        None
+    } else {
+        Some(
+            cli.output
+                .clone()
+                .unwrap_or_else(|| root.join("target").join(format!("{package_name}.c"))),
         )
     }
 }

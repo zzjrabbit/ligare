@@ -260,6 +260,7 @@ impl<'bump> Compiler<'bump> {
                 self.process_top_level((*inner).clone())?;
             }
             TopLevel::TLUse(..) => {}
+            TopLevel::TLMod(..) => {}
             TopLevel::TLEval(term, span) => {
                 self.process_eval_like(term, span, "eval")?;
             }

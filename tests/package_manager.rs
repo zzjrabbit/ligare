@@ -1,7 +1,7 @@
 use bumpalo::Bump;
 use ligare::compiler::Compiler;
 use ligare::core::pool::TermArena;
-use ligare::package::{UpdateMode, resolve_project, write_lock};
+use ligare::package::{PackageType, UpdateMode, resolve_project, write_lock};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,7 +42,7 @@ fn manifest(root: &Path, name: &str, body: &str) {
     write(
         root,
         "ligare.toml",
-        &format!("[package]\nname = \"{name}\"\n{body}"),
+        &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n{body}"),
     );
 }
 
@@ -61,8 +61,12 @@ fn collect_project(root: &Path) -> Result<Compiler<'static>, ligare::diagnostic:
 fn resolves_multi_package_local_dependencies_and_cross_package_use() {
     let root = temp_project();
     let util = root.join("util");
-    manifest(&util, "util", "\n[exports]\nmodules = [\"math\"]\n");
-    write(&util, "src/main.lig", "pub def ignored : int := 0\n");
+    manifest(&util, "util", "");
+    write(
+        &util,
+        "src/main.lig",
+        "pub mod math\npub def ignored : int := 0\n",
+    );
     write(
         &util,
         "src/math.lig",
@@ -71,7 +75,7 @@ fn resolves_multi_package_local_dependencies_and_cross_package_use() {
     manifest(
         &root,
         "app",
-        "\n[dependencies]\nutil = { path = \"util\", version = \"local\" }\n",
+        "\n[dependencies]\nutil = { path = \"util\" }\n",
     );
     write(
         &root,
@@ -85,6 +89,60 @@ fn resolves_multi_package_local_dependencies_and_cross_package_use() {
     }));
     let lock = fs::read_to_string(root.join("ligare.lock")).unwrap();
     assert!(lock.contains("name = \"util\""), "{lock}");
+    assert!(lock.contains("version = \"local\""), "{lock}");
+}
+
+#[test]
+fn lib_dependency_without_entry_defaults_to_lib_lig() {
+    let root = temp_project();
+    let std = root.join("std");
+    manifest(&std, "std", "type = \"lib\"\n");
+    write(&std, "src/lib.lig", "pub mod io\n");
+    write(
+        &std,
+        "src/io.lig",
+        "pub def put_str (s : str) : IO Unit := Unit\n",
+    );
+    manifest(&root, "app", "\n[dependencies]\nstd = { path = \"std\" }\n");
+    write(
+        &root,
+        "src/main.lig",
+        "use std::io::put_str\npub def main : IO Unit := put_str \"ok\"\n",
+    );
+
+    let project = resolve_project(&root, UpdateMode::Locked).unwrap();
+    assert_eq!(project.graph.packages["std"].root, std.join("src"));
+    assert_eq!(project.manifest.entry, PathBuf::from("src/main.lig"));
+    let compiler = collect_project(&root).unwrap();
+    assert!(compiler.raw_defs().iter().any(|top| {
+        matches!(top, ligare::front::parser::TopLevel::TLDef(name, ..) if *name == "std::io::put_str")
+    }));
+}
+
+#[test]
+fn package_without_type_defaults_to_lib_when_only_lib_entry_exists() {
+    let root = temp_project();
+    manifest(&root, "math", "");
+    write(
+        &root,
+        "src/lib.lig",
+        "pub def add_one (x : int) : int := x + 1\n",
+    );
+
+    let project = resolve_project(&root, UpdateMode::Locked).unwrap();
+    assert_eq!(project.manifest.entry, PathBuf::from("src/lib.lig"));
+    assert_eq!(project.manifest.package_type, PackageType::Lib);
+}
+
+#[test]
+fn package_without_type_defaults_to_binary_when_main_entry_exists() {
+    let root = temp_project();
+    manifest(&root, "app", "");
+    write(&root, "src/main.lig", "pub def main : IO Unit := Unit\n");
+
+    let project = resolve_project(&root, UpdateMode::Locked).unwrap();
+    assert_eq!(project.manifest.entry, PathBuf::from("src/main.lig"));
+    assert_eq!(project.manifest.package_type, PackageType::Binary);
 }
 
 #[test]
@@ -166,13 +224,18 @@ fn lock_file_pins_git_version_until_update() {
 fn non_exported_dependency_module_is_rejected() {
     let root = temp_project();
     let util = root.join("util");
-    manifest(&util, "util", "\n[exports]\nmodules = [\"public\"]\n");
-    write(&util, "src/main.lig", "pub def ignored : int := 0\n");
+    manifest(&util, "util", "");
+    write(
+        &util,
+        "src/main.lig",
+        "pub mod public\nmod private\npub def ignored : int := 0\n",
+    );
+    write(&util, "src/public.lig", "pub def visible : int := 1\n");
     write(&util, "src/private.lig", "pub def hidden : int := 1\n");
     manifest(
         &root,
         "app",
-        "\n[dependencies]\nutil = { path = \"util\", version = \"local\" }\n",
+        "\n[dependencies]\nutil = { path = \"util\" }\n",
     );
     write(
         &root,
@@ -208,7 +271,7 @@ fn cli_test_scans_lig_test_files() {
 #[test]
 fn cli_build_writes_binary_to_package_target_dir() {
     let root = temp_project();
-    manifest(&root, "app", "");
+    manifest(&root, "app", "type = \"binary\"\n");
     write(&root, "src/main.lig", "pub def main : IO Unit := Unit\n");
 
     let bin = env!("CARGO_BIN_EXE_ligare");
@@ -220,10 +283,53 @@ fn cli_build_writes_binary_to_package_target_dir() {
     assert!(root.join("target").join("app").exists());
 }
 
+#[test]
+fn cli_build_lib_package_writes_c_without_main_entry() {
+    let root = temp_project();
+    manifest(&root, "math", "type = \"lib\"\nentry = \"src/lib.lig\"\n");
+    write(
+        &root,
+        "src/lib.lig",
+        "pub def add_one (x : int) : int := x + 1\n",
+    );
+
+    let bin = env!("CARGO_BIN_EXE_ligare");
+    let status = Command::new(bin)
+        .args(["build", root.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let c = fs::read_to_string(root.join("target").join("math.c")).unwrap();
+    assert!(c.contains("add_one"), "{c}");
+}
+
+#[test]
+fn cli_build_infers_lib_package_from_lib_entry() {
+    let root = temp_project();
+    manifest(&root, "math", "entry = \"src/lib.lig\"\n");
+    write(
+        &root,
+        "src/lib.lig",
+        "pub def add_one (x : int) : int := x + 1\n",
+    );
+
+    let bin = env!("CARGO_BIN_EXE_ligare");
+    let status = Command::new(bin)
+        .args(["build", root.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(root.join("target").join("math.c").exists());
+}
+
 fn init_git_dep(repo: &Path) {
     fs::create_dir_all(repo).unwrap();
-    manifest(repo, "lib", "\n[exports]\nmodules = [\"api\"]\n");
-    write(repo, "src/main.lig", "pub def ignored : int := 0\n");
+    manifest(repo, "lib", "");
+    write(
+        repo,
+        "src/main.lig",
+        "pub mod api\npub def ignored : int := 0\n",
+    );
     write(repo, "src/api.lig", "pub def value : int := 1\n");
     run(repo, &["init"]);
     run(repo, &["config", "user.email", "test@example.com"]);

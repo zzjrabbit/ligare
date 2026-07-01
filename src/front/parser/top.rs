@@ -44,6 +44,13 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             return Ok(TopLevel::TLUse(uses, visibility, start_span));
         }
 
+        if self.peek_token() == Some(Token::KwMod) {
+            self.advance();
+            let name = self.parse_ident()?;
+            let top = TopLevel::TLMod(name, start_span.clone());
+            return Ok(self.with_visibility(top, visibility));
+        }
+
         if self.peek_token() == Some(Token::KwExtern) {
             self.advance();
             let (name, params, ret) = self.parse_extern_def()?;
@@ -73,7 +80,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
         if matches!(visibility, Visibility::Public) {
             return Err(ParseError {
-                message: "`pub` may only prefix `def`, `theorem`, or `use`".into(),
+                message: "`pub` may only prefix `def`, `theorem`, `use`, or `mod`".into(),
                 span: start_span,
             });
         }
@@ -124,6 +131,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 | Token::KwTheorem
                 | Token::KwPub
                 | Token::KwUse
+                | Token::KwMod
                 | Token::KwExtern
                     if parens == 0 && braces == 0 =>
                 {
