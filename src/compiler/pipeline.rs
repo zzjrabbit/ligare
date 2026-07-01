@@ -41,11 +41,11 @@ pub(crate) struct ErasedProgram<'bump> {
 impl<'bump> Compiler<'bump> {
     /// Process a source file, collect top-level items, and check constraints.
     pub fn collect_file(&mut self, file: &str) -> Result<(), Diagnostic> {
-        if super::modules::is_module_entry(file) {
-            return self.collect_module_entry(file);
-        }
         self.quiet = true;
         let content = read_source_file(file)?;
+        if super::modules::is_module_entry(file) || super::modules::source_uses_modules(&content) {
+            return self.collect_module_entry(file);
+        }
         self.collect_str(&content, file)
     }
 

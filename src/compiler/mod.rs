@@ -89,10 +89,10 @@ impl<'bump> Compiler<'bump> {
 
     /// Process a source file: parse it and handle each top-level item.
     pub fn process_file(&mut self, file: &str) -> Result<(), Diagnostic> {
-        if modules::is_module_entry(file) {
+        let content = read_source_file(file)?;
+        if modules::is_module_entry(file) || modules::source_uses_modules(&content) {
             return self.process_module_entry(file);
         }
-        let content = read_source_file(file)?;
         self.process_str(&content, file)
     }
 

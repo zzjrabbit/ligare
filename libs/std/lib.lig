@@ -1,0 +1,4 @@
+extern def puts (s : str) : IO c_int
+pub def put_str (s : str) : IO Unit := do
+    let _ = unsafe { puts s }
+    Unit

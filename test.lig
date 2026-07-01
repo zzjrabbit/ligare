@@ -1,8 +1,5 @@
-extern def puts (s : str) : IO c_int
-def put_str (s : str) : IO Unit := do
-    let _ = unsafe { puts s }
-    Unit
+use libs::std::lib::put_str
 
-def main : IO Unit := do
+pub def main : IO Unit := do
     let _ = put_str "hello world"
     Unit

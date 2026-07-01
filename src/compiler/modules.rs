@@ -96,6 +96,13 @@ pub(crate) fn is_module_entry(file: &str) -> bool {
         .is_some_and(|n| n == "main.lig")
 }
 
+pub(crate) fn source_uses_modules(source: &str) -> bool {
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("use ") || line.starts_with("pub use ")
+    })
+}
+
 impl<'bump> Compiler<'bump> {
     pub(crate) fn process_module_entry(&mut self, file: &str) -> Result<(), Diagnostic> {
         let env = self.load_module_graph(file)?;
@@ -137,11 +144,12 @@ impl<'bump> Compiler<'bump> {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let mut parsed = HashMap::new();
-        self.load_module(&root, entry_path, &mut parsed)?;
+        self.load_module_as(&root, entry_path, ModuleId::root(), &mut parsed)?;
+        let entry_id = ModuleId::root();
         let root_module = parsed
-            .get(&ModuleId::root())
-            .ok_or_else(|| Diagnostic::new("entry module `main.lig` was not loaded"))?;
-        if !has_public_main(&root_module.tops) {
+            .get(&entry_id)
+            .ok_or_else(|| Diagnostic::new("entry module was not loaded"))?;
+        if entry_id == ModuleId::root() && !has_public_main(&root_module.tops) {
             return Err(Diagnostic::new(
                 "entry module `main.lig` must define `pub main : IO Unit`",
             ));
@@ -155,7 +163,7 @@ impl<'bump> Compiler<'bump> {
         let mut visiting = Vec::new();
         let mut done = HashSet::new();
         self.visit_module(
-            &ModuleId::root(),
+            &entry_id,
             &root,
             &parsed,
             &mut env,
@@ -172,6 +180,16 @@ impl<'bump> Compiler<'bump> {
         parsed: &mut HashMap<ModuleId, ParsedModule<'bump>>,
     ) -> Result<ModuleId, Diagnostic> {
         let id = ModuleId::from_path(root, &file)?;
+        self.load_module_as(root, file, id, parsed)
+    }
+
+    fn load_module_as(
+        &self,
+        root: &Path,
+        file: PathBuf,
+        id: ModuleId,
+        parsed: &mut HashMap<ModuleId, ParsedModule<'bump>>,
+    ) -> Result<ModuleId, Diagnostic> {
         if parsed.contains_key(&id) {
             return Ok(id);
         }
@@ -207,15 +225,7 @@ impl<'bump> Compiler<'bump> {
     ) -> Result<HashMap<ModuleId, HashMap<String, String>>, Diagnostic> {
         let mut direct = HashMap::new();
         for (id, module) in parsed {
-            let public_names = declared_names(&module.tops, true);
-            let rewritten = public_names
-                .iter()
-                .map(|name| {
-                    let symbol = id.join_symbol(name);
-                    (symbol.clone(), symbol)
-                })
-                .collect::<HashMap<_, _>>();
-            direct.insert(id.clone(), rewritten);
+            direct.insert(id.clone(), declared_symbols(&module.tops, id, true));
         }
         let mut exports = direct.clone();
         let mut changed = true;
@@ -329,9 +339,12 @@ impl<'bump> Compiler<'bump> {
                 imports.insert(local, target.clone());
             }
         }
-        let own_names = declared_names(&module.tops, false)
+        let own_names = declared_symbols(&module.tops, &module.id, false)
             .into_iter()
-            .map(|name| (name.clone(), module.id.join_symbol(&name)))
+            .map(|(symbol, target)| {
+                let local = symbol.rsplit("::").next().unwrap_or(&symbol).to_string();
+                (local, target)
+            })
             .collect::<HashMap<_, _>>();
         let mut out = Vec::new();
         for top in &module.tops {
@@ -355,7 +368,6 @@ impl<'bump> Compiler<'bump> {
                     out.push(TopLevel::TLDef(qname, params, ret, body, span.clone()));
                 }
                 TopLevel::TLExternDef(name, params, ret, span) => {
-                    let qname = self.arena.alloc_str(&module.id.join_symbol(name));
                     let mut scope = RewriteScope::default();
                     for (pn, _) in params.iter().rev() {
                         scope.push(pn);
@@ -367,7 +379,7 @@ impl<'bump> Compiler<'bump> {
                         &mut RewriteScope::default(),
                     );
                     let ret = self.rewrite_module_term(ret, &imports, &own_names, &mut scope);
-                    out.push(TopLevel::TLExternDef(qname, params, ret, span.clone()));
+                    out.push(TopLevel::TLExternDef(name, params, ret, span.clone()));
                 }
                 TopLevel::TLTheorem(name, prop, body, span) => {
                     let qname = self.arena.alloc_str(&module.id.join_symbol(name));
@@ -634,9 +646,7 @@ impl<'bump> Compiler<'bump> {
 
     fn validate_module_main(&self) -> Result<(), Diagnostic> {
         if !self.env.contains_key("main") {
-            return Err(Diagnostic::new(
-                "entry module `main.lig` must define `pub main : IO Unit`",
-            ));
+            return Err(Diagnostic::new("entry module must define `main : IO Unit`"));
         }
         Ok(())
     }
@@ -676,7 +686,11 @@ fn import_deps<'bump>(tops: &[TopLevel<'bump>]) -> Result<Vec<ModuleId>, Diagnos
     Ok(deps)
 }
 
-fn declared_names<'bump>(tops: &[TopLevel<'bump>], public_only: bool) -> HashSet<String> {
+fn declared_symbols<'bump>(
+    tops: &[TopLevel<'bump>],
+    module: &ModuleId,
+    public_only: bool,
+) -> HashMap<String, String> {
     tops.iter()
         .filter_map(|top| {
             let (top, public) = unwrap_public(top);
@@ -684,9 +698,13 @@ fn declared_names<'bump>(tops: &[TopLevel<'bump>], public_only: bool) -> HashSet
                 return None;
             }
             match top {
-                TopLevel::TLDef(name, ..)
-                | TopLevel::TLExternDef(name, ..)
-                | TopLevel::TLTheorem(name, ..) => Some(name.to_string()),
+                TopLevel::TLDef(name, ..) | TopLevel::TLTheorem(name, ..) => {
+                    let symbol = module.join_symbol(name);
+                    Some((symbol.clone(), symbol))
+                }
+                TopLevel::TLExternDef(name, ..) => {
+                    Some((module.join_symbol(name), name.to_string()))
+                }
                 _ => None,
             }
         })

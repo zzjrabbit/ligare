@@ -91,6 +91,47 @@ fn nested_batch_import_and_alias() {
 }
 
 #[test]
+fn non_main_file_with_import_uses_module_pipeline() {
+    let root = temp_project();
+    write(
+        &root,
+        "libs/std/lib.lig",
+        "extern def puts (s : str) : IO c_int\n\
+         pub def put_str (s : str) : IO Unit := do\n\
+           let _ = unsafe { puts s }\n\
+           Unit\n",
+    );
+    write(
+        &root,
+        "test.lig",
+        "use libs::std::lib::put_str\n\
+         pub def main : IO Unit := do\n\
+           let _ = put_str \"hello world\"\n\
+           Unit\n",
+    );
+    let bump = Box::leak(Box::new(Bump::new()));
+    let arena = Box::leak(Box::new(TermArena::new(bump)));
+    let mut compiler = Compiler::new(bump, arena);
+    compiler
+        .collect_file(&root.join("test.lig").to_string_lossy())
+        .unwrap();
+
+    assert!(compiler.raw_defs().iter().any(|top| {
+        matches!(top, ligare::front::parser::TopLevel::TLDef(name, ..) if *name == "main")
+    }));
+    let c = emit_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap();
+    assert!(c.contains("extern int puts(const char*);"), "{c}");
+    assert!(!c.contains("libs_std_lib_puts"), "{c}");
+}
+
+#[test]
 fn private_access_is_rejected() {
     let root = temp_project();
     write(&root, "data/nat.lig", "def hidden : int := 1\n");
