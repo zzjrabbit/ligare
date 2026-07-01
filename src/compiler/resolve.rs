@@ -5,6 +5,7 @@
 //! and perform top-level substitution.
 
 use crate::core::syntax::{Name, Term};
+use crate::diagnostic::Diagnostic;
 
 /// Result of collecting variant constructor args: (union_name, variant_index, field_specs, args).
 pub type VariantWithArgs<'bump> = (
@@ -31,10 +32,17 @@ impl<'bump> Compiler<'bump> {
     /// Local binders must become de Bruijn indices before global substitution,
     /// otherwise a global definition named `x` could capture `fun x => ...`.
     pub fn resolve_all(&self, term: &'bump Term<'bump>) -> &'bump Term<'bump> {
-        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
-        let term = desugarer.desugar(term);
+        self.try_resolve_all(term)
+            .expect("resolve_all failed; use try_resolve_all for parser terms")
+    }
+
+    pub fn try_resolve_all(
+        &self,
+        term: &'bump Term<'bump>,
+    ) -> Result<&'bump Term<'bump>, Diagnostic> {
+        let term = self.checker.desugar_with_context(term)?;
         let t = self.arena.map(term, &|t| {
-            if let Term::Builtin(name) | Term::Named(name) = t
+            if let Term::Builtin(name) | Term::Global(name) = t
                 && let Some(def) = self.env.get(name)
             {
                 return Some(def);
@@ -45,8 +53,8 @@ impl<'bump> Compiler<'bump> {
         let t = self.resolve_variant_apps(t);
         let t = self.resolve_struct_ctors(t);
         let t = self.resolve_struct_projs(t);
-        let t = self.arena.map(t, &|t| {
-            if let Term::Builtin(name) | Term::Named(name) = t {
+        self.arena.map(t, &|t| {
+            if let Term::Builtin(name) | Term::Global(name) = t {
                 if let Some((uname, idx, field_specs)) = self.checker.lookup_variant(name)
                     && field_specs.is_empty()
                 {
@@ -65,7 +73,7 @@ impl<'bump> Compiler<'bump> {
             }
             None
         });
-        t
+        Ok(t)
     }
 
     /// Extract the function name from a term if it's a recursive call.
@@ -76,7 +84,7 @@ impl<'bump> Compiler<'bump> {
         while let Term::App(f, _) = head {
             head = f;
         }
-        if let Term::Builtin(name) | Term::Named(name) = head
+        if let Term::Builtin(name) | Term::Global(name) = head
             && let Some(def) = self.env.get(name)
         {
             if def.is_constant() {
@@ -93,7 +101,7 @@ impl<'bump> Compiler<'bump> {
     pub fn subst_top_level(&self, term: &'bump Term<'bump>) -> &'bump Term<'bump> {
         // First pass: resolve env lookups for constants only
         let t = self.arena.map(term, &|t| {
-            if let Term::Builtin(name) | Term::Named(name) = t
+            if let Term::Builtin(name) | Term::Global(name) = t
                 && let Some(def) = self.env.get(name)
                 && def.is_constant()
             {
@@ -107,7 +115,7 @@ impl<'bump> Compiler<'bump> {
         let t = self.resolve_struct_projs(t);
         // Third pass: resolve remaining zero-arg variant/struct constructors
         self.arena.map(t, &|t| {
-            if let Term::Builtin(name) | Term::Named(name) = t {
+            if let Term::Builtin(name) | Term::Global(name) = t {
                 if let Some((uname, idx, field_specs)) = self.checker.lookup_variant(name)
                     && field_specs.is_empty()
                 {
@@ -157,7 +165,7 @@ impl<'bump> Compiler<'bump> {
             current = f;
         }
         args.reverse();
-        if let Term::Builtin(name) | Term::Named(name) = current
+        if let Term::Builtin(name) | Term::Global(name) = current
             && let Some((uname, idx, field_specs)) = self.checker.lookup_variant(name)
         {
             return Some((uname, idx, field_specs, args));
@@ -193,7 +201,7 @@ impl<'bump> Compiler<'bump> {
             current = f;
         }
         args.reverse();
-        if let Term::Builtin(name) | Term::Named(name) = current
+        if let Term::Builtin(name) | Term::Global(name) = current
             && let Some((sname, field_specs)) = self.checker.lookup_struct_ctor(name)
         {
             return Some((sname, field_specs, args));
@@ -205,7 +213,7 @@ impl<'bump> Compiler<'bump> {
     pub fn resolve_struct_projs(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
         self.arena.map(t, &|node| {
             if let Term::App(f, arg) = node
-                && let Term::Builtin(name) | Term::Named(name) = f
+                && let Term::Builtin(name) | Term::Global(name) = f
                 && let Some(idx) = self.checker.lookup_struct_proj(name)
             {
                 let arg = self.resolve_struct_ctors(self.resolve_struct_projs(arg));

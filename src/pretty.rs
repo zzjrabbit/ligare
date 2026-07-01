@@ -17,7 +17,7 @@ impl PrettyPrinter {
             Term::Pi(name, a, b) => {
                 format!("(Pi {} : {} => {})", name, Self::pretty(a), Self::pretty(b))
             }
-            Term::Builtin(s) | Term::Named(s) => (*s).to_string(),
+            Term::Builtin(s) | Term::Named(s) | Term::Global(s) => (*s).to_string(),
             Term::PrimOp(op) => op.to_string(),
             Term::LitBool(b) => b.to_string(),
             Term::LitStr(s) => format!("\"{}\"", s),
@@ -94,6 +94,21 @@ impl PrettyPrinter {
                     .collect();
                 format!("match {} with\n  {}", Self::pretty(scrut), bs.join("\n  "))
             }
+            Term::NamedMatch(scrut, branches) => {
+                let bs: Vec<String> = branches
+                    .iter()
+                    .map(|(variant, binds, body)| {
+                        let bpat: Vec<String> = binds.iter().map(|(n, _)| n.to_string()).collect();
+                        let payload = if bpat.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", bpat.join(" "))
+                        };
+                        format!("| {variant}{payload} => {}", Self::pretty(body))
+                    })
+                    .collect();
+                format!("match {} with\n  {}", Self::pretty(scrut), bs.join("\n  "))
+            }
             Term::StructDef(name, fields) => {
                 let fs: Vec<String> = fields
                     .iter()
@@ -135,6 +150,7 @@ impl PrettyPrinter {
             | Term::LitBool(_)
             | Term::Builtin(_)
             | Term::Named(_)
+            | Term::Global(_)
             | Term::NamedLam(_, _)
             | Term::Var(_)
             | Term::RefParam

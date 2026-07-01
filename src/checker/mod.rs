@@ -27,7 +27,6 @@ use crate::core::whnf::WhnfEvaluator;
 pub struct TypeChecker<'bump> {
     pub(crate) arena: &'bump TermArena<'bump>,
     pub(crate) evaluator: WhnfEvaluator<'bump>,
-    pub(crate) desugarer: Desugarer<'bump, 'bump>,
     pub(crate) builtins: BuiltinRegistry,
     table: ConstraintTable<'bump>,
     /// Registry of union definitions: maps union name → (UnionDef term, param_names)
@@ -41,7 +40,6 @@ impl<'bump> TypeChecker<'bump> {
         Self {
             arena,
             evaluator: WhnfEvaluator::new(arena),
-            desugarer: Desugarer::new(arena),
             builtins: BuiltinRegistry::new(),
             table: empty_table(),
             union_table: Vec::new(),
@@ -99,6 +97,27 @@ impl<'bump> TypeChecker<'bump> {
             }
         }
         None
+    }
+
+    pub(crate) fn desugar_with_context(
+        &self,
+        term: &'bump Term<'bump>,
+    ) -> Result<&'bump Term<'bump>, Diagnostic> {
+        let resolver = |name: &str| self.lookup_variant(name);
+        Desugarer::new(self.arena)
+            .try_desugar_with_variant_resolver(term, &resolver)
+            .map_err(Diagnostic::new)
+    }
+
+    pub(crate) fn desugar_with_names_context(
+        &self,
+        term: &'bump Term<'bump>,
+        env: &[&'bump str],
+    ) -> Result<&'bump Term<'bump>, Diagnostic> {
+        let resolver = |name: &str| self.lookup_variant(name);
+        Desugarer::new(self.arena)
+            .try_desugar_with_names_and_variant_resolver(term, env, &resolver)
+            .map_err(Diagnostic::new)
     }
 
     /// Look up a union definition by name.
@@ -165,7 +184,7 @@ impl<'bump> TypeChecker<'bump> {
         term: &'bump Term<'bump>,
         constraint: &'bump Term<'bump>,
     ) -> Result<(), Diagnostic> {
-        let desugared = self.desugarer.desugar(term);
+        let desugared = self.desugar_with_context(term)?;
         match desugared {
             Term::Var(i) => self.check_var(ctx, *i, constraint),
             Term::Annot(t, c) => {
@@ -181,7 +200,7 @@ impl<'bump> TypeChecker<'bump> {
                 // Expand Builtin constraints (like `Nat`) that are
                 // actually refinement constraints in the table.
                 let expanded = match c_nf {
-                    Term::Builtin(name) | Term::Named(name) => lookup_refine(name, &self.table)
+                    Term::Builtin(name) | Term::Global(name) => lookup_refine(name, &self.table)
                         .map(|(p, pr)| self.arena.refine(name, p, pr)),
                     _ => None,
                 };
@@ -252,7 +271,7 @@ impl<'bump> TypeChecker<'bump> {
             // A bare Builtin/Named name may be a constraint (int, str, etc.) or a
             // refinement (Nat).  If neither, check if it's a variant constructor
             // or a struct constructor / projector.
-            Term::Builtin(name) | Term::Named(name) => {
+            Term::Builtin(name) | Term::Global(name) => {
                 if self.builtins.checker(name).is_some()
                     || lookup_refine(name, &self.table).is_some()
                 {
@@ -303,7 +322,6 @@ impl<'bump> TypeChecker<'bump> {
         Self {
             arena,
             evaluator: WhnfEvaluator::new(arena),
-            desugarer: Desugarer::new(arena),
             builtins: BuiltinRegistry::new(),
             table: table.clone(),
             union_table: Vec::new(),
@@ -323,7 +341,6 @@ pub fn check<'bump>(
     let checker = TypeChecker {
         arena,
         evaluator: WhnfEvaluator::new(arena),
-        desugarer: Desugarer::new(arena),
         builtins: BuiltinRegistry::new(),
         table: table.clone(),
         union_table: Vec::new(),

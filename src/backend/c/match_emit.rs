@@ -52,7 +52,10 @@ impl MatchEmitter {
                 case.body_code.as_str()
             ));
         }
-        out.push_str(&format!("    default: {r_var} = 0; break;\n"));
+        out.push_str(&format!(
+            "    default: {r_var} = {}; break;\n",
+            plan.ret_type.c_default_value()
+        ));
         out.push_str("    }\n");
         out
     }
@@ -82,28 +85,28 @@ impl MatchEmitter {
         if binds.is_empty() {
             return String::new();
         }
-        if let Some(info) = union_map.get(scrut_ty) {
-            if let Some(vi) = info.variants.get(case_idx) {
-                return binds
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, bind)| !bind.name.is_empty() && bind.name.as_str() != "_")
-                    .map(|(j, bind)| {
-                        let field_name = vi
-                            .fields
-                            .get(j)
-                            .map(|(fnm, _)| fnm.as_str())
-                            .unwrap_or(bind.name.as_str());
-                        format!(
-                            "{} {} = {s_var}.data.{}.{field_name}; ",
-                            bind.ctype.c_name(),
-                            bind.name,
-                            vi.name
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-            }
+        if let Some(info) = union_map.get(scrut_ty)
+            && let Some(vi) = info.variants.get(case_idx)
+        {
+            return binds
+                .iter()
+                .enumerate()
+                .filter(|(_, bind)| !bind.name.is_empty() && bind.name.as_str() != "_")
+                .map(|(j, bind)| {
+                    let field_name = vi
+                        .fields
+                        .get(j)
+                        .map(|(fnm, _)| fnm.as_str())
+                        .unwrap_or(bind.name.as_str());
+                    format!(
+                        "{} {} = {s_var}.data.{}.{field_name}; ",
+                        bind.ctype.c_name(),
+                        bind.name,
+                        vi.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
         }
         String::new()
     }

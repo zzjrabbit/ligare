@@ -2,7 +2,7 @@ use bumpalo::Bump;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::core::syntax::{MatchBranch, Name, PrimOp, Tactic, Term, Universe};
+use crate::core::syntax::{MatchBranch, Name, NamedMatchBranch, PrimOp, Tactic, Term, Universe};
 
 /// A bumpalo-backed string interner.
 ///
@@ -173,6 +173,20 @@ impl<'bump> TermArena<'bump> {
                     .collect();
                 self.match_(s, self.alloc_slice(&mapped))
             }
+            Term::NamedMatch(scrut, branches) => {
+                let s = self.map_mut(scrut, f);
+                let mapped: Vec<_> = branches
+                    .iter()
+                    .map(|(variant_name, binds, body)| {
+                        let mb: Vec<_> = binds
+                            .iter()
+                            .map(|(n, c)| (*n, self.map_mut(c, f)))
+                            .collect();
+                        (*variant_name, self.alloc_slice(&mb), self.map_mut(body, f))
+                    })
+                    .collect();
+                self.named_match(s, self.alloc_slice(&mapped))
+            }
             Term::StructDef(name, fields) => {
                 let mf: Vec<_> = fields
                     .iter()
@@ -221,6 +235,10 @@ impl<'bump> TermArena<'bump> {
 
     pub fn named(&self, name: Name<'bump>) -> &'bump Term<'bump> {
         self.alloc(Term::Named(name))
+    }
+
+    pub fn global(&self, name: Name<'bump>) -> &'bump Term<'bump> {
+        self.alloc(Term::Global(name))
     }
 
     pub fn auto_proof(&self) -> &'bump Term<'bump> {
@@ -350,6 +368,14 @@ impl<'bump> TermArena<'bump> {
         branches: &'bump [MatchBranch<'bump>],
     ) -> &'bump Term<'bump> {
         self.alloc(Term::Match(scrutinee, branches))
+    }
+
+    pub fn named_match(
+        &self,
+        scrutinee: &'bump Term<'bump>,
+        branches: &'bump [NamedMatchBranch<'bump>],
+    ) -> &'bump Term<'bump> {
+        self.alloc(Term::NamedMatch(scrutinee, branches))
     }
 
     pub fn struct_def(

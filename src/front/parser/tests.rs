@@ -18,8 +18,8 @@ fn let_destructuring_ast() {
             assert_eq!(name_x, &"x");
             match val_x {
                 Term::App(proj_x, arg_x) => {
-                    assert_eq!(**proj_x, Term::Named(&"Point.x"));
-                    assert_eq!(**arg_x, Term::Named(&"p"));
+                    assert_eq!(**proj_x, Term::Named("Point.x"));
+                    assert_eq!(**arg_x, Term::Named("p"));
                 }
                 other => panic!("expected App for x projection, got {:?}", other),
             }
@@ -28,8 +28,8 @@ fn let_destructuring_ast() {
                     assert_eq!(name_y, &"y");
                     match val_y {
                         Term::App(proj_y, arg_y) => {
-                            assert_eq!(**proj_y, Term::Named(&"Point.y"));
-                            assert_eq!(**arg_y, Term::Named(&"p"));
+                            assert_eq!(**proj_y, Term::Named("Point.y"));
+                            assert_eq!(**arg_y, Term::Named("p"));
                         }
                         other => panic!("expected App for y projection, got {:?}", other),
                     }
@@ -37,8 +37,8 @@ fn let_destructuring_ast() {
                         Term::App(op_app, rhs) => match op_app {
                             Term::App(op, lhs) => {
                                 assert_eq!(**op, Term::PrimOp(PrimOp::Add));
-                                assert_eq!(**lhs, Term::Named(&"x"));
-                                assert_eq!(**rhs, Term::Named(&"y"));
+                                assert_eq!(**lhs, Term::Named("x"));
+                                assert_eq!(**rhs, Term::Named("y"));
                             }
                             other => panic!("expected App(PrimOp(Add), lhs), got {:?}", other),
                         },
@@ -61,16 +61,16 @@ fn struct_definition_ast() {
 
     assert_eq!(name, "Foo");
     assert!(params.is_empty());
-    assert_eq!(m_ret.map(|t| *t), Some(Term::Builtin(&"prop")));
+    assert_eq!(m_ret.copied(), Some(Term::Builtin("prop")));
 
     match body {
         Term::StructDef(struct_name, fields) => {
             assert_eq!(struct_name, &"Foo");
             assert_eq!(fields.len(), 2);
             assert_eq!(fields[0].0, "a");
-            assert_eq!(*fields[0].1, Term::Builtin(&"int"));
+            assert_eq!(*fields[0].1, Term::Builtin("int"));
             assert_eq!(fields[1].0, "b");
-            assert_eq!(*fields[1].1, Term::Builtin(&"str"));
+            assert_eq!(*fields[1].1, Term::Builtin("str"));
         }
         other => panic!("expected StructDef, got {:?}", other),
     }
@@ -89,7 +89,7 @@ fn lambda_application_ast() {
                     match op_app {
                         Term::App(op, lhs) => {
                             assert_eq!(**op, Term::PrimOp(PrimOp::Add));
-                            assert_eq!(**lhs, Term::Named(&"x"));
+                            assert_eq!(**lhs, Term::Named("x"));
                         }
                         other => panic!("expected App(PrimOp(Add), lhs), got {:?}", other),
                     }
@@ -124,21 +124,21 @@ fn match_expression_ast() {
         .expect("parse should succeed");
 
     match term {
-        Term::Match(scrutinee, branches) => {
-            assert_eq!(**scrutinee, Term::Named(&"x"));
+        Term::NamedMatch(scrutinee, branches) => {
+            assert_eq!(**scrutinee, Term::Named("x"));
             assert_eq!(branches.len(), 2);
 
-            let (idx0, binds0, body0) = &branches[0];
-            assert_eq!(*idx0, 0);
+            let (variant0, binds0, body0) = &branches[0];
+            assert_eq!(*variant0, "A");
             assert!(binds0.is_empty());
             assert_eq!(**body0, Term::LitInt(1));
 
-            let (idx1, binds1, body1) = &branches[1];
-            assert_eq!(*idx1, 1);
+            let (variant1, binds1, body1) = &branches[1];
+            assert_eq!(*variant1, "B");
             assert!(binds1.is_empty());
             assert_eq!(**body1, Term::LitInt(2));
         }
-        other => panic!("expected Match, got {:?}", other),
+        other => panic!("expected NamedMatch, got {:?}", other),
     }
 }
 
@@ -146,5 +146,5 @@ fn match_expression_ast() {
 fn dotted_name_ast() {
     let (bump, arena) = setup();
     let term = parse_expr_top("Foo.bar", bump, &arena).expect("parse should succeed");
-    assert_eq!(*term, Term::Named(&"Foo.bar"));
+    assert_eq!(*term, Term::Named("Foo.bar"));
 }

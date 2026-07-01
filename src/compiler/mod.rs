@@ -3,9 +3,10 @@
 //! Resolution logic lives in `resolve.rs`; this module holds the `Compiler`
 //! struct and its lifecycle methods.
 
+mod pipeline;
 mod resolve;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 
 use bumpalo::Bump;
@@ -13,7 +14,6 @@ use bumpalo::Bump;
 use crate::backend::ir::FunSig;
 use crate::checker::TypeChecker;
 use crate::checker::context::empty_ctx;
-use crate::checker::erase::Eraser;
 use crate::config::BUILTIN_DATA;
 use crate::core::eval::Evaluator;
 use crate::core::pool::TermArena;
@@ -24,6 +24,8 @@ use crate::front::parser::{TopLevel, parse_expr_top, parse_program};
 use crate::pretty::PrettyPrinter;
 
 mod monomorph;
+
+pub(crate) use pipeline::{CodegenState, MonomorphizedProgram};
 
 fn read_source_file(file: &str) -> Result<String, Diagnostic> {
     fs::read_to_string(file)
@@ -41,37 +43,6 @@ pub struct CodegenInput<'a, 'bump> {
     pub fun_sigs: &'a [(&'bump str, FunSig)],
     pub union_types: &'a [(&'bump str, &'bump Term<'bump>)],
     pub struct_types: &'a [(&'bump str, &'bump Term<'bump>)],
-}
-
-struct ParsedProgram<'bump> {
-    tops: Vec<TopLevel<'bump>>,
-}
-
-pub(crate) struct CodegenState<'bump> {
-    raw_defs: Vec<TopLevel<'bump>>,
-    fun_sigs: Vec<(&'bump str, FunSig)>,
-    union_types: Vec<(&'bump str, &'bump Term<'bump>)>,
-    struct_types: Vec<(&'bump str, &'bump Term<'bump>)>,
-}
-
-impl<'bump> CodegenState<'bump> {
-    fn empty() -> Self {
-        Self {
-            raw_defs: Vec::new(),
-            fun_sigs: Vec::new(),
-            union_types: Vec::new(),
-            struct_types: Vec::new(),
-        }
-    }
-}
-
-pub(crate) struct MonomorphizedProgram<'bump> {
-    tops: Vec<TopLevel<'bump>>,
-    codegen: CodegenState<'bump>,
-}
-
-struct ErasedProgram<'bump> {
-    tops: Vec<TopLevel<'bump>>,
 }
 
 /// The compiler orchestrator — owns the bump allocator, term arena, and
@@ -138,187 +109,18 @@ impl<'bump> Compiler<'bump> {
         Ok(())
     }
 
-    /// Process a source file, collect top-level items, and check constraints.
-    pub fn collect_file(&mut self, file: &str) -> Result<(), Diagnostic> {
-        self.quiet = true;
-        let content = read_source_file(file)?;
-        self.collect_str(&content, file)
-    }
-
-    /// Process source code from a string (for testing).
-    pub fn collect_file_str(&mut self, source: &str) -> Result<(), Diagnostic> {
-        self.quiet = true;
-        self.collect_str(source, "<str>")
-    }
-
-    fn collect_str(&mut self, content: &str, file: &str) -> Result<(), Diagnostic> {
-        let parsed = self.parse_program_for_collection(content, file)?;
-        for top in &parsed.tops {
-            self.process_top_level(top.clone())
-                .map_err(|d| d.with_source_if_missing(file, content))?;
-        }
-        let (union_names, struct_names) = self.build_name_sets(&parsed.tops);
-        let codegen = self.collect_codegen_state(&parsed.tops, &union_names, &struct_names)?;
-        let monomorphized = self.monomorphize_for_codegen(parsed.tops, codegen)?;
-        self.apply_codegen_state(monomorphized.codegen);
-
-        let eraser = Eraser::new(self.arena, self.checker.builtins.clone());
-        let erased = self.erase_and_collect_tops(monomorphized.tops, &eraser);
-        self.tops.extend(erased.tops);
-        Ok(())
-    }
-
-    fn parse_program_for_collection(
-        &self,
-        content: &str,
-        file: &str,
-    ) -> Result<ParsedProgram<'bump>, Diagnostic> {
-        let tops = parse_program(content, self.bump, self.arena).map_err(|e| {
-            Diagnostic::with_span(format!("parse error: {}", e.message), e.span)
-                .with_source(file, content)
-        })?;
-        Ok(ParsedProgram { tops })
-    }
-
-    /// Build sets of union and struct constraint names from the top-level definitions.
-    fn build_name_sets(&self, tops: &[TopLevel<'bump>]) -> (HashSet<String>, HashSet<String>) {
-        let union_names: HashSet<String> = tops
-            .iter()
-            .filter_map(|top| match top {
-                TopLevel::TLDef(name, _, _, Term::UnionDef(..), _) => Some(name.to_string()),
-                _ => None,
-            })
-            .collect();
-        let struct_names: HashSet<String> = tops
-            .iter()
-            .filter_map(|top| match top {
-                TopLevel::TLDef(name, _, _, Term::StructDef(..), _) => Some(name.to_string()),
-                _ => None,
-            })
-            .collect();
-        (union_names, struct_names)
-    }
-
-    /// Collect the codegen-facing inputs from the original un-erased tops.
-    fn collect_codegen_state(
-        &self,
-        tops: &[TopLevel<'bump>],
-        union_names: &HashSet<String>,
-        struct_names: &HashSet<String>,
-    ) -> Result<CodegenState<'bump>, Diagnostic> {
-        let mut state = CodegenState::empty();
-        for top in tops {
-            if let TopLevel::TLDef(name, params, m_ret, body, _) = top {
-                if matches!(body, Term::UnionDef(..)) {
-                    state.union_types.push((name, body));
-                } else if matches!(body, Term::StructDef(..)) {
-                    state.struct_types.push((name, body));
-                }
-                if !params.is_empty()
-                    && !matches!(body, Term::UnionDef(..) | Term::StructDef(..))
-                    && Self::refinement_parts(body).is_none()
-                {
-                    let semantics = SemanticQueries::new(self.checker.builtins());
-                    if params.iter().any(|(_, c)| {
-                        c.is_some_and(|t| semantics.is_erased_parameter_constraint(t))
-                    }) {
-                        continue;
-                    }
-                    let sig = FunSig::from_func(params, *m_ret, body, union_names, struct_names)?;
-                    state.fun_sigs.push((name, sig));
-                }
-            }
-        }
-
-        let desugarer = crate::core::debruijn::Desugarer::new(self.arena);
-        for top in tops {
-            if let TopLevel::TLDef(name, params, m_ret, body_term, span) = top {
-                if matches!(body_term, Term::UnionDef(..) | Term::StructDef(..)) {
-                    continue;
-                }
-                let term = self.env.get(name).copied().unwrap_or(*body_term);
-                let resolved = self.subst_top_level(term);
-                let desugared = desugarer.desugar(resolved);
-                state.raw_defs.push(TopLevel::TLDef(
-                    name,
-                    params,
-                    *m_ret,
-                    desugared,
-                    span.clone(),
-                ));
-            }
-        }
-        Ok(state)
-    }
-
-    /// Erase, resolve, and filter top-level definitions. Skips union/struct
-    /// typedefs (including generic ones) and drops zero-param type aliases after erasure.
-    fn erase_and_collect_tops(
-        &self,
-        tops: Vec<TopLevel<'bump>>,
-        eraser: &Eraser<'bump>,
-    ) -> ErasedProgram<'bump> {
-        let tops = tops
-            .into_iter()
-            .filter_map(|top| match top {
-                TopLevel::TLDef(_name, _params, _m_ret, Term::UnionDef(..) | Term::StructDef(..), _) =>
-                {
-                    None
-                }
-                TopLevel::TLDef(name, params, m_ret, body_term, span) => {
-                    let semantics = SemanticQueries::new(self.checker.builtins());
-                    if params
-                        .iter()
-                        .any(|(_, c)| c.is_some_and(|t| semantics.is_erased_parameter_constraint(t)))
-                    {
-                        return None;
-                    }
-                    let term = self.env.get(name).copied().unwrap_or(body_term);
-                    let resolved = self.subst_top_level(term);
-                    let desugared = self.checker.desugarer.desugar(resolved);
-                    let erased = eraser.erase(desugared);
-                    Some(TopLevel::TLDef(name, params, m_ret, erased, span))
-                }
-                TopLevel::TLShow(term, span) | TopLevel::TLExpr(term, span) => {
-                    let resolved = self.subst_top_level(term);
-                    let desugared = self.checker.desugarer.desugar(resolved);
-                    Some(TopLevel::TLShow(eraser.erase(desugared), span))
-                }
-                TopLevel::TLTheorem(name, _, body, span) => {
-                    let resolved_body = self.subst_top_level(body);
-                    let desugared = self.checker.desugarer.desugar(resolved_body);
-                    let erased = eraser.erase(desugared);
-                    Some(TopLevel::TLDef(name, &[], None, erased, span))
-                }
-                TopLevel::TLCheck(_, _, _) => None,
-            })
-            .filter(|top| {
-                !matches!(
-                    top,
-                    TopLevel::TLDef(_, params, _, body, _)
-                        if params.is_empty()
-                            && matches!(body, Term::Builtin(_) | Term::Named(_) | Term::UnionDef(..) | Term::StructDef(..))
-                )
-            })
-            .collect();
-        ErasedProgram { tops }
-    }
-
-    fn apply_codegen_state(&mut self, state: CodegenState<'bump>) {
-        self.raw_defs = state.raw_defs;
-        self.fun_sigs = state.fun_sigs;
-        self.union_types = state.union_types;
-        self.struct_types = state.struct_types;
-    }
-
     /// Evaluate an expression string (for `--eval`).
     pub fn eval_expr(&self, expr: &str) -> Result<(), Diagnostic> {
         let term = parse_expr_top(expr, self.bump, self.arena).map_err(|err| {
             Diagnostic::with_span(format!("--eval parse error: {}", err.message), err.span)
                 .with_source("--eval", expr)
         })?;
-        let resolved = self.resolve_all(term);
-        let self_name = self.extract_func_name(term);
+        let resolved = self.try_resolve_all(term)?;
+        let self_name = self
+            .checker
+            .desugar_with_context(term)
+            .ok()
+            .and_then(|term| self.extract_func_name(term));
         let mut ev = Evaluator::new(self.arena);
         if let Some(n) = self_name {
             ev.set_self_name(n);
@@ -393,142 +195,206 @@ impl<'bump> Compiler<'bump> {
         self.arena.annot(func_body, func_constraint)
     }
 
+    fn desugar_checked_def(
+        &self,
+        params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+        m_ret: Option<&'bump Term<'bump>>,
+        body: &'bump Term<'bump>,
+    ) -> Result<&'bump Term<'bump>, Diagnostic> {
+        let names: Vec<_> = params.iter().rev().map(|(pn, _)| *pn).collect();
+        if matches!(body, Term::UnionDef(..) | Term::StructDef(..)) {
+            return self.checker.desugar_with_names_context(body, &names);
+        }
+        let func_body = params.iter().rfold(
+            self.checker.desugar_with_names_context(body, &names)?,
+            |b, &(_pn, _)| self.arena.lam(b),
+        );
+        let default = self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA));
+        let ret = m_ret
+            .map(|t| self.checker.desugar_with_names_context(t, &names))
+            .transpose()?
+            .unwrap_or(default);
+        let func_constraint =
+            params
+                .iter()
+                .enumerate()
+                .rev()
+                .try_fold(ret, |b, (idx, &(pn, mc))| {
+                    let dom_env: Vec<_> = params[..idx].iter().rev().map(|(n, _)| *n).collect();
+                    let dom = mc
+                        .map(|t| self.checker.desugar_with_names_context(t, &dom_env))
+                        .transpose()?
+                        .unwrap_or(default);
+                    Ok::<_, Diagnostic>(self.arena.pi(pn, dom, b))
+                })?;
+        Ok(self.arena.annot(func_body, func_constraint))
+    }
+
     /// Process a single top-level item.
     fn process_top_level(&mut self, top: TopLevel<'bump>) -> Result<(), Diagnostic> {
         match top {
-            TopLevel::TLDef(name, params, _m_ret, body, span) => {
-                let semantics = SemanticQueries::new(self.checker.builtins());
-                let universe = semantics.universe(&empty_ctx(), body);
-                if universe == Some(Universe::UProp) {
-                    if self.register_prop_definition(name, params, _m_ret, body) {
-                        return Ok(());
-                    }
-                }
-
-                let previous = if self.has_erased_parameter(params) {
-                    self.env.insert(name, body)
-                } else {
-                    self.env.insert(name, self.definition_signature(body))
-                };
-                if !self.has_erased_parameter(params)
-                    && let Err(err) = self.checker.check(
-                        &empty_ctx(),
-                        self.resolve_all(body),
-                        self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA)),
-                    )
-                {
-                    if let Some(prev) = previous {
-                        self.env.insert(name, prev);
-                    } else {
-                        self.env.remove(name);
-                    }
-                    return Err(Diagnostic::with_span(
-                        format!("definition {} failed: {}", name, err),
-                        span,
-                    ));
-                }
-
-                if !self.quiet {
-                    println!("[defined] {}", name);
-                }
-                self.env.insert(name, body);
+            TopLevel::TLDef(name, params, m_ret, body, span) => {
+                self.process_def(name, params, m_ret, body, span)?;
             }
             TopLevel::TLCheck(term, constraint, span) => {
-                let resolved = self.resolve_all(term);
-                let resolved_constraint = self.resolve_all(constraint);
-                match self
-                    .checker
-                    .check(&empty_ctx(), resolved, resolved_constraint)
-                {
-                    Err(err) => {
-                        return Err(Diagnostic::with_span(
-                            format!("check failed: {}", err),
-                            span,
-                        ));
-                    }
-                    Ok(_) => {
-                        if !self.quiet {
-                            println!("[OK]");
-                        }
-                    }
-                }
+                self.process_check(term, constraint, span)?;
             }
             TopLevel::TLTheorem(name, prop, body, span) => {
-                let resolved_body = self.resolve_all(body);
-                let resolved_prop = self.resolve_all(prop);
-                match self
-                    .checker
-                    .check(&empty_ctx(), resolved_body, resolved_prop)
-                {
-                    Err(err) => {
-                        return Err(Diagnostic::with_span(
-                            format!("theorem check failed: {}", err),
-                            span,
-                        ));
-                    }
-                    Ok(_) => {
-                        if !self.quiet {
-                            println!("[theorem] {}", name);
-                        }
-                        self.env
-                            .insert(name, self.arena.annot(resolved_body, resolved_prop));
-                    }
-                }
+                self.process_theorem(name, prop, body, span)?;
             }
-            TopLevel::TLShow(_term, _span) => {
-                if self.quiet {
-                    return Ok(());
-                }
-                let resolved = self.resolve_all(_term);
-                self.checker
-                    .check(
-                        &empty_ctx(),
-                        resolved,
-                        self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA)),
-                    )
-                    .map_err(|err| {
-                        Diagnostic::with_span(format!("show check failed: {}", err), _span.clone())
-                    })?;
-                let self_name = self.extract_func_name(_term);
-                let mut ev = Evaluator::new(self.arena);
-                if let Some(n) = self_name {
-                    ev.set_self_name(n);
-                }
-                match ev.eval(resolved) {
-                    Err(err) => {
-                        return Err(Diagnostic::with_span(format!("show error: {}", err), _span));
-                    }
-                    Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
-                }
+            TopLevel::TLShow(term, span) => {
+                self.process_eval_like(term, span, "show")?;
             }
-            TopLevel::TLExpr(_term, _span) => {
-                if self.quiet {
-                    return Ok(());
-                }
-                let resolved = self.resolve_all(_term);
-                self.checker
-                    .check(
-                        &empty_ctx(),
-                        resolved,
-                        self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA)),
-                    )
-                    .map_err(|err| {
-                        Diagnostic::with_span(format!("eval check failed: {}", err), _span.clone())
-                    })?;
-                let self_name = self.extract_func_name(_term);
-                let mut ev = Evaluator::new(self.arena);
-                if let Some(n) = self_name {
-                    ev.set_self_name(n);
-                }
-                match ev.eval(resolved) {
-                    Err(err) => {
-                        return Err(Diagnostic::with_span(format!("eval error: {}", err), _span));
-                    }
-                    Ok(val) => println!("{}", PrettyPrinter::pretty(val)),
-                }
+            TopLevel::TLExpr(term, span) => {
+                self.process_eval_like(term, span, "eval")?;
             }
         }
         Ok(())
+    }
+
+    fn process_def(
+        &mut self,
+        name: Name<'bump>,
+        params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+        m_ret: Option<&'bump Term<'bump>>,
+        body: &'bump Term<'bump>,
+        span: std::ops::Range<usize>,
+    ) -> Result<(), Diagnostic> {
+        let body = self.desugar_checked_def(params, m_ret, body)?;
+        let semantics = SemanticQueries::new(self.checker.builtins());
+        let universe = semantics.universe(&empty_ctx(), body);
+        if universe == Some(Universe::UProp)
+            && self.register_prop_definition(name, params, m_ret, body)
+        {
+            return Ok(());
+        }
+
+        let has_erased_parameter = self.has_erased_parameter(params);
+        let previous = if has_erased_parameter {
+            self.env.insert(name, body)
+        } else {
+            self.env.insert(name, self.definition_signature(body))
+        };
+        if !has_erased_parameter
+            && let Err(err) = self.checker.check(
+                &empty_ctx(),
+                self.try_resolve_all(body)?,
+                self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA)),
+            )
+        {
+            self.restore_env_binding(name, previous);
+            return Err(Diagnostic::with_span(
+                format!("definition {} failed: {}", name, err),
+                span,
+            ));
+        }
+
+        if !self.quiet {
+            println!("[defined] {}", name);
+        }
+        self.env.insert(name, body);
+        Ok(())
+    }
+
+    fn restore_env_binding(&mut self, name: Name<'bump>, previous: Option<&'bump Term<'bump>>) {
+        if let Some(prev) = previous {
+            self.env.insert(name, prev);
+        } else {
+            self.env.remove(name);
+        }
+    }
+
+    fn process_check(
+        &self,
+        term: &'bump Term<'bump>,
+        constraint: &'bump Term<'bump>,
+        span: std::ops::Range<usize>,
+    ) -> Result<(), Diagnostic> {
+        let resolved = self.try_resolve_all(term)?;
+        let resolved_constraint = self.try_resolve_all(constraint)?;
+        match self
+            .checker
+            .check(&empty_ctx(), resolved, resolved_constraint)
+        {
+            Err(err) => Err(Diagnostic::with_span(
+                format!("check failed: {}", err),
+                span,
+            )),
+            Ok(_) => {
+                if !self.quiet {
+                    println!("[OK]");
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn process_theorem(
+        &mut self,
+        name: Name<'bump>,
+        prop: &'bump Term<'bump>,
+        body: &'bump Term<'bump>,
+        span: std::ops::Range<usize>,
+    ) -> Result<(), Diagnostic> {
+        let resolved_body = self.try_resolve_all(body)?;
+        let resolved_prop = self.try_resolve_all(prop)?;
+        match self
+            .checker
+            .check(&empty_ctx(), resolved_body, resolved_prop)
+        {
+            Err(err) => Err(Diagnostic::with_span(
+                format!("theorem check failed: {}", err),
+                span,
+            )),
+            Ok(_) => {
+                if !self.quiet {
+                    println!("[theorem] {}", name);
+                }
+                self.env
+                    .insert(name, self.arena.annot(resolved_body, resolved_prop));
+                Ok(())
+            }
+        }
+    }
+
+    fn process_eval_like(
+        &self,
+        term: &'bump Term<'bump>,
+        span: std::ops::Range<usize>,
+        label: &str,
+    ) -> Result<(), Diagnostic> {
+        if self.quiet {
+            return Ok(());
+        }
+        let resolved = self.try_resolve_all(term)?;
+        self.checker
+            .check(
+                &empty_ctx(),
+                resolved,
+                self.arena.builtin(self.arena.alloc_str(BUILTIN_DATA)),
+            )
+            .map_err(|err| {
+                Diagnostic::with_span(format!("{label} check failed: {}", err), span.clone())
+            })?;
+        let self_name = self
+            .checker
+            .desugar_with_context(term)
+            .ok()
+            .and_then(|term| self.extract_func_name(term));
+        let mut ev = Evaluator::new(self.arena);
+        if let Some(n) = self_name {
+            ev.set_self_name(n);
+        }
+        match ev.eval(resolved) {
+            Err(err) => Err(Diagnostic::with_span(
+                format!("{label} error: {}", err),
+                span,
+            )),
+            Ok(val) => {
+                println!("{}", PrettyPrinter::pretty(val));
+                Ok(())
+            }
+        }
     }
 
     fn register_prop_definition(
@@ -565,14 +431,19 @@ impl<'bump> Compiler<'bump> {
                 }
                 true
             }
-            _ if params.is_empty() && Self::refinement_parts(body).is_some() => {
-                let desugared = self.checker.desugarer.desugar(body);
-                let (parent, predicate) = Self::refinement_parts(desugared).unwrap();
-                if !self.quiet {
-                    println!("[refinement] {}", name);
+            _ if params.is_empty() => {
+                let Some(desugared) = self.checker.desugar_with_context(body).ok() else {
+                    return false;
+                };
+                if let Some((parent, predicate)) = Self::refinement_parts(desugared) {
+                    if !self.quiet {
+                        println!("[refinement] {}", name);
+                    }
+                    self.checker.add_refinement(name, parent, predicate);
+                    true
+                } else {
+                    false
                 }
-                self.checker.add_refinement(name, parent, predicate);
-                true
             }
             _ => false,
         }

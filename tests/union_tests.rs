@@ -52,6 +52,16 @@ fn match_reduces_on_variant() {
 }
 
 #[test]
+fn match_uses_variant_names_not_branch_order() {
+    let (bump, arena) = setup();
+    let mut c = Compiler::new(bump, &arena);
+    c.process_file_str(
+        "def Color : prop := union\n  | Red\n  | Green\n#check match Red with | Green => false | Red => true : true\n",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
 fn eval_match() {
     let (bump, arena) = setup();
     let mut compiler = Compiler::new(bump, &arena);

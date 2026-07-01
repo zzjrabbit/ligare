@@ -42,7 +42,7 @@ fn constraint_union_name_returns_union() {
     let names: HashSet<String> = ["MyUnion".into()].into();
     let empty = HashSet::new();
     assert_eq!(
-        constraint_to_ctype(&Term::Named("MyUnion"), &names, &empty).unwrap(),
+        constraint_to_ctype(&Term::Global("MyUnion"), &names, &empty).unwrap(),
         CType::Union("MyUnion".into())
     );
 }
@@ -52,7 +52,7 @@ fn constraint_struct_name_returns_struct() {
     let names: HashSet<String> = ["Point".into()].into();
     let empty = HashSet::new();
     assert_eq!(
-        constraint_to_ctype(&Term::Named("Point"), &empty, &names).unwrap(),
+        constraint_to_ctype(&Term::Global("Point"), &empty, &names).unwrap(),
         CType::Struct("Point".into())
     );
 }

@@ -40,7 +40,6 @@ impl<'a> SemanticQueries<'a> {
             | Term::LitBool(_)
             | Term::LitStr(_)
             | Term::Lam(_)
-            | Term::NamedLam(_, _)
             | Term::PrimOp(_)
             | Term::RefParam => Some(Universe::UData),
             Term::App(f, _) => self.universe(ctx, f),
@@ -56,7 +55,7 @@ impl<'a> SemanticQueries<'a> {
             Term::ByProof(None, _) => Some(Universe::UProof),
             Term::Let(_, _, body, _) => self.universe(ctx, body),
             Term::IfThenElse(_, t, _) => self.universe(ctx, t),
-            Term::Builtin(name) | Term::Named(name) => {
+            Term::Builtin(name) | Term::Global(name) => {
                 self.builtins.universe_of(name).or(Some(Universe::UData))
             }
             Term::UnionDef(..) => Some(Universe::UProp),
@@ -67,23 +66,26 @@ impl<'a> SemanticQueries<'a> {
             Term::Match(_, branches) => branches
                 .first()
                 .and_then(|(_, _, body)| self.universe(ctx, body)),
+            Term::Named(_) | Term::NamedLam(..) | Term::NamedMatch(..) => {
+                panic!("parser-level term reached semantic query before desugaring")
+            }
         }
     }
 
     pub fn constraint_kind(&self, term: &Term<'_>) -> ConstraintKind {
         match term {
-            Term::Builtin(name) | Term::Named(name) if *name == "data" => ConstraintKind::DataTop,
-            Term::Builtin(name) | Term::Named(name)
+            Term::Builtin(name) | Term::Global(name) if *name == "data" => ConstraintKind::DataTop,
+            Term::Builtin(name) | Term::Global(name)
                 if matches!(*name, "prop" | "theorem" | "proof") =>
             {
                 ConstraintKind::MetaConstraint
             }
             Term::Universe(Universe::UData) => ConstraintKind::DataTop,
             Term::Universe(_) => ConstraintKind::MetaConstraint,
-            Term::Builtin(name) | Term::Named(name) if matches!(*name, "int" | "bool" | "str") => {
+            Term::Builtin(name) | Term::Global(name) if matches!(*name, "int" | "bool" | "str") => {
                 ConstraintKind::BuiltinDataConstraint
             }
-            Term::Builtin(name) | Term::Named(name) if matches!(*name, "and" | "or" | "not") => {
+            Term::Builtin(name) | Term::Global(name) if matches!(*name, "and" | "or" | "not") => {
                 ConstraintKind::LogicalOp
             }
             Term::Refine(..) => ConstraintKind::Refine,
@@ -110,7 +112,10 @@ impl<'a> SemanticQueries<'a> {
             Term::Refine(..) => ErasePolicy::EraseToParent,
             Term::Annot(inner, _) | Term::ByProof(Some(inner), _) => self.erase_policy(inner),
             Term::App(f, _) => self.data_policy(f),
-            Term::Builtin(_) | Term::Named(_) => self.data_policy(term),
+            Term::Builtin(_) | Term::Global(_) => self.data_policy(term),
+            Term::Named(_) | Term::NamedLam(..) | Term::NamedMatch(..) => {
+                panic!("parser-level term reached erase-policy query before desugaring")
+            }
             Term::ByProof(None, _)
             | Term::AutoProof
             | Term::Pi(..)

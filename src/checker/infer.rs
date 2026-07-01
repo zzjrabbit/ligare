@@ -37,8 +37,8 @@ impl<'bump> TypeChecker<'bump> {
         constraint: &'bump Term<'bump>,
     ) -> Result<(), Diagnostic> {
         // Check if f is a variant constructor
-        let f_dsg = self.desugarer.desugar(f);
-        if let Term::Builtin(name) | Term::Named(name) = f_dsg {
+        let f_dsg = self.desugar_with_context(f)?;
+        if let Term::Builtin(name) | Term::Global(name) = f_dsg {
             if let Some((uname, idx, field_specs)) = self.lookup_variant(name) {
                 if field_specs.len() != 1 {
                     return Err(diag!(
@@ -107,8 +107,8 @@ impl<'bump> TypeChecker<'bump> {
             }
             None => {
                 // No Pi constraint information — check for undefined names first.
-                let f_dsg = self.desugarer.desugar(f);
-                if let Term::Builtin(name) | Term::Named(name) = f_dsg
+                let f_dsg = self.desugar_with_context(f)?;
+                if let Term::Builtin(name) | Term::Global(name) = f_dsg
                     && self.builtins.checker(name).is_none()
                     && lookup_refine(name, &self.table).is_none()
                 {
@@ -178,7 +178,7 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         f: &'bump Term<'bump>,
     ) -> Result<Option<&'bump Term<'bump>>, Diagnostic> {
-        let f_dsg = self.desugarer.desugar(f);
+        let f_dsg = self.desugar_with_context(f)?;
         match f_dsg {
             Term::Annot(_, ty) => Ok(Some(ty)),
             Term::App(f2, a2) => {
@@ -274,7 +274,7 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         scrutinee: &'bump Term<'bump>,
     ) -> Result<Option<VariantPayloadConstraints<'bump>>, Diagnostic> {
-        let scrutinee = self.desugarer.desugar(scrutinee);
+        let scrutinee = self.desugar_with_context(scrutinee)?;
         let union_name = match self.evaluator.whnf(scrutinee)? {
             Term::Variant(name, _, _) => Some(name),
             Term::Var(i) => match ctx
@@ -282,7 +282,7 @@ impl<'bump> TypeChecker<'bump> {
                 .map(|ty| self.evaluator.whnf(ty))
                 .transpose()?
             {
-                Some(Term::Builtin(name) | Term::Named(name)) => Some(name),
+                Some(Term::Builtin(name) | Term::Global(name)) => Some(name),
                 _ => None,
             },
             _ => None,
@@ -324,7 +324,7 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         term: &'bump Term<'bump>,
     ) -> Result<&'bump Term<'bump>, Diagnostic> {
-        let desugared = self.desugarer.desugar(term);
+        let desugared = self.desugar_with_context(term)?;
         match desugared {
             Term::Annot(_, constraint) => Ok(constraint),
             Term::LitInt(_) => Ok(self.arena.builtin(self.arena.alloc_str("int"))),
@@ -336,7 +336,7 @@ impl<'bump> TypeChecker<'bump> {
             Term::StructProj(subject, idx) => {
                 self.infer_struct_projection_constraint(ctx, subject, *idx)
             }
-            Term::Builtin(name) | Term::Named(name) if self.is_struct_projector_name(name) => {
+            Term::Builtin(name) | Term::Global(name) if self.is_struct_projector_name(name) => {
                 Err(diag!("unknown struct field projector: {}", name))
             }
             Term::IfThenElse(_, tbranch, _) | Term::Match(_, [.., (_, _, tbranch)]) => {
@@ -355,7 +355,7 @@ impl<'bump> TypeChecker<'bump> {
         ctx: &Context<'bump>,
         f: &'bump Term<'bump>,
     ) -> Result<&'bump Term<'bump>, Diagnostic> {
-        let f_dsg = self.desugarer.desugar(f);
+        let f_dsg = self.desugar_with_context(f)?;
         match f_dsg {
             Term::App(inner, _) if matches!(inner, Term::PrimOp(_)) => match inner {
                 Term::PrimOp(
@@ -374,7 +374,7 @@ impl<'bump> TypeChecker<'bump> {
                     Ok(self.arena.builtin(self.arena.alloc_str(BUILTIN_BOOL)))
                 }
             },
-            Term::Builtin(name) | Term::Named(name) if self.is_struct_projector_name(name) => {
+            Term::Builtin(name) | Term::Global(name) if self.is_struct_projector_name(name) => {
                 Err(diag!("unknown struct field projector: {}", name))
             }
             _ => match self.infer_pi_constraint(ctx, f)? {
@@ -411,7 +411,7 @@ impl<'bump> TypeChecker<'bump> {
                 return Err(Diagnostic::new("term has no known struct constraint"));
             };
             let ty_nf = self.evaluator.whnf(ty)?;
-            if let Term::Builtin(sname) | Term::Named(sname) = ty_nf
+            if let Term::Builtin(sname) | Term::Global(sname) = ty_nf
                 && let Some((Term::StructDef(_, fields), _)) = self.lookup_struct(sname)
                 && let Some((_, constraint)) = fields.get(idx)
             {
@@ -450,7 +450,7 @@ impl<'bump> TypeChecker<'bump> {
 
         let norm = self.evaluator.whnf(constraint)?;
         match norm {
-            Term::Builtin(name) | Term::Named(name) => {
+            Term::Builtin(name) | Term::Global(name) => {
                 // Check if term is a Variant — verify union name matches constraint
                 if let Term::Variant(uname, _, _) = term
                     && uname == name
@@ -464,43 +464,9 @@ impl<'bump> TypeChecker<'bump> {
                     self.check(ctx, term, parent)?;
                     self.prove_auto(ctx, term, pred)
                 } else if self.lookup_union(name).is_some() {
-                    // Union constraint — check if term is a Variant of this union
-                    if let Term::Variant(uname, _, _) = term {
-                        if uname == name {
-                            Ok(())
-                        } else {
-                            Err(diag!(
-                                "expected term constrained by {}, got variant of {}",
-                                name,
-                                uname
-                            ))
-                        }
-                    } else {
-                        Err(diag!(
-                            "expected term constrained by {}, got {}",
-                            name,
-                            PrettyPrinter::pretty(term)
-                        ))
-                    }
+                    self.check_union_constraint(term, name)
                 } else if self.lookup_struct(name).is_some() {
-                    // Struct constraint — check if term is a StructCons of this struct
-                    if let Term::StructCons(sname, _) = term {
-                        if sname == name {
-                            Ok(())
-                        } else {
-                            Err(diag!(
-                                "expected term constrained by {}, got struct {}",
-                                name,
-                                sname
-                            ))
-                        }
-                    } else {
-                        Err(diag!(
-                            "expected term constrained by {}, got {}",
-                            name,
-                            PrettyPrinter::pretty(term)
-                        ))
-                    }
+                    self.check_struct_constraint(term, name)
                 } else {
                     Err(diag!("unknown constraint: {}", name))
                 }
@@ -521,44 +487,8 @@ impl<'bump> TypeChecker<'bump> {
             Term::App(app_and, a) => self.try_check_logical_op(ctx, term, app_and, a, norm),
             // When a generic union/struct application is resolved via the env,
             // the constraint normalizes to the raw UnionDef/StructDef term.
-            Term::UnionDef(uname, _) => {
-                if let Term::Variant(vname, _, _) = term {
-                    if vname == uname {
-                        Ok(())
-                    } else {
-                        Err(diag!(
-                            "expected term constrained by {}, got variant of {}",
-                            uname,
-                            vname
-                        ))
-                    }
-                } else {
-                    Err(diag!(
-                        "expected term constrained by {}, got {}",
-                        uname,
-                        PrettyPrinter::pretty(term)
-                    ))
-                }
-            }
-            Term::StructDef(sname, _) => {
-                if let Term::StructCons(cname, _) = term {
-                    if cname == sname {
-                        Ok(())
-                    } else {
-                        Err(diag!(
-                            "expected term constrained by {}, got struct {}",
-                            sname,
-                            cname
-                        ))
-                    }
-                } else {
-                    Err(diag!(
-                        "expected term constrained by {}, got {}",
-                        sname,
-                        PrettyPrinter::pretty(term)
-                    ))
-                }
-            }
+            Term::UnionDef(uname, _) => self.check_union_constraint(term, uname),
+            Term::StructDef(sname, _) => self.check_struct_constraint(term, sname),
             _ => {
                 if let Some(result) = self.try_bool_constraint(term, norm) {
                     return result;
@@ -578,6 +508,54 @@ impl<'bump> TypeChecker<'bump> {
         }
     }
 
+    fn check_union_constraint(
+        &self,
+        term: &'bump Term<'bump>,
+        expected: &str,
+    ) -> Result<(), Diagnostic> {
+        if let Term::Variant(actual, _, _) = term {
+            if *actual == expected {
+                Ok(())
+            } else {
+                Err(diag!(
+                    "expected term constrained by {}, got variant of {}",
+                    expected,
+                    actual
+                ))
+            }
+        } else {
+            Err(diag!(
+                "expected term constrained by {}, got {}",
+                expected,
+                PrettyPrinter::pretty(term)
+            ))
+        }
+    }
+
+    fn check_struct_constraint(
+        &self,
+        term: &'bump Term<'bump>,
+        expected: &str,
+    ) -> Result<(), Diagnostic> {
+        if let Term::StructCons(actual, _) = term {
+            if *actual == expected {
+                Ok(())
+            } else {
+                Err(diag!(
+                    "expected term constrained by {}, got struct {}",
+                    expected,
+                    actual
+                ))
+            }
+        } else {
+            Err(diag!(
+                "expected term constrained by {}, got {}",
+                expected,
+                PrettyPrinter::pretty(term)
+            ))
+        }
+    }
+
     pub(crate) fn try_check_logical_op(
         &self,
         ctx: &Context<'bump>,
@@ -587,7 +565,7 @@ impl<'bump> TypeChecker<'bump> {
         norm: &'bump Term<'bump>,
     ) -> Result<(), Diagnostic> {
         // Single-arg case: (not A) — vacuous operators always succeed.
-        if let Term::Builtin(name) | Term::Named(name) = head {
+        if let Term::Builtin(name) | Term::Global(name) = head {
             if self.builtins.logic_kind(name) == Some(LogicKind::Vacuous) {
                 return Ok(());
             }
@@ -601,7 +579,7 @@ impl<'bump> TypeChecker<'bump> {
         let Term::App(builtin, b) = head else {
             return self.check_app_constraint(ctx, term, norm);
         };
-        let (Term::Builtin(name) | Term::Named(name)) = *builtin else {
+        let (Term::Builtin(name) | Term::Global(name)) = *builtin else {
             return self.check_app_constraint(ctx, term, norm);
         };
         match self.builtins.logic_kind(name) {
@@ -633,43 +611,9 @@ impl<'bump> TypeChecker<'bump> {
         _norm: &'bump Term<'bump>,
     ) -> Option<Result<(), Diagnostic>> {
         if self.lookup_union(name).is_some() {
-            // Union constraint application — check if term is a Variant of this union
-            if let Term::Variant(uname, _, _) = term {
-                if *uname == name {
-                    Some(Ok(()))
-                } else {
-                    Some(Err(diag!(
-                        "expected term constrained by {}, got variant of {}",
-                        name,
-                        uname
-                    )))
-                }
-            } else {
-                Some(Err(diag!(
-                    "expected term constrained by {}, got {}",
-                    name,
-                    PrettyPrinter::pretty(term)
-                )))
-            }
+            Some(self.check_union_constraint(term, name))
         } else if self.lookup_struct(name).is_some() {
-            // Struct constraint application — check if term is a StructCons of this struct
-            if let Term::StructCons(sname, _) = term {
-                if *sname == name {
-                    Some(Ok(()))
-                } else {
-                    Some(Err(diag!(
-                        "expected term constrained by {}, got struct {}",
-                        name,
-                        sname
-                    )))
-                }
-            } else {
-                Some(Err(diag!(
-                    "expected term constrained by {}, got {}",
-                    name,
-                    PrettyPrinter::pretty(term)
-                )))
-            }
+            Some(self.check_struct_constraint(term, name))
         } else {
             None
         }
@@ -677,20 +621,28 @@ impl<'bump> TypeChecker<'bump> {
 
     /// Returns true if a field constraint is a generic parameter of the given union.
     fn is_union_generic_param(&self, union_name: &str, constraint: &Term<'bump>) -> bool {
-        if let Term::Builtin(name) | Term::Named(name) = constraint
-            && let Some((_, type_params)) = self.lookup_union(union_name)
-        {
-            return type_params.iter().any(|p| **p == **name);
+        if let Some((_, type_params)) = self.lookup_union(union_name) {
+            match constraint {
+                Term::Var(i) => return *i < type_params.len(),
+                Term::Builtin(name) | Term::Global(name) => {
+                    return type_params.iter().any(|p| **p == **name);
+                }
+                _ => {}
+            }
         }
         false
     }
 
     /// Returns true if a field constraint is a generic parameter of the given struct.
     fn is_struct_generic_param(&self, struct_name: &str, constraint: &Term<'bump>) -> bool {
-        if let Term::Builtin(name) | Term::Named(name) = constraint
-            && let Some((_, type_params)) = self.lookup_struct(struct_name)
-        {
-            return type_params.iter().any(|p| **p == **name);
+        if let Some((_, type_params)) = self.lookup_struct(struct_name) {
+            match constraint {
+                Term::Var(i) => return *i < type_params.len(),
+                Term::Builtin(name) | Term::Global(name) => {
+                    return type_params.iter().any(|p| **p == **name);
+                }
+                _ => {}
+            }
         }
         false
     }
@@ -805,7 +757,7 @@ impl<'bump> TypeChecker<'bump> {
             (Term::Refine(_, parent, _), other) | (other, Term::Refine(_, parent, _)) => {
                 self.check_pi_match(parent, other)
             }
-            (Term::Builtin(n1) | Term::Named(n1), Term::Builtin(n2) | Term::Named(n2))
+            (Term::Builtin(n1) | Term::Global(n1), Term::Builtin(n2) | Term::Global(n2))
                 if n1 == n2 =>
             {
                 Ok(())
@@ -854,7 +806,7 @@ impl<'bump> TypeChecker<'bump> {
             match t {
                 Term::UnionDef(name, _) | Term::StructDef(name, _) => Some(name),
                 Term::App(head, _) => {
-                    if let Term::Builtin(n) | Term::Named(n) = *head
+                    if let Term::Builtin(n) | Term::Global(n) = *head
                         && (self.lookup_union(n).is_some() || self.lookup_struct(n).is_some())
                     {
                         Some(n)
@@ -883,7 +835,7 @@ impl<'bump> TypeChecker<'bump> {
 
     pub(crate) fn constraint_name<'a>(&self, t: &Term<'a>) -> &'a str {
         match t {
-            Term::Builtin(n) | Term::Named(n) => n,
+            Term::Builtin(n) | Term::Global(n) => n,
             Term::Refine(n, _, _) => n,
             _ => "?",
         }
@@ -899,7 +851,7 @@ impl<'bump> TypeChecker<'bump> {
         }
         match t1 {
             Term::Refine(_, parent, _) => self.is_refinement_of(parent, t2),
-            Term::Builtin(n) | Term::Named(n) => lookup_refine(n, &self.table)
+            Term::Builtin(n) | Term::Global(n) => lookup_refine(n, &self.table)
                 .map(|(parent, _)| self.is_refinement_of(parent, t2))
                 .unwrap_or(false),
             _ => false,
@@ -939,8 +891,13 @@ impl<'bump> TypeChecker<'bump> {
                 field_values.len()
             ));
         }
-        // Check each field value against its constraint
+        let (_, type_params) = self
+            .lookup_struct(sname)
+            .ok_or_else(|| diag!("unknown struct: {}", sname))?;
         for (i, (fname, fconstraint)) in fields.iter().enumerate() {
+            if self.is_generic_param(type_params, fconstraint) {
+                continue;
+            }
             self.check(ctx, field_values[i], fconstraint).map_err(|e| {
                 Diagnostic::new(format!("struct {} field '{}': {}", sname, fname, e))
             })?;
@@ -987,10 +944,11 @@ impl<'bump> TypeChecker<'bump> {
     }
 
     fn is_generic_param(&self, type_params: &[Name<'bump>], constraint: &Term<'bump>) -> bool {
-        if let Term::Builtin(name) | Term::Named(name) = constraint {
-            return type_params.iter().any(|p| **p == **name);
+        match constraint {
+            Term::Var(i) => *i < type_params.len(),
+            Term::Builtin(name) | Term::Global(name) => type_params.iter().any(|p| **p == **name),
+            _ => false,
         }
-        false
     }
 
     /// Check a struct field projection against a constraint.
@@ -1015,7 +973,7 @@ impl<'bump> TypeChecker<'bump> {
         if let Term::Var(i) = subject_val {
             if let Some(ty) = ctx.lookup(*i) {
                 let ty_nf = self.evaluator.whnf(ty)?;
-                if let Term::Builtin(sname) | Term::Named(sname) = ty_nf
+                if let Term::Builtin(sname) | Term::Global(sname) = ty_nf
                     && let Some((sdef, _)) = self.lookup_struct(sname)
                     && let Term::StructDef(_, fields) = sdef
                     && let Some((_, field_constraint)) = fields.get(idx)

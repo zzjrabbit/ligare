@@ -131,7 +131,7 @@ pub fn expand_constraint<'bump>(
     let Term::App(builtin, arg) = constraint else {
         return None;
     };
-    let (Term::Builtin(name) | Term::Named(name)) = *builtin else {
+    let (Term::Builtin(name) | Term::Global(name)) = *builtin else {
         return None;
     };
     let (parent, body) = lookup_refine(name, table)?;

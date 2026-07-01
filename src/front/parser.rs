@@ -57,9 +57,9 @@ pub(super) type ParsedFuncBody<'bump> = (
     &'bump Term<'bump>,
 );
 
-/// Parsed match branch (with Vec instead of slice during parsing).
+/// Parsed named match branch (with Vec instead of slice during parsing).
 pub(super) type ParsedMatchBranch<'bump> = (
-    usize,
+    Name<'bump>,
     Vec<(Name<'bump>, &'bump Term<'bump>)>,
     &'bump Term<'bump>,
 );

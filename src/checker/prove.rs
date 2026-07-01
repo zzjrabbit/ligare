@@ -54,7 +54,7 @@ impl<'bump> TypeChecker<'bump> {
                             "`exact` must be the last tactic in a proof block",
                         ));
                     }
-                    let proof_term = self.desugarer.desugar_with_names(proof_term, &local_names);
+                    let proof_term = self.desugar_with_names_context(proof_term, &local_names)?;
                     let full_proof = Self::wrap_frames(self.arena, proof_term, &frames);
                     return Ok((full_proof, current_ctx));
                 }
@@ -65,7 +65,7 @@ impl<'bump> TypeChecker<'bump> {
                         ));
                     }
                     // Don't whnf f — that strips Annot which holds the type.
-                    let f = self.desugarer.desugar_with_names(f, &local_names);
+                    let f = self.desugar_with_names_context(f, &local_names)?;
                     let (dom, cod) = self.extract_pi_type(&current_ctx, f)?;
                     let goal_nf = self.evaluator.whnf(current_goal)?;
                     if !self.terms_compatible(cod, goal_nf) {
@@ -107,7 +107,7 @@ impl<'bump> TypeChecker<'bump> {
                             "`have` cannot be the last tactic (use `exact`)",
                         ));
                     }
-                    let lemma = self.desugarer.desugar_with_names(lemma, &local_names);
+                    let lemma = self.desugar_with_names_context(lemma, &local_names)?;
                     let lemma_val = self.evaluator.whnf(lemma)?;
                     current_ctx = current_ctx.add_theorem(name, lemma_val);
                 }
@@ -278,7 +278,7 @@ impl<'bump> TypeChecker<'bump> {
     fn constraint_predicate(&self, constraint: &'bump Term<'bump>) -> Option<&'bump Term<'bump>> {
         match constraint {
             Term::Refine(_, _, pred) => Some(pred),
-            Term::Builtin(name) | Term::Named(name) => {
+            Term::Builtin(name) | Term::Global(name) => {
                 crate::checker::context::lookup_refine(name, self.table()).map(|(_, pred)| pred)
             }
             _ => None,
@@ -421,7 +421,7 @@ impl<'bump> TypeChecker<'bump> {
         let Term::App(builtin, a) = *and_app else {
             return None;
         };
-        let (Term::Builtin(name) | Term::Named(name)) = *builtin else {
+        let (Term::Builtin(name) | Term::Global(name)) = *builtin else {
             return None;
         };
         if *name != BUILTIN_AND {
@@ -434,7 +434,7 @@ impl<'bump> TypeChecker<'bump> {
         let Term::App(builtin2, pa) = *and_intro else {
             return None;
         };
-        let (Term::Builtin(n2) | Term::Named(n2)) = *builtin2 else {
+        let (Term::Builtin(n2) | Term::Global(n2)) = *builtin2 else {
             return None;
         };
         if *n2 != AND_INTRO {
@@ -458,7 +458,7 @@ impl<'bump> TypeChecker<'bump> {
         }
 
         match proof {
-            Term::Builtin(name) | Term::Named(name) if *name == AND_ELIM_LEFT => Ok(()),
+            Term::Builtin(name) | Term::Global(name) if *name == AND_ELIM_LEFT => Ok(()),
             Term::LitBool(true) => Ok(()),
             Term::AutoProof => self.prove_auto(ctx, subject, goal),
             _ => Err(Diagnostic::new(

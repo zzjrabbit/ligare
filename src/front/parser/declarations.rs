@@ -1,5 +1,4 @@
 use super::{ParseError, ParsedDef, ParsedFuncBody, Parser, SpannedToken};
-use crate::core::debruijn::Desugarer;
 use crate::core::syntax::{Name, Tactic, Term};
 use crate::front::lexer::Token;
 
@@ -9,11 +8,6 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         let name = self.parse_decl_ident()?;
         let (params, m_ret, body) = self.parse_func_body(name)?;
         let params_slice = self.arena.alloc_slice(&params);
-        let body = if matches!(body, Term::UnionDef(..) | Term::StructDef(..)) {
-            body
-        } else {
-            self.desugar_def(name, &params, m_ret, body)
-        };
         Ok((name, params_slice, m_ret, body))
     }
 
@@ -24,29 +18,15 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         m_ret: Option<&'bump Term<'bump>>,
         body: &'bump Term<'bump>,
     ) -> &'bump Term<'bump> {
-        let names: Vec<_> = params.iter().rev().map(|(pn, _)| *pn).collect();
-        let desugarer = Desugarer::new(self.arena);
         let func_body = params
             .iter()
-            .rfold(desugarer.desugar_with_names(body, &names), |b, _| {
-                self.arena.lam(b)
-            });
+            .rfold(body, |b, &(pn, _)| self.arena.named_lam(pn, b));
         let default = self.arena.builtin(self.pool.intern("data"));
-        let ret_env = names.clone();
-        let ret = m_ret
-            .map(|t| desugarer.desugar_with_names(t, &ret_env))
-            .unwrap_or(default);
-        let func_constraint = params
-            .iter()
-            .enumerate()
-            .rev()
-            .fold(ret, |b, (idx, &(pn, mc))| {
-                let dom_env: Vec<_> = params[..idx].iter().rev().map(|(n, _)| *n).collect();
-                let dom = mc
-                    .map(|t| desugarer.desugar_with_names(t, &dom_env))
-                    .unwrap_or(default);
-                self.arena.pi(pn, dom, b)
-            });
+        let ret = m_ret.unwrap_or(default);
+        let func_constraint = params.iter().rev().fold(ret, |b, &(pn, mc)| {
+            let dom = mc.unwrap_or(default);
+            self.arena.pi(pn, dom, b)
+        });
         self.arena.annot(func_body, func_constraint)
     }
 

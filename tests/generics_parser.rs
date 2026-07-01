@@ -43,17 +43,7 @@ fn parse_generic_id_definition() {
     } else {
         panic!("should have return type");
     }
-    // Body is desugared: local params and type params are de Bruijn vars.
-    match body {
-        Term::Annot(lam_body, _pi) => match lam_body {
-            Term::Lam(inner) => match inner {
-                Term::Lam(Term::Var(0)) => {}
-                _ => panic!("Expected Lam(Var(0)), got: {:?}", inner),
-            },
-            _ => panic!("Expected Lam, got: {:?}", lam_body),
-        },
-        _ => panic!("Expected Annot, got: {:?}", body),
-    }
+    assert_eq!(*body, Term::Named(s(&arena, "x")));
 }
 
 #[test]
@@ -145,36 +135,11 @@ fn parse_generic_only_type_params_no_data() {
 }
 
 #[test]
-fn parse_generic_desugared_form() {
+fn parse_generic_raw_form() {
     let (b, arena) = a();
     let result = parse_def_top("def id (A : prop) (x : A) : A := x", b, &arena);
-    let (_, _params, _m_ret, body) = result.unwrap();
-    // Body is desugared: local names in the body/type are de Bruijn vars.
-    match body {
-        Term::Annot(lam_body, ty) => {
-            match lam_body {
-                Term::Lam(inner) => match inner {
-                    Term::Lam(Term::Var(0)) => {}
-                    _ => panic!("Expected Lam(Var(0)), got inner: {:?}", inner),
-                },
-                _ => panic!("Expected Lam, got: {:?}", lam_body),
-            }
-            match ty {
-                Term::Pi(name_a, dom_a, cod) => {
-                    assert_eq!(**name_a, *s(&arena, "A"));
-                    assert_eq!(**dom_a, Term::Builtin(s(&arena, "prop")));
-                    match cod {
-                        Term::Pi(name_x, dom_x, cod_x) => {
-                            assert_eq!(**name_x, *s(&arena, "x"));
-                            assert_eq!(**dom_x, Term::Var(0), "dom_x should reference A");
-                            assert_eq!(**cod_x, Term::Var(1), "cod_x should reference A");
-                        }
-                        _ => panic!("Expected inner Pi, got: {:?}", cod),
-                    }
-                }
-                _ => panic!("Expected Pi, got: {:?}", ty),
-            }
-        }
-        _ => panic!("Expected Annot, got: {:?}", body),
-    }
+    let (_, params, m_ret, body) = result.unwrap();
+    assert_eq!(*body, Term::Named(s(&arena, "x")));
+    assert!(matches!(params[1].1, Some(Term::Named(name)) if *name == "A"));
+    assert!(matches!(m_ret, Some(Term::Named(name)) if *name == "A"));
 }

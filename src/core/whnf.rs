@@ -74,10 +74,11 @@ impl<'bump> WhnfEvaluator<'bump> {
             | Term::PrimOp(_)
             | Term::Universe(_)
             | Term::Builtin(_)
-            | Term::Named(_)
-            | Term::NamedLam(_, _)
+            | Term::Global(_)
             | Term::AutoProof
             | Term::RefParam => Ok(t),
+            Term::Named(_) => Err("Named identifier reached WHNF before desugaring".into()),
+            Term::NamedLam(_, _) => Err("NamedLam reached WHNF before desugaring".into()),
             Term::UnionDef(..) => Ok(t),
             Term::StructDef(..) => Ok(t),
             Term::StructCons(name, field_values) => {
@@ -139,6 +140,7 @@ impl<'bump> WhnfEvaluator<'bump> {
                     .collect();
                 Ok(self.arena.match_(s, self.arena.alloc_slice(&bs)))
             }
+            Term::NamedMatch(..) => Err("NamedMatch reached WHNF before desugaring".into()),
         }
     }
 
@@ -174,7 +176,7 @@ impl<'bump> WhnfEvaluator<'bump> {
             _ => {
                 // Normalize arrow type: App(App(->, A), B) → Pi("", A, B)
                 if let Term::App(builtin, dom) = f
-                    && matches!(*builtin, Term::Builtin(n) | Term::Named(n) if *n == "->")
+                    && matches!(*builtin, Term::Builtin(n) | Term::Global(n) if *n == "->")
                 {
                     let dom_nf = self.whnf(dom)?;
                     let cod_nf = self.whnf(a)?;

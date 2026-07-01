@@ -10,7 +10,7 @@ use crate::backend::c::names::NameResolver;
 use crate::backend::c::types::{StructInfo, UnionInfo};
 use crate::backend::c::value::{CCode, CExpr, CValue, MatchBind, MatchCase, MatchPlan};
 use crate::backend::ir::{CType, FunSig};
-use crate::core::syntax::{PrimOp, Term};
+use crate::core::syntax::{MatchBranch, PrimOp, Term};
 use crate::diagnostic::Diagnostic;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -44,6 +44,11 @@ struct FieldInit {
     field: String,
     value: CCode,
     by_ref: bool,
+}
+
+struct TypeNameSets<'a> {
+    unions: &'a HashSet<String>,
+    structs: &'a HashSet<String>,
 }
 
 impl FieldInit {
@@ -141,7 +146,7 @@ impl<'a> ExpressionEmitter<'a> {
 
             Term::Annot(inner, _) => self.emit_expr(inner, ctx, union_map, struct_map),
 
-            Term::Builtin(name) | Term::Named(name) => {
+            Term::Builtin(name) | Term::Global(name) => {
                 let ty = self
                     .fun_sigs
                     .iter()
@@ -356,11 +361,7 @@ impl<'a> ExpressionEmitter<'a> {
     fn emit_match(
         &self,
         scrut: &Term<'_>,
-        branches: &[(
-            usize,
-            &[(crate::core::syntax::Name<'_>, &Term<'_>)],
-            &Term<'_>,
-        )],
+        branches: &[MatchBranch<'_>],
         ctx: &mut EmitCtx,
         union_map: &HashMap<String, UnionInfo>,
         struct_map: &HashMap<String, StructInfo>,
@@ -374,13 +375,17 @@ impl<'a> ExpressionEmitter<'a> {
         };
         let mut cases = Vec::new();
         let mut ret_ty: Option<CType> = None;
+        let union_names: HashSet<String> = union_map.keys().cloned().collect();
+        let struct_names: HashSet<String> = struct_map.keys().cloned().collect();
+        let type_names = TypeNameSets {
+            unions: &union_names,
+            structs: &struct_names,
+        };
         for (idx, binds, body) in branches.iter() {
             let mut branch_ctx = ctx.snapshot();
-            let un: HashSet<String> = union_map.keys().cloned().collect();
-            let sn: HashSet<String> = struct_map.keys().cloned().collect();
             for (bind_idx, (name, ty)) in binds.iter().enumerate().rev() {
                 let cty =
-                    self.match_bind_ctype(scrut_union, *idx, bind_idx, ty, union_map, &un, &sn)?;
+                    self.match_bind_ctype(scrut_union, *idx, bind_idx, ty, union_map, &type_names)?;
                 branch_ctx.push_binding(self.names.escape(name), cty);
             }
             let body_value = self.emit_expr(body, &mut branch_ctx, union_map, struct_map)?;
@@ -399,7 +404,7 @@ impl<'a> ExpressionEmitter<'a> {
             let mut case_binds = Vec::new();
             for (bind_idx, (_name, ty)) in binds.iter().enumerate() {
                 let cty =
-                    self.match_bind_ctype(scrut_union, *idx, bind_idx, ty, union_map, &un, &sn)?;
+                    self.match_bind_ctype(scrut_union, *idx, bind_idx, ty, union_map, &type_names)?;
                 case_binds.push(MatchBind {
                     name: self.names.escape(_name),
                     ctype: cty,
@@ -429,8 +434,7 @@ impl<'a> ExpressionEmitter<'a> {
         bind_idx: usize,
         fallback_ty: &Term<'_>,
         union_map: &HashMap<String, UnionInfo>,
-        union_names: &HashSet<String>,
-        struct_names: &HashSet<String>,
+        type_names: &TypeNameSets<'_>,
     ) -> Result<CType, Diagnostic> {
         if let Some(uname) = scrut_union
             && let Some(info) = union_map.get(uname)
@@ -439,7 +443,7 @@ impl<'a> ExpressionEmitter<'a> {
         {
             return Ok(cty.clone());
         }
-        crate::backend::ir::constraint_to_ctype(fallback_ty, union_names, struct_names)
+        crate::backend::ir::constraint_to_ctype(fallback_ty, type_names.unions, type_names.structs)
     }
 
     // ── Function call emission ──

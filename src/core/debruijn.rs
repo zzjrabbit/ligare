@@ -9,7 +9,13 @@
 //!   into de Bruijn `Var`/`Lam` form.
 
 use crate::core::pool::TermArena;
-use crate::core::syntax::{Tactic, Term};
+use crate::core::syntax::{Name, Tactic, Term};
+
+pub type VariantLookup<'bump> = (
+    &'bump str,
+    usize,
+    &'bump [(Name<'bump>, &'bump Term<'bump>)],
+);
 
 // ───────────────────────────────────────────────
 //  Desugarer: Named → Var, NamedLam → Lam
@@ -37,7 +43,20 @@ impl<'arena, 'bump> Desugarer<'arena, 'bump> {
 
     /// Desugar a term: resolve all `NamedLam` → `Lam` and `Named` → `Var`.
     pub fn desugar(&self, t: &'bump Term<'bump>) -> &'bump Term<'bump> {
-        self.desugar_with_env(t, &[])
+        self.try_desugar(t)
+            .expect("desugar failed; use try_desugar for context-dependent parser nodes")
+    }
+
+    pub fn try_desugar(&self, t: &'bump Term<'bump>) -> Result<&'bump Term<'bump>, String> {
+        self.try_desugar_without_variant_resolver(t, &[])
+    }
+
+    pub fn try_desugar_with_variant_resolver(
+        &self,
+        t: &'bump Term<'bump>,
+        resolver: &impl Fn(&str) -> Option<VariantLookup<'bump>>,
+    ) -> Result<&'bump Term<'bump>, String> {
+        self.try_desugar_with_env(t, &[], Some(resolver))
     }
 
     /// Desugar a term with an existing innermost-first local environment.
@@ -46,18 +65,56 @@ impl<'arena, 'bump> Desugarer<'arena, 'bump> {
         t: &'bump Term<'bump>,
         env: &[&'bump str],
     ) -> &'bump Term<'bump> {
-        self.desugar_with_env(t, env)
+        self.try_desugar_with_names(t, env)
+            .expect("desugar failed; use try_desugar_with_names for context-dependent parser nodes")
+    }
+
+    pub fn try_desugar_with_names(
+        &self,
+        t: &'bump Term<'bump>,
+        env: &[&'bump str],
+    ) -> Result<&'bump Term<'bump>, String> {
+        self.try_desugar_without_variant_resolver(t, env)
+    }
+
+    pub fn try_desugar_with_names_and_variant_resolver(
+        &self,
+        t: &'bump Term<'bump>,
+        env: &[&'bump str],
+        resolver: &impl Fn(&str) -> Option<VariantLookup<'bump>>,
+    ) -> Result<&'bump Term<'bump>, String> {
+        self.try_desugar_with_env(t, env, Some(resolver))
+    }
+
+    fn try_desugar_without_variant_resolver(
+        &self,
+        t: &'bump Term<'bump>,
+        env: &[&'bump str],
+    ) -> Result<&'bump Term<'bump>, String> {
+        fn no_variants<'bump>(_name: &str) -> Option<VariantLookup<'bump>> {
+            None
+        }
+
+        self.try_desugar_with_env(t, env, Some(&no_variants))
     }
 
     /// Recursive helper that carries a name stack `env` (innermost first).
-    fn desugar_with_env(&self, t: &'bump Term<'bump>, env: &[&'bump str]) -> &'bump Term<'bump> {
-        match t {
+    fn try_desugar_with_env<R>(
+        &self,
+        t: &'bump Term<'bump>,
+        env: &[&'bump str],
+        resolver: Option<&R>,
+    ) -> Result<&'bump Term<'bump>, String>
+    where
+        R: Fn(&str) -> Option<VariantLookup<'bump>>,
+    {
+        let desugared = match t {
             // ── Named → Var resolution ──
             Term::Named(name) => {
                 if let Some(i) = env.iter().position(|n| *n == *name) {
                     self.arena.var(i)
                 } else {
-                    t // free variable — stays as Named
+                    self.arena.global(name)
                 }
             }
 
@@ -65,13 +122,15 @@ impl<'arena, 'bump> Desugarer<'arena, 'bump> {
             Term::NamedLam(name, body) => {
                 let mut ext: Vec<&'bump str> = vec![*name];
                 ext.extend_from_slice(env);
-                self.arena.lam(self.desugar_with_env(body, &ext))
+                self.arena
+                    .lam(self.try_desugar_with_env(body, &ext, resolver)?)
             }
 
             // ── Recurse into children ──
-            Term::App(f, a) => self
-                .arena
-                .app(self.desugar_with_env(f, env), self.desugar_with_env(a, env)),
+            Term::App(f, a) => self.arena.app(
+                self.try_desugar_with_env(f, env, resolver)?,
+                self.try_desugar_with_env(a, env, resolver)?,
+            ),
             Term::Lam(_) => {
                 // Already-desugared Lam (from `def`): recurse into body with
                 // a dummy binder since we don't know the name.
@@ -80,47 +139,59 @@ impl<'arena, 'bump> Desugarer<'arena, 'bump> {
                 t
             }
             Term::Pi(name, a, b) => {
-                let a2 = self.desugar_with_env(a, env);
+                let a2 = self.try_desugar_with_env(a, env, resolver)?;
                 let mut ext: Vec<&'bump str> = vec![*name];
                 ext.extend_from_slice(env);
-                let b2 = self.desugar_with_env(b, &ext);
+                let b2 = self.try_desugar_with_env(b, &ext, resolver)?;
                 self.arena.pi(name, a2, b2)
             }
             Term::Let(name, val, body, mc) => {
-                let v2 = self.desugar_with_env(val, env);
-                let mc2 = mc.map(|c| self.desugar_with_env(c, env));
+                let v2 = self.try_desugar_with_env(val, env, resolver)?;
+                let mc2 = mc
+                    .map(|c| self.try_desugar_with_env(c, env, resolver))
+                    .transpose()?;
                 let mut ext: Vec<&'bump str> = vec![*name];
                 ext.extend_from_slice(env);
-                let b2 = self.desugar_with_env(body, &ext);
+                let b2 = self.try_desugar_with_env(body, &ext, resolver)?;
                 self.arena.let_(name, v2, b2, mc2)
             }
             Term::IfThenElse(cond, tbranch, fbranch) => {
-                let c2 = self.desugar_with_env(cond, env);
-                let t2 = self.desugar_with_env(tbranch, env);
-                let f2 = self.desugar_with_env(fbranch, env);
+                let c2 = self.try_desugar_with_env(cond, env, resolver)?;
+                let t2 = self.try_desugar_with_env(tbranch, env, resolver)?;
+                let f2 = self.try_desugar_with_env(fbranch, env, resolver)?;
                 self.arena.if_then_else(c2, t2, f2)
             }
             Term::Annot(inner, c) => self.arena.annot(
-                self.desugar_with_env(inner, env),
-                self.desugar_with_env(c, env),
+                self.try_desugar_with_env(inner, env, resolver)?,
+                self.try_desugar_with_env(c, env, resolver)?,
             ),
             Term::ByProof(inner, tactics) => {
                 // Tactics contain terms that may have Named refs
-                let inner2 = inner.map(|i| self.desugar_with_env(i, env));
+                let inner2 = inner
+                    .map(|i| self.try_desugar_with_env(i, env, resolver))
+                    .transpose()?;
                 let tactics2: Vec<_> = tactics
                     .iter()
-                    .map(|tac| match tac {
-                        Tactic::Exact(t) => Tactic::Exact(self.desugar_with_env(t, env)),
-                        Tactic::Apply(t) => Tactic::Apply(self.desugar_with_env(t, env)),
-                        Tactic::Intro(n) => Tactic::Intro(*n),
-                        Tactic::Have(n, t) => Tactic::Have(n, self.desugar_with_env(t, env)),
+                    .map(|tac| {
+                        Ok(match tac {
+                            Tactic::Exact(t) => {
+                                Tactic::Exact(self.try_desugar_with_env(t, env, resolver)?)
+                            }
+                            Tactic::Apply(t) => {
+                                Tactic::Apply(self.try_desugar_with_env(t, env, resolver)?)
+                            }
+                            Tactic::Intro(n) => Tactic::Intro(*n),
+                            Tactic::Have(n, t) => {
+                                Tactic::Have(n, self.try_desugar_with_env(t, env, resolver)?)
+                            }
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, String>>()?;
                 self.arena
                     .by_proof(inner2, self.arena.alloc_slice(&tactics2))
             }
             Term::Refine(name, parent, p) => {
-                let p2 = self.desugar_with_env(parent, env);
+                let p2 = self.try_desugar_with_env(parent, env, resolver)?;
                 // Replace the refinement parameter reference with RefParam
                 // BEFORE desugaring, so that prove_auto / subst_ref_param
                 // can substitute the subject.  We must do this before
@@ -134,43 +205,105 @@ impl<'arena, 'bump> Desugarer<'arena, 'bump> {
                     }
                     None
                 });
-                let pred2 = self.desugar_with_env(pred_with_param, env);
+                let pred2 = self.try_desugar_with_env(pred_with_param, env, resolver)?;
                 self.arena.refine(name, p2, pred2)
             }
+            Term::UnionDef(name, variants) => {
+                let variants2: Vec<_> = variants
+                    .iter()
+                    .map(|(variant_name, fields)| {
+                        let fields2 = fields
+                            .iter()
+                            .map(|(field_name, constraint)| {
+                                Ok((
+                                    *field_name,
+                                    self.try_desugar_with_env(constraint, env, resolver)?,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        Ok((*variant_name, self.arena.alloc_slice(&fields2)))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                self.arena
+                    .union_def(name, self.arena.alloc_slice(&variants2))
+            }
+            Term::StructDef(name, fields) => {
+                let fields2 = fields
+                    .iter()
+                    .map(|(field_name, constraint)| {
+                        Ok((
+                            *field_name,
+                            self.try_desugar_with_env(constraint, env, resolver)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                self.arena
+                    .struct_def(name, self.arena.alloc_slice(&fields2))
+            }
             Term::Match(scrut, branches) => {
-                let s2 = self.desugar_with_env(scrut, env);
+                let s2 = self.try_desugar_with_env(scrut, env, resolver)?;
                 let bs2: Vec<_> = branches
                     .iter()
                     .map(|(idx, binds, body)| {
                         let mut ext: Vec<&'bump str> = binds.iter().map(|(n, _)| *n).collect();
                         ext.extend_from_slice(env);
-                        let b2 = self.desugar_with_env(body, &ext);
+                        let b2 = self.try_desugar_with_env(body, &ext, resolver)?;
                         let binds2: Vec<_> = binds
                             .iter()
-                            .map(|(n, c)| (*n, self.desugar_with_env(c, env)))
-                            .collect();
-                        (*idx, self.arena.alloc_slice(&binds2), b2)
+                            .map(|(n, c)| Ok((*n, self.try_desugar_with_env(c, env, resolver)?)))
+                            .collect::<Result<Vec<_>, String>>()?;
+                        Ok((*idx, self.arena.alloc_slice(&binds2), b2))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, String>>()?;
+                self.arena.match_(s2, self.arena.alloc_slice(&bs2))
+            }
+            Term::NamedMatch(scrut, branches) => {
+                let s2 = self.try_desugar_with_env(scrut, env, resolver)?;
+                let resolver = resolver.ok_or_else(|| {
+                    "cannot desugar named match without variant context".to_string()
+                })?;
+                let bs2: Vec<_> = branches
+                    .iter()
+                    .map(|(variant_name, binds, body)| {
+                        let (_, idx, field_specs) = resolver(variant_name)
+                            .ok_or_else(|| format!("unknown match variant: {}", variant_name))?;
+                        let bind_specs: Vec<_> = binds
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (n, fallback))| {
+                                let constraint =
+                                    field_specs.get(i).map(|(_, c)| *c).unwrap_or(*fallback);
+                                Ok((
+                                    *n,
+                                    self.try_desugar_with_env(constraint, env, Some(resolver))?,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        let mut ext: Vec<&'bump str> = binds.iter().map(|(n, _)| *n).collect();
+                        ext.extend_from_slice(env);
+                        let b2 = self.try_desugar_with_env(body, &ext, Some(resolver))?;
+                        Ok((idx, self.arena.alloc_slice(&bind_specs), b2))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
                 self.arena.match_(s2, self.arena.alloc_slice(&bs2))
             }
             Term::Variant(name, idx, payloads) => {
                 let ps: Vec<_> = payloads
                     .iter()
-                    .map(|p| self.desugar_with_env(p, env))
-                    .collect();
+                    .map(|p| self.try_desugar_with_env(p, env, resolver))
+                    .collect::<Result<Vec<_>, String>>()?;
                 self.arena.variant(name, *idx, self.arena.alloc_slice(&ps))
             }
             Term::StructCons(name, fields) => {
                 let fs: Vec<_> = fields
                     .iter()
-                    .map(|f| self.desugar_with_env(f, env))
-                    .collect();
+                    .map(|f| self.try_desugar_with_env(f, env, resolver))
+                    .collect::<Result<Vec<_>, String>>()?;
                 self.arena.struct_cons(name, self.arena.alloc_slice(&fs))
             }
             Term::StructProj(subject, idx) => self
                 .arena
-                .struct_proj(self.desugar_with_env(subject, env), *idx),
+                .struct_proj(self.try_desugar_with_env(subject, env, resolver)?, *idx),
 
             // ── Leaf / no-name-binding nodes ──
             Term::Var(_)
@@ -180,11 +313,11 @@ impl<'arena, 'bump> Desugarer<'arena, 'bump> {
             | Term::PrimOp(_)
             | Term::Universe(_)
             | Term::Builtin(_)
+            | Term::Global(_)
             | Term::AutoProof
-            | Term::RefParam
-            | Term::UnionDef(..)
-            | Term::StructDef(..) => t,
-        }
+            | Term::RefParam => t,
+        };
+        Ok(desugared)
     }
 }
 

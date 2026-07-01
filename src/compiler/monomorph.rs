@@ -9,8 +9,11 @@ use crate::front::parser::TopLevel;
 
 use super::{CodegenState, Compiler, MonomorphizedProgram};
 
+mod replace;
+
 #[derive(Clone)]
 struct GenericDef<'bump> {
+    n_type_params: usize,
     params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
     ret: Option<&'bump Term<'bump>>,
     body: &'bump Term<'bump>,
@@ -19,11 +22,16 @@ struct GenericDef<'bump> {
 
 #[derive(Clone)]
 struct GenericTypeDef<'bump> {
-    params: &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+    n_type_params: usize,
     body: &'bump Term<'bump>,
 }
 
 type Instance<'bump> = (Name<'bump>, Name<'bump>, Vec<&'bump Term<'bump>>);
+type InstantiatedGeneric<'bump> = (
+    &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+    Option<&'bump Term<'bump>>,
+    &'bump Term<'bump>,
+);
 
 struct MonoState<'bump> {
     generic_fns: HashMap<Name<'bump>, GenericDef<'bump>>,
@@ -72,6 +80,7 @@ impl<'bump> Compiler<'bump> {
             Self::generic_defs(&codegen.raw_defs, |t| self.is_erased_param_constraint(t));
         let generic_types = self.generic_type_defs(&tops);
         if generic_fns.is_empty() && generic_types.is_empty() {
+            self.rebuild_fun_sigs(&mut codegen)?;
             return Ok(MonomorphizedProgram { tops, codegen });
         }
 
@@ -131,18 +140,20 @@ impl<'bump> Compiler<'bump> {
                 let TopLevel::TLDef(name, params, ret, body, span) = top else {
                     return None;
                 };
-                params
+                let n_type_params = params
                     .iter()
-                    .any(|(_, c)| c.is_some_and(&is_erased_param_constraint))
-                    .then_some((
-                        *name,
-                        GenericDef {
-                            params,
-                            ret: *ret,
-                            body,
-                            span: span.clone(),
-                        },
-                    ))
+                    .take_while(|(_, c)| c.is_some_and(&is_erased_param_constraint))
+                    .count();
+                (n_type_params > 0).then_some((
+                    *name,
+                    GenericDef {
+                        n_type_params,
+                        params,
+                        ret: *ret,
+                        body,
+                        span: span.clone(),
+                    },
+                ))
             })
             .collect()
     }
@@ -156,14 +167,22 @@ impl<'bump> Compiler<'bump> {
                 let TopLevel::TLDef(name, params, _ret, body, _span) = top else {
                     return None;
                 };
-                matches!(body, Term::UnionDef(..) | Term::StructDef(..))
-                    .then_some(())
-                    .filter(|_| {
-                        params
-                            .iter()
-                            .any(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
-                    })
-                    .map(|_| (*name, GenericTypeDef { params, body }))
+                let n_type_params = params
+                    .iter()
+                    .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
+                    .count();
+                if n_type_params == 0 || !matches!(body, Term::UnionDef(..) | Term::StructDef(..)) {
+                    return None;
+                }
+                let names: Vec<_> = params.iter().rev().map(|(pn, _)| *pn).collect();
+                let body = self.checker.desugar_with_names_context(body, &names).ok()?;
+                Some((
+                    *name,
+                    GenericTypeDef {
+                        n_type_params,
+                        body,
+                    },
+                ))
             })
             .collect()
     }
@@ -263,16 +282,11 @@ impl<'bump> Compiler<'bump> {
         Vec<&'bump Term<'bump>>,
         Vec<&'bump Term<'bump>>,
     )> {
+        let term = self.checker.desugar_with_context(term).ok().unwrap_or(term);
         let (head, args) = self.collect_app(term);
-        let (Term::Builtin(base) | Term::Named(base)) = head else {
-            return None;
-        };
+        let base = Self::symbol_name(head)?;
         let def = generics.get(base)?;
-        let n_type_params = def
-            .params
-            .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
-            .count();
+        let n_type_params = def.n_type_params;
         if n_type_params == 0 || args.len() < n_type_params {
             return None;
         }
@@ -281,12 +295,7 @@ impl<'bump> Compiler<'bump> {
             return None;
         }
         let data_args = args[n_type_params..].to_vec();
-        Some((
-            *base,
-            self.mono_name(base, &type_args),
-            type_args,
-            data_args,
-        ))
+        Some((base, self.mono_name(base, &type_args), type_args, data_args))
     }
 
     fn type_instance(
@@ -299,16 +308,11 @@ impl<'bump> Compiler<'bump> {
         Vec<&'bump Term<'bump>>,
         Vec<&'bump Term<'bump>>,
     )> {
+        let term = self.checker.desugar_with_context(term).ok().unwrap_or(term);
         let (head, args) = self.collect_app(term);
-        let (Term::Builtin(base) | Term::Named(base)) = head else {
-            return None;
-        };
+        let base = Self::symbol_name(head)?;
         let def = generic_types.get(base)?;
-        let n_type_params = def
-            .params
-            .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
-            .count();
+        let n_type_params = def.n_type_params;
         if n_type_params == 0 || args.len() < n_type_params {
             return None;
         }
@@ -317,12 +321,7 @@ impl<'bump> Compiler<'bump> {
             return None;
         }
         let data_args = args[n_type_params..].to_vec();
-        Some((
-            *base,
-            self.mono_name(base, &type_args),
-            type_args,
-            data_args,
-        ))
+        Some((base, self.mono_name(base, &type_args), type_args, data_args))
     }
 
     fn instantiate_generic(
@@ -330,40 +329,33 @@ impl<'bump> Compiler<'bump> {
         def: &GenericDef<'bump>,
         type_args: &[&'bump Term<'bump>],
         state: &mut MonoState<'bump>,
-    ) -> (
-        &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
-        Option<&'bump Term<'bump>>,
-        &'bump Term<'bump>,
-    ) {
-        let n_type_params = def
-            .params
-            .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
-            .count();
-        let subst = def.params[..n_type_params]
-            .iter()
-            .map(|(n, _)| *n)
-            .zip(type_args.iter().copied())
-            .collect::<HashMap<_, _>>();
+    ) -> InstantiatedGeneric<'bump> {
+        let n_type_params = def.n_type_params;
 
         let data_params = def.params[n_type_params..]
             .iter()
-            .map(|(n, c)| {
+            .enumerate()
+            .map(|(idx, (n, c))| {
                 (
                     *n,
                     c.map(|t| {
-                        let replaced = self.replace_type_params(t, &subst);
+                        let replaced =
+                            self.replace_type_param_vars(t, type_args, n_type_params + idx);
                         self.rewrite_type_constraint(replaced, state)
                     }),
                 )
             })
             .collect::<Vec<_>>();
-        let body = self.replace_type_params(self.peel_lams(def.body, n_type_params), &subst);
+        let body = self.replace_type_param_vars(
+            self.peel_lams(def.body, n_type_params),
+            type_args,
+            def.params.len(),
+        );
         let body = self.rewrite_term(body, state);
         (
             self.arena.alloc_slice(&data_params),
             def.ret.map(|t| {
-                let replaced = self.replace_type_params(t, &subst);
+                let replaced = self.replace_type_param_vars(t, type_args, def.params.len());
                 self.rewrite_type_constraint(replaced, state)
             }),
             body,
@@ -375,19 +367,13 @@ impl<'bump> Compiler<'bump> {
         def: &GenericDef<'bump>,
         type_args: &[&'bump Term<'bump>],
     ) -> Vec<Option<&'bump Term<'bump>>> {
-        let n_type_params = def
-            .params
-            .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
-            .count();
-        let subst = def.params[..n_type_params]
-            .iter()
-            .map(|(n, _)| *n)
-            .zip(type_args.iter().copied())
-            .collect::<HashMap<_, _>>();
+        let n_type_params = def.n_type_params;
         def.params[n_type_params..]
             .iter()
-            .map(|(_, c)| c.map(|t| self.replace_type_params(t, &subst)))
+            .enumerate()
+            .map(|(idx, (_, c))| {
+                c.map(|t| self.replace_type_param_vars(t, type_args, n_type_params + idx))
+            })
             .collect()
     }
 
@@ -435,6 +421,21 @@ impl<'bump> Compiler<'bump> {
         {
             state.record_type(mono_name, (base, mono_name, type_args.clone()));
             self.rewrite_constructed_type(term, mono_name, &type_args, state)
+        } else if let Some((base, mono_name, type_args)) =
+            state
+                .type_instances
+                .iter()
+                .find_map(|(base, mono_name, type_args)| {
+                    if matches!(constraint, Term::Builtin(n) | Term::Global(n) if *n == *mono_name)
+                    {
+                        Some((*base, *mono_name, type_args.clone()))
+                    } else {
+                        None
+                    }
+                })
+        {
+            let _ = base;
+            self.rewrite_constructed_type(term, mono_name, &type_args, state)
         } else {
             self.rewrite_term(term, state)
         }
@@ -447,6 +448,7 @@ impl<'bump> Compiler<'bump> {
         type_args: &[&'bump Term<'bump>],
         state: &mut MonoState<'bump>,
     ) -> &'bump Term<'bump> {
+        let term = self.checker.desugar_with_context(term).unwrap_or(term);
         if let Some((uname, idx, fields, args)) = self.collect_variant_args(term)
             && args.len() == fields.len()
         {
@@ -536,18 +538,17 @@ impl<'bump> Compiler<'bump> {
         &self,
         values: &[&'bump Term<'bump>],
         fields: &'bump [(Name<'bump>, &'bump Term<'bump>)],
-        type_params: &'bump [Name<'bump>],
+        _type_params: &'bump [Name<'bump>],
         type_args: &[&'bump Term<'bump>],
         state: &mut MonoState<'bump>,
     ) -> Vec<&'bump Term<'bump>> {
-        let subst = self.type_subst(type_params, type_args);
         values
             .iter()
             .enumerate()
             .map(|(i, value)| {
                 let expected = fields
                     .get(i)
-                    .map(|(_, c)| self.replace_type_params(c, &subst));
+                    .map(|(_, c)| self.replace_type_param_vars(c, type_args, type_args.len()));
                 match expected {
                     Some(c) => self.rewrite_term_for_constraint(value, c, state),
                     None => self.rewrite_term(value, state),
@@ -556,27 +557,11 @@ impl<'bump> Compiler<'bump> {
             .collect()
     }
 
-    fn type_subst(
-        &self,
-        params: &'bump [Name<'bump>],
-        args: &[&'bump Term<'bump>],
-    ) -> HashMap<Name<'bump>, &'bump Term<'bump>> {
-        params
-            .iter()
-            .copied()
-            .zip(args.iter().copied())
-            .collect::<HashMap<_, _>>()
-    }
-
-    fn replace_type_params(
-        &self,
-        term: &'bump Term<'bump>,
-        subst: &HashMap<Name<'bump>, &'bump Term<'bump>>,
-    ) -> &'bump Term<'bump> {
-        self.arena.map(term, &|node| match node {
-            Term::Builtin(name) | Term::Named(name) => subst.get(name).copied(),
+    fn symbol_name(term: &'bump Term<'bump>) -> Option<Name<'bump>> {
+        match term {
+            Term::Builtin(name) | Term::Global(name) => Some(*name),
             _ => None,
-        })
+        }
     }
 
     fn instantiate_generic_type(
@@ -585,16 +570,6 @@ impl<'bump> Compiler<'bump> {
         def: &GenericTypeDef<'bump>,
         type_args: &[&'bump Term<'bump>],
     ) -> &'bump Term<'bump> {
-        let n_type_params = def
-            .params
-            .iter()
-            .take_while(|(_, c)| c.is_some_and(|t| self.is_erased_param_constraint(t)))
-            .count();
-        let subst = def.params[..n_type_params]
-            .iter()
-            .map(|(n, _)| *n)
-            .zip(type_args.iter().copied())
-            .collect::<HashMap<_, _>>();
         match def.body {
             Term::UnionDef(_, variants) => {
                 let variants = variants
@@ -602,7 +577,12 @@ impl<'bump> Compiler<'bump> {
                     .map(|(vname, fields)| {
                         let fields = fields
                             .iter()
-                            .map(|(fname, c)| (*fname, self.replace_type_params(c, &subst)))
+                            .map(|(fname, c)| {
+                                (
+                                    *fname,
+                                    self.replace_type_param_vars(c, type_args, def.n_type_params),
+                                )
+                            })
                             .collect::<Vec<_>>();
                         (*vname, self.arena.alloc_slice(&fields))
                     })
@@ -613,7 +593,12 @@ impl<'bump> Compiler<'bump> {
             Term::StructDef(_, fields) => {
                 let fields = fields
                     .iter()
-                    .map(|(fname, c)| (*fname, self.replace_type_params(c, &subst)))
+                    .map(|(fname, c)| {
+                        (
+                            *fname,
+                            self.replace_type_param_vars(c, type_args, def.n_type_params),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 self.arena
                     .struct_def(mono_name, self.arena.alloc_slice(&fields))
@@ -634,7 +619,7 @@ impl<'bump> Compiler<'bump> {
             let Some(def) = generic_types.get(base) else {
                 continue;
             };
-            let instantiated = self.instantiate_generic_type(*mono_name, def, type_args);
+            let instantiated = self.instantiate_generic_type(mono_name, def, type_args);
             match instantiated {
                 Term::UnionDef(..) => union_types.push((*mono_name, instantiated)),
                 Term::StructDef(..) => struct_types.push((*mono_name, instantiated)),
@@ -658,11 +643,11 @@ impl<'bump> Compiler<'bump> {
             .collect::<HashSet<_>>();
         let mut fun_sigs = Vec::new();
         for top in &codegen.raw_defs {
-            if let TopLevel::TLDef(name, params, ret, body, _) = top {
-                if !params.is_empty() || matches!(body, Term::Lam(_) | Term::Annot(_, _)) {
-                    let sig = FunSig::from_func(params, *ret, body, &union_names, &struct_names)?;
-                    fun_sigs.push((*name, sig));
-                }
+            if let TopLevel::TLDef(name, params, ret, body, _) = top
+                && (!params.is_empty() || matches!(body, Term::Lam(_) | Term::Annot(_, _)))
+            {
+                let sig = FunSig::from_func(params, *ret, body, &union_names, &struct_names)?;
+                fun_sigs.push((*name, sig));
             }
         }
         codegen.fun_sigs = fun_sigs;
@@ -722,7 +707,7 @@ impl<'bump> Compiler<'bump> {
     }
 
     fn type_arg_is_supported(&self, term: &Term<'_>) -> bool {
-        matches!(term, Term::Builtin(_) | Term::Named(_) | Term::App(_, _))
+        matches!(term, Term::Builtin(_) | Term::Global(_) | Term::App(_, _))
     }
 
     fn mono_name(&self, base: Name<'bump>, type_args: &[&Term<'_>]) -> Name<'bump> {
@@ -736,7 +721,7 @@ impl<'bump> Compiler<'bump> {
 
     fn type_arg_slug(&self, term: &Term<'_>) -> String {
         match term {
-            Term::Builtin(n) | Term::Named(n) => {
+            Term::Builtin(n) | Term::Global(n) => {
                 n.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
             }
             Term::App(f, a) => format!("{}__{}", self.type_arg_slug(f), self.type_arg_slug(a)),

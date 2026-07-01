@@ -1,8 +1,23 @@
 use super::{
     Associativity, BUILTIN_NAMES, KEYWORDS, ParseError, ParsedMatchBranch, Parser, SpannedToken,
 };
+use crate::config::{
+    AND_ELIM_LEFT, AND_INTRO, BUILTIN_AND, BUILTIN_DATA, BUILTIN_IMPLIES, BUILTIN_NOT, BUILTIN_OR,
+    BUILTIN_PROOF, BUILTIN_PROP, BUILTIN_THEOREM,
+};
 use crate::core::syntax::{Name, PrimOp, Term};
 use crate::front::lexer::Token;
+
+const PREC_COMPARISON: u8 = 2;
+const PREC_ADD_SUB: u8 = 3;
+const PREC_ARROW: u8 = 4;
+const PREC_MUL_DIV_MOD: u8 = 5;
+const PREC_APP: u8 = PREC_MUL_DIV_MOD + 1;
+
+const TACTIC_EXACT: &str = "exact";
+const TACTIC_APPLY: &str = "apply";
+const TACTIC_INTRO: &str = "intro";
+const TACTIC_HAVE: &str = "have";
 
 impl<'a, 'bump> Parser<'a, 'bump> {
     pub(super) fn parse_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
@@ -101,20 +116,19 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             if !self.try_expect(&Token::Bar) {
                 break;
             }
-            let _variant_name = self.parse_ident()?;
+            let variant_name = self.parse_ident()?;
             let mut binds: Vec<(Name<'bump>, &'bump Term<'bump>)> = Vec::new();
             while self
                 .peek_token()
                 .is_some_and(|t| matches!(t, Token::Ident(_)))
             {
                 let bind_name = self.parse_ident()?;
-                let bind_ty = self.arena.builtin(self.pool.intern("data"));
+                let bind_ty = self.builtin(BUILTIN_DATA);
                 binds.push((bind_name, bind_ty));
             }
             self.expect(&Token::FatArrow)?;
             let body = self.parse_expr()?;
-            let idx = branches.len();
-            branches.push((idx, binds, body));
+            branches.push((variant_name, binds, body));
         }
         if branches.is_empty() {
             return Err(ParseError {
@@ -124,11 +138,11 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         }
         let branches_slice: Vec<_> = branches
             .into_iter()
-            .map(|(idx, b, body)| (idx, self.arena.alloc_slice(&b), body))
+            .map(|(variant_name, b, body)| (variant_name, self.arena.alloc_slice(&b), body))
             .collect();
         Ok(self
             .arena
-            .match_(scrutinee, self.arena.alloc_slice(&branches_slice)))
+            .named_match(scrutinee, self.arena.alloc_slice(&branches_slice)))
     }
 
     fn parse_let_expr(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
@@ -202,16 +216,18 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     fn infix_bp(tok: &Token) -> Option<(u8, Associativity)> {
         match tok {
-            Token::Star | Token::Slash | Token::Percent => Some((5, Associativity::Left)),
-            Token::ThinArrow => Some((4, Associativity::Right)),
-            Token::Plus | Token::Minus => Some((3, Associativity::Left)),
+            Token::Star | Token::Slash | Token::Percent => {
+                Some((PREC_MUL_DIV_MOD, Associativity::Left))
+            }
+            Token::ThinArrow => Some((PREC_ARROW, Associativity::Right)),
+            Token::Plus | Token::Minus => Some((PREC_ADD_SUB, Associativity::Left)),
             Token::Eq
             | Token::Le
             | Token::Ge
             | Token::Neq
             | Token::Lt
             | Token::Gt
-            | Token::EqEq => Some((2, Associativity::None)),
+            | Token::EqEq => Some((PREC_COMPARISON, Associativity::None)),
             _ => None,
         }
     }
@@ -307,6 +323,10 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         self.apply_suffixes(term)
     }
 
+    fn builtin(&self, name: &str) -> &'bump Term<'bump> {
+        self.arena.builtin(self.pool.intern(name))
+    }
+
     fn apply_suffixes(
         &mut self,
         mut t: &'bump Term<'bump>,
@@ -361,12 +381,8 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     fn parse_expr_bp(&mut self, min_prec: u8) -> Result<&'bump Term<'bump>, ParseError> {
         let mut lhs = self.parse_head()?;
-        const APP_BP: u8 = u8::MAX;
 
-        loop {
-            let Some(tok) = self.peek_token() else {
-                break;
-            };
+        while let Some(tok) = self.peek_token() {
             if Self::is_expr_terminator(tok.clone()) {
                 break;
             }
@@ -398,7 +414,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
                 continue;
             }
 
-            if APP_BP >= min_prec && Self::is_atom_start(&tok) {
+            if min_prec <= PREC_APP && Self::is_atom_start(&tok) {
                 match self.parse_head() {
                     Ok(arg) => {
                         lhs = self.arena.app(lhs, arg);
@@ -447,31 +463,31 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             }
             Some(Token::AndIntro) => {
                 self.advance();
-                Ok(self.arena.builtin(self.pool.intern("∧-intro")))
+                Ok(self.builtin(AND_INTRO))
             }
             Some(Token::AndElimLeft) => {
                 self.advance();
-                Ok(self.arena.builtin(self.pool.intern("∧-elim-left")))
+                Ok(self.builtin(AND_ELIM_LEFT))
             }
             Some(Token::And) => {
                 self.advance();
-                Ok(self.arena.builtin(self.pool.intern("and")))
+                Ok(self.builtin(BUILTIN_AND))
             }
             Some(Token::Or) => {
                 self.advance();
-                Ok(self.arena.builtin(self.pool.intern("or")))
+                Ok(self.builtin(BUILTIN_OR))
             }
             Some(Token::Not) => {
                 self.advance();
-                Ok(self.arena.builtin(self.pool.intern("not")))
+                Ok(self.builtin(BUILTIN_NOT))
             }
             Some(Token::Implies) => {
                 self.advance();
-                Ok(self.arena.builtin(self.pool.intern("implies")))
+                Ok(self.builtin(BUILTIN_IMPLIES))
             }
             Some(Token::KwTheorem) => {
                 self.advance();
-                Ok(self.arena.builtin(self.pool.intern("theorem")))
+                Ok(self.builtin(BUILTIN_THEOREM))
             }
             Some(Token::KwExact) | Some(Token::KwApply) | Some(Token::KwIntro)
             | Some(Token::KwHave) => self.parse_var(),
@@ -513,7 +529,12 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     fn parse_var(&mut self) -> Result<&'bump Term<'bump>, ParseError> {
         let name = self.parse_decl_ident()?;
-        if KEYWORDS.contains(&name) && !matches!(name, "data" | "prop" | "theorem" | "proof") {
+        if KEYWORDS.contains(&name)
+            && !matches!(
+                name,
+                BUILTIN_DATA | BUILTIN_PROP | BUILTIN_THEOREM | BUILTIN_PROOF
+            )
+        {
             Err(ParseError {
                 message: format!("keyword '{}' cannot be used as identifier", name),
                 span: self.current_span(),
@@ -552,19 +573,19 @@ impl<'a, 'bump> Parser<'a, 'bump> {
             }
             Some((Token::KwExact, _)) => {
                 self.advance();
-                Ok(self.pool.intern("exact"))
+                Ok(self.pool.intern(TACTIC_EXACT))
             }
             Some((Token::KwApply, _)) => {
                 self.advance();
-                Ok(self.pool.intern("apply"))
+                Ok(self.pool.intern(TACTIC_APPLY))
             }
             Some((Token::KwIntro, _)) => {
                 self.advance();
-                Ok(self.pool.intern("intro"))
+                Ok(self.pool.intern(TACTIC_INTRO))
             }
             Some((Token::KwHave, _)) => {
                 self.advance();
-                Ok(self.pool.intern("have"))
+                Ok(self.pool.intern(TACTIC_HAVE))
             }
             Some((t, span)) => Err(ParseError {
                 message: format!("expected identifier, found {:?}", t),
@@ -609,7 +630,7 @@ impl<'a, 'bump> Parser<'a, 'bump> {
         let func_body = params
             .iter()
             .rfold(body, |b, &(pn, _)| self.arena.named_lam(pn, b));
-        let default = self.arena.builtin(self.pool.intern("data"));
+        let default = self.builtin(BUILTIN_DATA);
         let func_constraint = params.iter().rfold(default, |b, &(pn, mc)| {
             self.arena.pi(pn, mc.unwrap_or(default), b)
         });

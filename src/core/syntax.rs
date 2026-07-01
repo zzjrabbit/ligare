@@ -11,6 +11,13 @@ pub type MatchBranch<'bump> = (
     &'bump Term<'bump>,
 );
 
+/// A parser-level match branch: (variant_name, [(bind_name, fallback_type)], body).
+pub type NamedMatchBranch<'bump> = (
+    Name<'bump>,
+    &'bump [(Name<'bump>, &'bump Term<'bump>)],
+    &'bump Term<'bump>,
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Universe {
     UData,
@@ -118,8 +125,10 @@ pub enum Term<'bump> {
     Universe(Universe),
     /// Language builtins (int, bool, str, data, prop, theorem, proof, and, or, not, implies).
     Builtin(Name<'bump>),
-    /// User-defined identifier (functions, types, constructors) — resolved away by the compiler.
+    /// Parser-level identifier, resolved by desugar to either a local `Var` or a free `Global`.
     Named(Name<'bump>),
+    /// Desugared free symbol (top-level definitions, constructors, projectors).
+    Global(Name<'bump>),
     Pi(Name<'bump>, &'bump Term<'bump>, &'bump Term<'bump>),
     Let(
         Name<'bump>,
@@ -142,6 +151,8 @@ pub enum Term<'bump> {
     Variant(Name<'bump>, usize, &'bump [&'bump Term<'bump>]),
     /// Pattern match elimination (in `data`): (scrutinee, [(var_idx, [(bind_name, bind_type)], body)])
     Match(&'bump Term<'bump>, &'bump [MatchBranch<'bump>]),
+    /// Parser-level pattern match before constructor names are resolved.
+    NamedMatch(&'bump Term<'bump>, &'bump [NamedMatchBranch<'bump>]),
     /// Struct type definition (in `prop`): (name, [(field_name, constraint)])
     StructDef(Name<'bump>, &'bump [(Name<'bump>, &'bump Term<'bump>)]),
     /// Struct value construction (in `data`): (struct_name, field_values in order)

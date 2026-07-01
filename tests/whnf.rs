@@ -378,7 +378,7 @@ fn recursive_call_partial_reduction() {
 
     fn contains_self_ref(t: &Term<'_>) -> bool {
         match t {
-            Term::Builtin(n) | Term::Named(n) if *n == "fib" => true,
+            Term::Builtin(n) | Term::Global(n) if *n == "fib" => true,
             Term::App(f, a) => contains_self_ref(f) || contains_self_ref(a),
             _ => false,
         }

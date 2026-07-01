@@ -172,7 +172,8 @@ impl NameResolver {
             .collect()
     }
 
-    /// Recursively walk a term looking for `Builtin(name)` / `Named(name)`
+    /// Recursively walk a desugared term looking for global symbols that
+    /// match known function definitions.
     /// nodes that match known function definitions.
     pub fn collect_names_in_term(
         &self,
@@ -181,7 +182,7 @@ impl NameResolver {
         called: &mut HashSet<String>,
     ) {
         match term {
-            Term::Builtin(name) | Term::Named(name) => {
+            Term::Builtin(name) | Term::Global(name) => {
                 if def_names.contains(name) {
                     called.insert(name.to_string());
                 }
@@ -190,7 +191,7 @@ impl NameResolver {
                 self.collect_names_in_term(f, def_names, called);
                 self.collect_names_in_term(a, def_names, called);
             }
-            Term::Lam(body) | Term::NamedLam(_, body) => {
+            Term::Lam(body) => {
                 self.collect_names_in_term(body, def_names, called);
             }
             Term::Pi(_, a, b) => {
@@ -221,6 +222,9 @@ impl NameResolver {
                     }
                     self.collect_names_in_term(body, def_names, called);
                 }
+            }
+            Term::Named(_) | Term::NamedLam(..) | Term::NamedMatch(..) => {
+                panic!("parser-level term reached C name collection before desugaring")
             }
             Term::StructCons(_, field_values) => {
                 for v in *field_values {

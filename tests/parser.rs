@@ -240,7 +240,7 @@ fn dependent_arrow_type() {
 #[test]
 fn unbound_name_becomes_builtin() {
     let (b, arena) = a();
-    assert_eq!(*parse("foo", b, &arena), *arena.named(s(&arena, "foo")));
+    assert_eq!(*parse("foo", b, &arena), *arena.global(s(&arena, "foo")));
 }
 
 #[test]
@@ -280,12 +280,16 @@ fn def_refinement() {
     let refine_term = arena.refine(
         s(&arena, "x"),
         arena.builtin(s(&arena, "int")),
-        bin(&arena, PrimOp::Ge, arena.ref_param(), arena.lit_int(0)),
+        bin(
+            &arena,
+            PrimOp::Ge,
+            arena.named(s(&arena, "x")),
+            arena.lit_int(0),
+        ),
     );
-    let expected_body = arena.annot(refine_term, arena.builtin(s(&arena, "data")));
     assert_eq!(params, &[]);
     assert_eq!(m_ret, None);
-    assert_eq!(body, expected_body);
+    assert_eq!(body, refine_term);
 }
 
 #[test]
@@ -574,8 +578,7 @@ fn def_simple() {
     assert_eq!(name, "x");
     assert_eq!(params, &[]);
     assert_eq!(m_ret, Some(arena.builtin(s(&arena, "int"))));
-    let expected_body = arena.annot(arena.lit_int(5), arena.builtin(s(&arena, "int")));
-    assert_eq!(body, expected_body);
+    assert_eq!(body, arena.lit_int(5));
 }
 
 #[test]
@@ -585,18 +588,12 @@ fn def_with_params() {
     assert!(result.is_ok());
     let (name, params, m_ret, body) = result.unwrap();
     assert_eq!(name, "add");
-    let inner = bin(&arena, PrimOp::Add, arena.var(1), arena.var(0));
-    let lam_body = arena.lam(arena.lam(inner));
-    let ty = arena.pi(
-        s(&arena, "a"),
-        arena.builtin(s(&arena, "int")),
-        arena.pi(
-            s(&arena, "b"),
-            arena.builtin(s(&arena, "int")),
-            arena.builtin(s(&arena, "int")),
-        ),
+    let expected_body = bin(
+        &arena,
+        PrimOp::Add,
+        arena.named(s(&arena, "a")),
+        arena.named(s(&arena, "b")),
     );
-    let expected_body = arena.annot(lam_body, ty);
     let pt = Some(arena.builtin(s(&arena, "int")) as &Term<'_>);
     let expected_params: &[(&str, Option<&Term>)] =
         arena.alloc_slice(&[(s(&arena, "a"), pt), (s(&arena, "b"), pt)]);
@@ -614,8 +611,7 @@ fn def_no_ret() {
     assert_eq!(name, "x");
     assert_eq!(params, &[]);
     assert_eq!(m_ret, None);
-    let expected_body = arena.annot(arena.lit_int(5), arena.builtin(s(&arena, "data")));
-    assert_eq!(body, expected_body);
+    assert_eq!(body, arena.lit_int(5));
 }
 
 // ── Binary operator tests (regression for parse_app_generic hijacking infix ops) ──
@@ -701,7 +697,7 @@ fn binary_sub_in_application() {
     assert_eq!(
         *parse("\\n. f (n - 1)", b, &arena),
         *arena.lam(arena.app(
-            arena.named(s(&arena, "f")),
+            arena.global(s(&arena, "f")),
             bin(&arena, PrimOp::Sub, arena.var(0), arena.lit_int(1))
         ))
     );
@@ -771,14 +767,12 @@ fn def_with_binary_sub_in_body() {
     assert!(result.is_ok());
     let (name, params, m_ret, body) = result.unwrap();
     assert_eq!(name, "dec");
-    let inner = bin(&arena, PrimOp::Sub, arena.var(0), arena.lit_int(1));
-    let lam_body = arena.lam(inner);
-    let ty = arena.pi(
-        s(&arena, "n"),
-        arena.builtin(s(&arena, "int")),
-        arena.builtin(s(&arena, "int")),
+    let expected_body = bin(
+        &arena,
+        PrimOp::Sub,
+        arena.named(s(&arena, "n")),
+        arena.lit_int(1),
     );
-    let expected_body = arena.annot(lam_body, ty);
     let pt = Some(arena.builtin(s(&arena, "int")) as &Term<'_>);
     let expected_params: &[(&str, Option<&Term>)] = arena.alloc_slice(&[(s(&arena, "n"), pt)]);
     assert_eq!(params, expected_params);
@@ -811,7 +805,7 @@ fn fib_def_structure_matches_expected() {
     let (name, params, m_ret, body) = result.unwrap();
     assert_eq!(name, "fib");
 
-    let n = arena.var(0);
+    let n = arena.named(s(&arena, "n"));
     let cond = bin(&arena, PrimOp::Lt, n, arena.lit_int(2));
     let then_branch = n;
     let rec_call_1 = arena.app(
@@ -824,13 +818,7 @@ fn fib_def_structure_matches_expected() {
     );
     let else_branch = bin(&arena, PrimOp::Add, rec_call_1, rec_call_2);
     let inner_body = arena.if_then_else(cond, then_branch, else_branch);
-    let lam_body = arena.lam(inner_body);
-    let ty = arena.pi(
-        s(&arena, "n"),
-        arena.builtin(s(&arena, "int")),
-        arena.builtin(s(&arena, "int")),
-    );
-    let expected_body = arena.annot(lam_body, ty);
+    let expected_body = inner_body;
 
     let pt = Some(arena.builtin(s(&arena, "int")) as &Term<'_>);
     let expected_params: &[(&str, Option<&Term>)] = arena.alloc_slice(&[(s(&arena, "n"), pt)]);

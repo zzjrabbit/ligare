@@ -164,7 +164,7 @@ impl TypeAnalyzer {
     /// Recursively collect user-defined type names from a constraint term.
     fn collect_type_refs(&self, t: &Term<'_>, deps: &mut HashSet<String>) {
         match t {
-            Term::Builtin(name) | Term::Named(name) => {
+            Term::Builtin(name) | Term::Global(name) => {
                 let s = name.to_string();
                 if self.union_names.contains(&s) || self.struct_names.contains(&s) {
                     deps.insert(s);
@@ -200,7 +200,7 @@ impl TypeAnalyzer {
                 out.push_str("        struct { ");
                 for (fname, fty) in fields.iter() {
                     let is_self_ref =
-                        matches!(fty, Term::Builtin(tn) | Term::Named(tn) if *tn == name);
+                        matches!(fty, Term::Builtin(tn) | Term::Global(tn) if *tn == name);
                     if is_self_ref {
                         out.push_str(&format!("struct {}* {}; ", name, fname));
                     } else {

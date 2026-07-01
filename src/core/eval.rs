@@ -90,8 +90,9 @@ impl<'bump> Evaluator<'bump> {
             | Term::PrimOp(_)
             | Term::Universe(_)
             | Term::Builtin(_)
-            | Term::Named(_)
-            | Term::NamedLam(_, _) => Ok(t),
+            | Term::Global(_) => Ok(t),
+            Term::Named(_) => Err("Named identifier reached eval before desugaring".into()),
+            Term::NamedLam(_, _) => Err("NamedLam reached eval before desugaring".into()),
             Term::UnionDef(..) => Ok(t),
             Term::StructDef(..) => Ok(t),
             Term::StructCons(name, field_values) => {
@@ -143,6 +144,7 @@ impl<'bump> Evaluator<'bump> {
                     .collect();
                 Ok(self.arena.match_(s, self.arena.alloc_slice(&bs)))
             }
+            Term::NamedMatch(..) => Err("NamedMatch reached eval before desugaring".into()),
         }
     }
 
@@ -187,7 +189,7 @@ impl<'bump> Evaluator<'bump> {
     ) -> &'bump Term<'bump> {
         if let Some(name) = self.self_name {
             self.arena.map(t, &|node| {
-                if let Term::Builtin(n) | Term::Named(n) = node
+                if let Term::Builtin(n) | Term::Global(n) = node
                     && *n == name
                 {
                     Some(self_term)

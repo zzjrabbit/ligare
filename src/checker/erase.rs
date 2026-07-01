@@ -55,21 +55,26 @@ impl<'bump> Eraser<'bump> {
             Term::Refine(_, parent, _pred) => parent,
             Term::Universe(Universe::UData) => t,
             Term::Universe(_) => self.unit(),
-            Term::Builtin(_) | Term::Named(_) => {
+            Term::Builtin(_) | Term::Global(_) => {
                 if self.semantics().erase_policy(t) == ErasePolicy::KeepData {
                     t
                 } else {
                     self.unit()
                 }
             }
+            Term::Named(_) => {
+                panic!("Named identifier reached erasure before desugaring")
+            }
             Term::LitInt(_)
             | Term::LitBool(_)
             | Term::LitStr(_)
             | Term::Lam(_)
-            | Term::NamedLam(_, _)
             | Term::PrimOp(_)
             | Term::RefParam
             | Term::Var(_) => t,
+            Term::NamedLam(_, _) => {
+                panic!("NamedLam reached erasure before desugaring")
+            }
             Term::UnionDef(..) => self.unit(),
             Term::StructDef(..) => self.unit(),
             Term::StructCons(name, field_values) => {
@@ -91,6 +96,9 @@ impl<'bump> Eraser<'bump> {
                     })
                     .collect();
                 self.arena.match_(s, self.arena.alloc_slice(&bs))
+            }
+            Term::NamedMatch(..) => {
+                panic!("NamedMatch reached erasure before desugaring")
             }
         }
     }

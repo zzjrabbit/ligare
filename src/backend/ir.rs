@@ -31,6 +31,14 @@ impl CType {
             CType::Struct(name) => name.clone(),
         }
     }
+
+    pub fn c_default_value(&self) -> String {
+        match self {
+            CType::Int64 => "0".into(),
+            CType::Str => "NULL".into(),
+            CType::Union(name) | CType::Struct(name) => format!("({}){{0}}", name),
+        }
+    }
 }
 
 /// Erased C signature of a named function.
@@ -69,20 +77,10 @@ impl FunSig {
                 constraint_to_ctype(c, union_names, struct_names)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let param_names = data_params
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<Vec<_>>();
         let ret_body = peel_lams(body, params.len());
         let ret_type = match m_ret {
             Some(t) if !is_meta_constraint(t) => constraint_to_ctype(t, union_names, struct_names)?,
-            _ => infer_ret_ctype(
-                ret_body,
-                &param_types,
-                &param_names,
-                union_names,
-                struct_names,
-            )?,
+            _ => infer_ret_ctype(ret_body, &param_types, union_names, struct_names)?,
         };
         Ok(FunSig {
             param_types,
@@ -97,7 +95,6 @@ impl FunSig {
 fn infer_ret_ctype(
     body: &Term<'_>,
     param_types: &[CType],
-    param_names: &[&str],
     union_names: &HashSet<String>,
     struct_names: &HashSet<String>,
 ) -> Result<CType, Diagnostic> {
@@ -107,25 +104,14 @@ fn infer_ret_ctype(
                 "Cannot infer C return type: variable index {i} has no parameter type"
             ))
         }),
-        Term::Named(name) => param_names
-            .iter()
-            .position(|n| *n == *name)
-            .and_then(|i| param_types.get(i).cloned())
-            .ok_or_else(|| {
-                Diagnostic::new(format!(
-                    "Cannot infer C return type for unbound name `{name}`; add an explicit return type"
-                ))
-            }),
         Term::LitInt(_) | Term::LitBool(_) => Ok(CType::Int64),
         Term::LitStr(_) => Ok(CType::Str),
         Term::Annot(inner, c) => constraint_to_ctype(c, union_names, struct_names)
-            .or_else(|_| infer_ret_ctype(inner, param_types, param_names, union_names, struct_names)),
+            .or_else(|_| infer_ret_ctype(inner, param_types, union_names, struct_names)),
         Term::App(f, _) if is_primop_app(f) => Ok(CType::Int64),
         Term::IfThenElse(_, then_term, else_term) => {
-            let then_ty =
-                infer_ret_ctype(then_term, param_types, param_names, union_names, struct_names)?;
-            let else_ty =
-                infer_ret_ctype(else_term, param_types, param_names, union_names, struct_names)?;
+            let then_ty = infer_ret_ctype(then_term, param_types, union_names, struct_names)?;
+            let else_ty = infer_ret_ctype(else_term, param_types, union_names, struct_names)?;
             if then_ty == else_ty {
                 Ok(then_ty)
             } else {
@@ -135,9 +121,12 @@ fn infer_ret_ctype(
                 )))
             }
         }
-        Term::Let(_, _, body, _) | Term::Lam(body) | Term::NamedLam(_, body) => {
-            infer_ret_ctype(body, param_types, param_names, union_names, struct_names)
+        Term::Let(_, _, body, _) | Term::Lam(body) => {
+            infer_ret_ctype(body, param_types, union_names, struct_names)
         }
+        Term::Named(_) | Term::NamedLam(..) | Term::NamedMatch(..) => Err(Diagnostic::new(
+            "parser-level term reached C signature inference before desugaring",
+        )),
         _ => Err(Diagnostic::new(format!(
             "Cannot infer C return type for unannotated body {:?}; add an explicit return type",
             body
@@ -192,13 +181,13 @@ pub fn constraint_to_ctype(
     match t {
         Term::Builtin(name) if *name == "int" || *name == "bool" => Ok(CType::Int64),
         Term::Builtin(name) if *name == "str" => Ok(CType::Str),
-        Term::Builtin(name) | Term::Named(name) if struct_names.contains(&name.to_string()) => {
+        Term::Builtin(name) | Term::Global(name) if struct_names.contains(&name.to_string()) => {
             Ok(CType::Struct(name.to_string()))
         }
-        Term::Builtin(name) | Term::Named(name) if union_names.contains(&name.to_string()) => {
+        Term::Builtin(name) | Term::Global(name) if union_names.contains(&name.to_string()) => {
             Ok(CType::Union(name.to_string()))
         }
-        Term::Builtin(name) | Term::Named(name) => Err(Diagnostic::new(format!(
+        Term::Builtin(name) | Term::Global(name) => Err(Diagnostic::new(format!(
             "Cannot map unresolved constraint `{name}` to a C type"
         ))),
         Term::Refine(_, parent, _) => constraint_to_ctype(parent, union_names, struct_names),
@@ -214,7 +203,7 @@ pub fn constraint_to_ctype(
                     return Ok(CType::Struct(name));
                 }
             }
-            if let Term::Builtin(name) | Term::Named(name) = *head {
+            if let Term::Builtin(name) | Term::Global(name) = *head {
                 if union_names.contains(&name.to_string()) {
                     return Ok(CType::Union(name.to_string()));
                 }
@@ -239,7 +228,7 @@ fn type_app_name(t: &Term<'_>) -> Option<String> {
     if args.is_empty() {
         return None;
     }
-    let (Term::Builtin(base) | Term::Named(base)) = head else {
+    let (Term::Builtin(base) | Term::Global(base)) = head else {
         return None;
     };
     Some(format!(
@@ -265,7 +254,7 @@ fn collect_type_app<'a>(t: &'a Term<'a>) -> (&'a Term<'a>, Vec<&'a Term<'a>>) {
 
 fn type_arg_slug(t: &Term<'_>) -> String {
     match t {
-        Term::Builtin(n) | Term::Named(n) => sanitize_type_name(n),
+        Term::Builtin(n) | Term::Global(n) => sanitize_type_name(n),
         Term::App(_, _) => type_app_name(t).unwrap_or_else(|| "unknown".into()),
         _ => "unknown".into(),
     }

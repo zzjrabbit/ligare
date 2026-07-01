@@ -74,3 +74,9 @@ impl EmitCtx {
         self.clone()
     }
 }
+
+impl Default for EmitCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
