@@ -185,9 +185,9 @@ impl NameResolver {
     }
 
     pub fn is_extern_name<'bump>(&self, name: &str, raw_defs: &[TopLevel<'bump>]) -> bool {
-        raw_defs.iter().any(|top| {
-            matches!(top, TopLevel::TLExternDef(extern_name, ..) if *extern_name == name)
-        })
+        raw_defs.iter().any(
+            |top| matches!(top, TopLevel::TLExternDef(extern_name, ..) if *extern_name == name),
+        )
     }
 
     /// Recursively walk a desugared term looking for global symbols that

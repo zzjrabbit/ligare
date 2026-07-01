@@ -97,7 +97,7 @@ fn do_block_checks_in_effect_function() {
         compiler.process_file_str(
             "def read_int : IO int := 1\n\
              def write_int (x : int) : IO Unit := Unit\n\
-             def main : IO Unit := do { x <- read_int; let y := x + 1; write_int y; Unit }\n"
+             def main : IO Unit := do\n  x <- read_int\n  let y = x + 1\n  write_int y\n  Unit\n"
         ),
         Ok(())
     );
@@ -110,7 +110,7 @@ fn do_block_is_rejected_in_pure_function() {
     let err = compiler
         .process_file_str(
             "def read_int : IO int := 1\n\
-             def bad : int := do { x <- read_int; x }\n",
+             def bad : int := do\n  x <- read_int\n  x\n",
         )
         .unwrap_err()
         .to_string();
@@ -125,7 +125,7 @@ fn do_bind_rhs_must_have_effect_constraint() {
     let (b, arena) = a();
     let mut compiler = Compiler::new(b, &arena);
     let err = compiler
-        .process_file_str("def bad : IO Unit := do { x <- 1; Unit }\n")
+        .process_file_str("def bad : IO Unit := do\n  x <- 1\n  Unit\n")
         .unwrap_err()
         .to_string();
     assert!(
@@ -188,7 +188,7 @@ fn io_extern_can_be_unwrapped_in_do_block() {
     assert_eq!(
         compiler.process_file_str(
             "extern def c_read : IO int\n\
-             def main : IO int := do { x <- unsafe { c_read }; x }\n",
+             def main : IO int := do\n  x <- unsafe { c_read }\n  x\n",
         ),
         Ok(())
     );

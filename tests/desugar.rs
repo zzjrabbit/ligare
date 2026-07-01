@@ -118,7 +118,7 @@ fn func_no_constraint() {
 fn do_block_desugars_to_manual_let_chain() {
     let (b, arena) = a();
     let raw = parse_expr_top(
-        "do { x <- read_int; let y := x + 1; write_int y; Unit }",
+        "do\n  x <- read_int\n  let y = x + 1\n  write_int y\n  Unit",
         b,
         &arena,
     )

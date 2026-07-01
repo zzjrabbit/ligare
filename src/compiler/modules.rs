@@ -614,9 +614,9 @@ impl<'bump> Compiler<'bump> {
                     .collect::<Vec<_>>();
                 self.arena.do_(self.arena.alloc_slice(&stmts))
             }
-            Term::Unsafe(inner) => self.arena.unsafe_(self.rewrite_module_term(
-                inner, imports, own_names, scope,
-            )),
+            Term::Unsafe(inner) => self
+                .arena
+                .unsafe_(self.rewrite_module_term(inner, imports, own_names, scope)),
             _ => term,
         }
     }

@@ -78,6 +78,7 @@ BinOp       ::= "*" | "/" | "%"          (* precedence 4, left-assoc  *)
 
 TermApp     ::= LetExpr
               | FuncExpr
+              | DoExpr
               | DepArrow
               | Term { Term }
 
@@ -109,6 +110,22 @@ Lambda      ::= ("\" | "λ") Ident "." Expr
 (* ── Let expressions ────────────────────────────────────────────── *)
 
 LetExpr     ::= "let" Ident [ ":" Expr ] [ "by" Tactics ] ":=" Expr "in" Expr
+
+(* ── Do expressions ─────────────────────────────────────────────── *)
+
+DoExpr      ::= "do" LayoutDoBlock
+              | "do" "{" DoStmt { ";" DoStmt } "}"
+
+LayoutDoBlock ::= Newline IndentedDoStmt { Newline IndentedDoStmt }
+
+DoStmt      ::= Ident "<-" Expr
+              | "let" Ident [ ":" Expr ] ("=" | ":=") Expr
+              | Expr
+
+IndentedDoStmt starts in the same indentation column as the first
+statement after `do`.  A less-indented following token ends the block;
+a more-indented following line is parsed as a continuation of the
+previous statement.
 
 (* ── Func expressions ───────────────────────────────────────────── *)
 

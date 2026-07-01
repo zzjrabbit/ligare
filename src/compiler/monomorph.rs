@@ -659,8 +659,7 @@ impl<'bump> Compiler<'bump> {
                 let sig = FunSig::from_func(params, *ret, body, &union_names, &struct_names)?;
                 fun_sigs.push((*name, sig));
             } else if let TopLevel::TLExternDef(name, params, ret, _) = top {
-                let sig =
-                    FunSig::from_extern(params, ret, &union_names, &struct_names)?;
+                let sig = FunSig::from_extern(params, ret, &union_names, &struct_names)?;
                 fun_sigs.push((*name, sig));
             }
         }

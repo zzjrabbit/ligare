@@ -92,6 +92,34 @@ fn do_block_parses_statements() {
 }
 
 #[test]
+fn do_block_parses_haskell_layout_statements() {
+    let (b, arena) = a();
+    let term = parse_expr_top("do\n  x <- read\n  let y : int = x + 1\n  y", b, &arena).unwrap();
+    match term {
+        Term::Do(stmts) => {
+            assert_eq!(stmts.len(), 3);
+            assert!(matches!(stmts[0], DoStmt::Bind(name, _) if name == "x"));
+            assert!(matches!(stmts[1], DoStmt::Let(name, _, Some(_)) if name == "y"));
+            assert!(matches!(stmts[2], DoStmt::Expr(_)));
+        }
+        other => panic!("expected do block, got {other:?}"),
+    }
+}
+
+#[test]
+fn do_block_allows_indented_continuation_lines() {
+    let (b, arena) = a();
+    let term = parse_expr_top("do\n  x <- read\n  let y = x\n        + 1\n  y", b, &arena).unwrap();
+    match term {
+        Term::Do(stmts) => {
+            assert_eq!(stmts.len(), 3);
+            assert!(matches!(stmts[1], DoStmt::Let(name, _, None) if name == "y"));
+        }
+        other => panic!("expected do block, got {other:?}"),
+    }
+}
+
+#[test]
 fn let_with_constraint() {
     let (b, arena) = a();
     assert_eq!(

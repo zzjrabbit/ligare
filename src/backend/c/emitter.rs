@@ -232,10 +232,7 @@ impl<'a> CEmitter<'a> {
             .emit_type_declarations(&mut out, struct_types, union_types)?;
 
         for (name, sig) in self.fun_sigs {
-            if self
-                .name_resolver
-                .is_extern_name(name, raw_defs)
-            {
+            if self.name_resolver.is_extern_name(name, raw_defs) {
                 let params = sig
                     .param_types
                     .iter()
@@ -277,8 +274,7 @@ impl<'a> CEmitter<'a> {
 
         for raw_def in raw_defs {
             if let TopLevel::TLDef(name, params, _m_ret, body, _) = raw_def {
-                if *name == "main"
-                    || params.is_empty() && self.name_resolver.count_lams(body) == 0
+                if *name == "main" || params.is_empty() && self.name_resolver.count_lams(body) == 0
                 {
                     continue;
                 }

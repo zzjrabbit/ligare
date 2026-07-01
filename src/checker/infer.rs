@@ -387,10 +387,9 @@ impl<'bump> TypeChecker<'bump> {
                 Ok(self.arena.builtin(sname))
             }
             Term::Unsafe(inner) => self.infer_binding_constraint(ctx, inner),
-            Term::Builtin(name) | Term::Global(name) if self.lookup_extern(name).is_some() => {
-                self.lookup_extern(name)
-                    .ok_or_else(|| diag!("missing external function signature: {}", name))
-            }
+            Term::Builtin(name) | Term::Global(name) if self.lookup_extern(name).is_some() => self
+                .lookup_extern(name)
+                .ok_or_else(|| diag!("missing external function signature: {}", name)),
             Term::StructProj(subject, idx) => {
                 self.infer_struct_projection_constraint(ctx, subject, *idx)
             }
@@ -435,10 +434,9 @@ impl<'bump> TypeChecker<'bump> {
             Term::Builtin(name) | Term::Global(name) if self.is_struct_projector_name(name) => {
                 Err(diag!("unknown struct field projector: {}", name))
             }
-            Term::Builtin(name) | Term::Global(name) if self.lookup_extern(name).is_some() => {
-                self.lookup_extern(name)
-                    .ok_or_else(|| diag!("missing external function signature: {}", name))
-            }
+            Term::Builtin(name) | Term::Global(name) if self.lookup_extern(name).is_some() => self
+                .lookup_extern(name)
+                .ok_or_else(|| diag!("missing external function signature: {}", name)),
             _ => match self.infer_pi_constraint(ctx, f)? {
                 Some(ty) => match self.evaluator.whnf(ty)? {
                     Term::Pi(_, _, codomain) => Ok(codomain),

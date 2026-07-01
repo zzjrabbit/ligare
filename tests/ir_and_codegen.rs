@@ -413,7 +413,7 @@ fn codegen_io_extern_uses_inner_c_repr() {
     compiler
         .collect_file_str(
             "extern def c_read : IO int\n\
-             def main : IO int := do { x <- unsafe { c_read }; x }\n\
+             def main : IO int := do\n  x <- unsafe { c_read }\n  x\n\
              main\n",
         )
         .unwrap();

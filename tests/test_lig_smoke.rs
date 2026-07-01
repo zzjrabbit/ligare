@@ -47,8 +47,14 @@ fn ffi_fixture_compiles_and_runs_with_expected_output() {
         generated.contains("extern int64_t ffi_read();"),
         "missing ffi_read prototype:\n{generated}"
     );
-    assert!(generated.contains("ffi_abs("), "missing direct ffi_abs call");
-    assert!(generated.contains("ffi_read()"), "missing direct ffi_read call");
+    assert!(
+        generated.contains("ffi_abs("),
+        "missing direct ffi_abs call"
+    );
+    assert!(
+        generated.contains("ffi_read()"),
+        "missing direct ffi_read call"
+    );
     assert!(
         !generated.contains("int64_t ffi_abs(int64_t) {"),
         "extern should not generate wrapper definition:\n{generated}"
@@ -118,7 +124,10 @@ fn ffi_puts_main_prints_from_generated_executable() {
         codegen.struct_types,
     )
     .expect("puts main should emit final C");
-    assert!(generated.contains("extern int puts(const char*);"), "{generated}");
+    assert!(
+        generated.contains("extern int puts(const char*);"),
+        "{generated}"
+    );
     assert!(
         !generated.contains("const int main"),
         "Ligare main must not be emitted as a global const:\n{generated}"

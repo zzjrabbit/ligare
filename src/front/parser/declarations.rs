@@ -13,11 +13,14 @@ impl<'a, 'bump> Parser<'a, 'bump> {
 
     pub(super) fn parse_extern_def(
         &mut self,
-    ) -> Result<(
-        Name<'bump>,
-        &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
-        &'bump Term<'bump>,
-    ), ParseError> {
+    ) -> Result<
+        (
+            Name<'bump>,
+            &'bump [(Name<'bump>, Option<&'bump Term<'bump>>)],
+            &'bump Term<'bump>,
+        ),
+        ParseError,
+    > {
         self.expect(&Token::KwDef)?;
         let name = self.parse_decl_ident()?;
         let params = self.parse_many_curried_params();

@@ -123,7 +123,7 @@ impl PrettyPrinter {
                         crate::core::syntax::DoStmt::Expr(expr) => Self::pretty(expr),
                     })
                     .collect();
-                format!("do {{ {} }}", ss.join("; "))
+                format!("do\n  {}", ss.join("\n  "))
             }
             Term::Unsafe(inner) => format!("unsafe {{ {} }}", Self::pretty(inner)),
             Term::StructDef(name, fields) => {

@@ -346,9 +346,9 @@ impl<'arena, 'bump> Desugarer<'arena, 'bump> {
                 })?;
                 self.desugar_do(stmts, env, resolver, effect)?
             }
-            Term::Unsafe(inner) => self.arena.unsafe_(self.try_desugar_with_env(
-                inner, env, resolver, effect,
-            )?),
+            Term::Unsafe(inner) => self
+                .arena
+                .unsafe_(self.try_desugar_with_env(inner, env, resolver, effect)?),
 
             // ── Leaf / no-name-binding nodes ──
             Term::Var(_)

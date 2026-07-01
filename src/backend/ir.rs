@@ -232,7 +232,9 @@ pub fn constraint_to_ctype(
     struct_names: &HashSet<String>,
 ) -> Result<CType, Diagnostic> {
     match t {
-        Term::Builtin(name) if *name == "int" || *name == "i64" || *name == "bool" || *name == BUILTIN_UNIT => {
+        Term::Builtin(name)
+            if *name == "int" || *name == "i64" || *name == "bool" || *name == BUILTIN_UNIT =>
+        {
             Ok(CType::Int64)
         }
         Term::Builtin(name) if *name == "i8" => Ok(CType::Int8),
