@@ -5,6 +5,7 @@ use ligare::core::pool::TermArena;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -18,12 +19,21 @@ fn temp_project() -> PathBuf {
     dir
 }
 
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn write(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, content).unwrap();
+}
+
+fn write_std(root: &Path, rel: &str, content: &str) {
+    write(root, &format!("src/{rel}"), content);
 }
 
 fn collect(root: &Path) -> Result<Compiler<'static>, ligare::diagnostic::Diagnostic> {
@@ -44,6 +54,25 @@ fn assert_module_error(root: &Path, needle: &str) {
         "expected error containing `{needle}`, got `{}`",
         err.message
     );
+}
+
+fn with_ligare_std_path<T>(value: Option<String>, f: impl FnOnce() -> T) -> T {
+    let _guard = env_lock().lock().unwrap();
+    let old = std::env::var_os("LIGARE_STD_PATH");
+    unsafe {
+        match value {
+            Some(value) => std::env::set_var("LIGARE_STD_PATH", value),
+            None => std::env::remove_var("LIGARE_STD_PATH"),
+        }
+    }
+    let result = f();
+    unsafe {
+        match old {
+            Some(old) => std::env::set_var("LIGARE_STD_PATH", old),
+            None => std::env::remove_var("LIGARE_STD_PATH"),
+        }
+    }
+    result
 }
 
 #[test]
@@ -222,4 +251,127 @@ fn imported_module_must_be_declared_by_parent() {
         "use math::one\npub def main : IO Unit := let _ := one in Unit\n",
     );
     assert_module_error(&root, "not declared by parent module");
+}
+
+#[test]
+fn std_import_uses_ligare_std_path() {
+    let root = temp_project();
+    let std_root = root.join("custom_std");
+    write_std(&std_root, "lib.lig", "pub mod answer\n");
+    write_std(&std_root, "answer.lig", "pub def value : int := 41 + 1\n");
+    write(
+        &root,
+        "main.lig",
+        "use std::answer::value\npub def main : IO Unit := let _ := value in Unit\n",
+    );
+
+    let compiler = with_ligare_std_path(Some(std_root.to_string_lossy().into_owned()), || {
+        collect(&root)
+    })
+    .unwrap();
+
+    assert!(compiler.raw_defs().iter().any(|top| {
+        matches!(top, ligare::front::parser::TopLevel::TLDef(name, ..) if *name == "std::answer::value")
+    }));
+}
+
+#[test]
+fn std_import_reports_default_path_when_env_is_unset() {
+    let root = temp_project();
+    write(
+        &root,
+        "main.lig",
+        "use std::missing::value\npub def main : IO Unit := value\n",
+    );
+
+    let err = match with_ligare_std_path(None, || collect(&root)) {
+        Ok(_) => panic!("expected missing standard library module to fail"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("standard library module `std::missing` not found"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("/usr/lib/ligare/std"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("tried:"), "{}", err.message);
+}
+
+#[test]
+fn missing_std_module_lists_all_attempted_search_paths() {
+    let root = temp_project();
+    let first = root.join("first_std");
+    let second = root.join("second_std");
+    write_std(&first, "lib.lig", "pub mod missing\n");
+    write_std(&second, "lib.lig", "pub mod missing\n");
+    write(
+        &root,
+        "main.lig",
+        "use std::missing::value\npub def main : IO Unit := value\n",
+    );
+    let joined = std::env::join_paths([first.clone(), second.clone()]).unwrap();
+
+    let err = match with_ligare_std_path(Some(joined.to_string_lossy().into_owned()), || {
+        collect(&root)
+    }) {
+        Ok(_) => panic!("expected missing standard library module to fail"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.message
+            .contains("standard library module `std::missing` not found"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message
+            .contains(&first.join("src/missing.lig").display().to_string()),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message
+            .contains(&second.join("src/missing.lig").display().to_string()),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn std_path_searches_multiple_roots_in_order() {
+    let root = temp_project();
+    let first = root.join("first_std");
+    let second = root.join("second_std");
+    write_std(&first, "lib.lig", "pub mod answer\n");
+    write_std(&first, "answer.lig", "pub def value : int := 1\n");
+    write_std(&second, "lib.lig", "pub mod answer\n");
+    write_std(&second, "answer.lig", "pub def value : int := 2\n");
+    write(
+        &root,
+        "main.lig",
+        "use std::answer::value\npub def main : IO Unit := let _ := value in Unit\n",
+    );
+    let joined = std::env::join_paths([first, second]).unwrap();
+
+    let compiler = with_ligare_std_path(Some(joined.to_string_lossy().into_owned()), || {
+        collect(&root)
+    })
+    .unwrap();
+    let c = emit_c(
+        compiler.tops(),
+        compiler.raw_defs(),
+        compiler.fun_sigs(),
+        &compiler.union_types,
+        &compiler.struct_types,
+    )
+    .unwrap();
+
+    assert!(c.contains("const int64_t std_answer_value = 1;"), "{c}");
+    assert!(!c.contains("const int64_t std_answer_value = 2;"), "{c}");
 }

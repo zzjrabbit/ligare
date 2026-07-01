@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use bumpalo::Bump;
@@ -9,6 +10,10 @@ use crate::diagnostic::Diagnostic;
 use crate::front::parser::{TopLevel, UseTree, Visibility, parse_program};
 
 use super::{Compiler, read_source_file};
+
+const STANDARD_LIBRARY_PACKAGE: &str = "std";
+const STANDARD_LIBRARY_PATH_ENV: &str = "LIGARE_STD_PATH";
+const DEFAULT_STANDARD_LIBRARY_PATH: &str = "/usr/lib/ligare/std";
 
 #[derive(Clone, Debug, Default)]
 pub struct PackageModuleGraph {
@@ -135,6 +140,18 @@ impl ModuleId {
                 )));
             }
             return Ok(Self::package(&first, module_path));
+        }
+        if first == STANDARD_LIBRARY_PACKAGE {
+            if path.len() < 3 {
+                return Err(Diagnostic::new(
+                    "standard library use path must be `std::module::symbol`",
+                ));
+            }
+            let module_path = path[1..path.len() - 1]
+                .iter()
+                .map(|p| (*p).to_string())
+                .collect::<Vec<_>>();
+            return Ok(Self::package(STANDARD_LIBRARY_PACKAGE, module_path));
         }
         Ok(self.local_import_path(path))
     }
@@ -408,6 +425,12 @@ impl<'bump> Compiler<'bump> {
         parsed: &mut HashMap<ModuleId, ParsedModule<'bump>>,
     ) -> Result<(), Diagnostic> {
         if parsed.contains_key(module) {
+            return Ok(());
+        }
+
+        if is_standard_library_module(module, graph) && !module.path.is_empty() {
+            let (module_root, file) = module_file(root, module, graph)?;
+            self.load_module_as(&module_root, file, module.clone(), graph, parsed)?;
             return Ok(());
         }
 
@@ -1052,6 +1075,9 @@ fn module_file(
     module: &ModuleId,
     graph: &PackageModuleGraph,
 ) -> Result<(PathBuf, PathBuf), Diagnostic> {
+    if is_standard_library_module(module, graph) {
+        return standard_library_module_file(module);
+    }
     let module_root = if let Some(package) = &module.package {
         let info = graph.packages.get(package).ok_or_else(|| {
             Diagnostic::new(format!("package dependency `{package}` was not resolved"))
@@ -1065,6 +1091,114 @@ fn module_file(
     };
     let path = module_path(&module_root, module)?;
     Ok((module_root, path))
+}
+
+fn is_standard_library_module(module: &ModuleId, graph: &PackageModuleGraph) -> bool {
+    module.package.as_deref() == Some(STANDARD_LIBRARY_PACKAGE)
+        && !graph.packages.contains_key(STANDARD_LIBRARY_PACKAGE)
+}
+
+fn standard_library_module_file(module: &ModuleId) -> Result<(PathBuf, PathBuf), Diagnostic> {
+    let configured_roots = standard_library_search_roots();
+    let mut tried = Vec::new();
+    for configured_root in &configured_roots {
+        let module_root = standard_library_module_root(configured_root);
+        let candidates = standard_library_module_candidates(&module_root, module);
+        tried.extend(candidates.iter().cloned());
+        match existing_module_candidate(module, &candidates)? {
+            Some(path) => return Ok((module_root, path)),
+            None => continue,
+        }
+    }
+    Err(standard_library_not_found(
+        module,
+        &configured_roots,
+        &tried,
+    ))
+}
+
+fn standard_library_search_roots() -> Vec<PathBuf> {
+    standard_library_search_roots_from(std::env::var_os(STANDARD_LIBRARY_PATH_ENV).as_deref())
+}
+
+fn standard_library_search_roots_from(value: Option<&OsStr>) -> Vec<PathBuf> {
+    match value {
+        Some(value) if !value.is_empty() => {
+            let roots = std::env::split_paths(value)
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect::<Vec<_>>();
+            if roots.is_empty() {
+                vec![PathBuf::from(DEFAULT_STANDARD_LIBRARY_PATH)]
+            } else {
+                roots
+            }
+        }
+        _ => vec![PathBuf::from(DEFAULT_STANDARD_LIBRARY_PATH)],
+    }
+}
+
+fn standard_library_module_root(configured_root: &Path) -> PathBuf {
+    let src = configured_root.join("src");
+    if src.join("lib.lig").exists() {
+        src
+    } else {
+        configured_root.to_path_buf()
+    }
+}
+
+fn standard_library_module_candidates(root: &Path, module: &ModuleId) -> Vec<PathBuf> {
+    if module.path.is_empty() {
+        return vec![root.join("lib.lig"), root.join("mod.lig")];
+    }
+    let mut path = root.to_path_buf();
+    for part in &module.path {
+        path.push(part);
+    }
+    vec![path.with_extension("lig"), path.join("mod.lig")]
+}
+
+fn existing_module_candidate(
+    module: &ModuleId,
+    candidates: &[PathBuf],
+) -> Result<Option<PathBuf>, Diagnostic> {
+    let existing = candidates
+        .iter()
+        .filter(|path| path.exists())
+        .cloned()
+        .collect::<Vec<_>>();
+    match existing.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        [file, folder_mod, ..] => Err(Diagnostic::new(format!(
+            "ambiguous module `{}`: both `{}` and `{}` exist",
+            display_module(module),
+            file.display(),
+            folder_mod.display()
+        ))),
+    }
+}
+
+fn standard_library_not_found(
+    module: &ModuleId,
+    roots: &[PathBuf],
+    tried: &[PathBuf],
+) -> Diagnostic {
+    let roots = roots
+        .iter()
+        .map(|path| format!("  {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tried = tried
+        .iter()
+        .map(|path| format!("  {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Diagnostic::new(format!(
+        "standard library module `{}` not found\nsearched roots:\n{}\ntried:\n{}",
+        display_module(module),
+        roots,
+        tried
+    ))
 }
 
 fn module_path(root: &Path, module: &ModuleId) -> Result<PathBuf, Diagnostic> {
@@ -1100,5 +1234,30 @@ fn display_module(module: &ModuleId) -> String {
         format!("{package}::{path}")
     } else {
         path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_STANDARD_LIBRARY_PATH, standard_library_search_roots_from};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn unset_standard_library_path_uses_default_root() {
+        assert_eq!(
+            standard_library_search_roots_from(None),
+            vec![PathBuf::from(DEFAULT_STANDARD_LIBRARY_PATH)]
+        );
+    }
+
+    #[test]
+    fn standard_library_path_splits_multiple_roots() {
+        let joined = std::env::join_paths([PathBuf::from("/first"), PathBuf::from("/second")])
+            .unwrap_or_else(|_| OsString::from("/first:/second"));
+        assert_eq!(
+            standard_library_search_roots_from(Some(&joined)),
+            vec![PathBuf::from("/first"), PathBuf::from("/second")]
+        );
     }
 }

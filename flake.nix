@@ -33,6 +33,8 @@
             (rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
           ];
 
+          LIGARE_STD_PATH = "libs/std";
+
           CXXFLAGS_x86_64_unknown_linux_gnu = "-O2";
 
           # https://github.com/rust-lang/rust-bindgen#environment-variables

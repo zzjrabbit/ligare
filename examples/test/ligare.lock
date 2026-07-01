@@ -1,7 +1,0 @@
-[[dep]]
-name = "std"
-source = "../../libs/std"
-version = "local"
-commit = "9e8ee3a2df6ad69f5457cb1cd7b6db9eaa21c0cb"
-path = "examples/test/../../libs/std"
-
